@@ -70,8 +70,21 @@ Git innecesariamente.
   - `src/MeloNX/MeloNX/Info.plist` — esquemas `stikdebug`/`stikjit` añadidos
     a `LSApplicationQueriesSchemes` (sin eliminar `melonx`, mismo commit).
   - `src/MeloNX/MeloNX/App/Core/JIT/JITCoordinator.swift` (nuevo) — loop de
-    sondeo único y cancelable para el estado de JIT, todavía sin conectar
-    a ningún call site existente (ver `#jit` abajo).
+    sondeo único y cancelable para el estado de JIT. Ahora conectado a
+    `JITPopover` y `ContentView.checkJITAndRunGame()` (ver `#jit` abajo).
+    Añadido soporte para llamadas concurrentes (`pendingCompletions`): si
+    alguien llama `waitForJIT` mientras otro loop ya está en curso, se
+    encola en vez de perder su `completion`; `cancel()` no tumba el timer
+    si hay completions encoladas de otro llamador, para no dejarlas
+    colgadas para siempre.
+  - `src/MeloNX/MeloNX/App/UI/Main/Home/JITPopover/JITPopover.swift` — su
+    `Timer` manual (nunca invalidado salvo en éxito) se reemplaza por
+    `JITCoordinator.shared.waitForJIT(...)`, con `.onDisappear { cancel() }`
+    corrigiendo la fuga documentada arriba.
+  - `src/MeloNX/MeloNX/App/UI/Main/Home/ContentView.swift` —
+    `checkJITAndRunGame()` pierde su parámetro `attempt`/recursión manual;
+    usa `JITCoordinator.shared.waitForJIT(maxAttempts: 6, interval: 0.5)`
+    con el mismo tope de 6 intentos que tenía antes.
 
 ## Snapshot técnico en el SHA base
 
@@ -254,4 +267,5 @@ los migre, que se hace por separado para no mezclar "agregar la pieza" con
 | `chore: establish performance fork baseline` | `b4f2c9b30` | Este documento | Registrar la base exacta antes de tocar nada |
 | `fix(jit): modernize external StikDebug activation` | `f873baf4b` | `StikEnableJIT.swift`, `SettingsView.swift`, `Info.plist` | Condición TXM invertida (ver sección JIT arriba) + URL vía `URLComponents` + detección por `canOpenURL` en vez de SpringBoardServices privado |
 | `docs: correct the JIT-wait architectural claim...` | `f3f47d767` | `docs/PERFORMANCE_FORK.md` | Corrige el hallazgo erróneo de "JIT sin esperar"; documenta los problemas reales (polling duplicado, fuga de Timer en `JITPopover`, `JitStreamerEB` inactivo) |
-| `refactor(jit): add JIT coordinator foundation` | *(pendiente de build)* | `JITCoordinator.swift` (nuevo) | Pieza aditiva, sin call sites todavía: un solo loop de sondeo cancelable con tope opcional, reemplazando la futura migración de `JITPopover`/`checkJITAndRunGame` |
+| `refactor(jit): add JIT coordinator foundation` | `159ae9bb2` | `JITCoordinator.swift` (nuevo) | Pieza aditiva, sin call sites todavía: un solo loop de sondeo cancelable con tope opcional |
+| `refactor(jit): migrate JITPopover and checkJITAndRunGame onto JITCoordinator` | *(pendiente de build)* | `JITCoordinator.swift`, `JITPopover.swift`, `ContentView.swift` | Conecta los dos call sites; corrige la fuga de `Timer` de `JITPopover`; añade manejo de llamadores concurrentes (`pendingCompletions`) para no perder ni pisar completions entre los dos flujos |

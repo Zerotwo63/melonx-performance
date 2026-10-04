@@ -172,10 +172,12 @@ struct ContentView: View {
             }
     }
 
-    func checkJITAndRunGame(attempt: Int = 0) {
-        guard !gametorun.isEmpty, attempt < 6 else { return }
+    func checkJITAndRunGame() {
+        guard !gametorun.isEmpty else { return }
 
-        if isJITEnabled() {
+        JITCoordinator.shared.waitForJIT(maxAttempts: 6, interval: 0.5) { success in
+            guard success else { return }
+
             let shouldLaunch: Bool
             if let timeInterval = TimeInterval(gametorunDate) {
                 let savedDate = Date(timeIntervalSince1970: timeInterval)
@@ -192,10 +194,6 @@ struct ContentView: View {
 
             gametorunDate = ""
             gametorun = ""
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                checkJITAndRunGame(attempt: attempt + 1)
-            }
         }
     }
 

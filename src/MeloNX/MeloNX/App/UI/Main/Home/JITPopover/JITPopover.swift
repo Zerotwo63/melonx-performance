@@ -86,14 +86,11 @@ struct JITPopover: View {
         )
         .onAppear {
             pulseAnimation = true
-            
-            gameHandler.enableJIT()
-            
-            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
-                isJIT = isJITEnabled()
-                
-                if isJIT {
-                    timer.invalidate()
+
+            JITCoordinator.shared.waitForJIT(trigger: { gameHandler.enableJIT() }) { success in
+                isJIT = success
+
+                if success {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                         presentationMode.wrappedValue.dismiss()
                     }
@@ -101,6 +98,9 @@ struct JITPopover: View {
                     Ryujinx.shared.checkForJIT()
                 }
             }
+        }
+        .onDisappear {
+            JITCoordinator.shared.cancel()
         }
     }
 }
