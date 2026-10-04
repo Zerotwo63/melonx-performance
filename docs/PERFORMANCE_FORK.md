@@ -59,10 +59,16 @@ Git innecesariamente.
 - Cambios propios hasta ahora (ver también el CHANGELOG al final de este
   documento, que se va actualizando commit por commit):
   - `src/MeloNX/MeloNX/App/Core/JIT/StikJIT/StikEnableJIT.swift` — condición
-    TXM invertida corregida (ver `docs/PERFORMANCE_FORK.md#jit` abajo y el
-    mensaje del commit correspondiente).
+    TXM invertida corregida, construcción de URL vía `URLComponents`,
+    `stikdebug://` primario con `stikjit://` como fallback, detección por
+    `canOpenURL` en vez de SpringBoardServices privado (ver
+    `docs/PERFORMANCE_FORK.md#jit` abajo y el commit
+    `fix(jit): modernize external StikDebug activation`).
+  - `src/MeloNX/MeloNX/App/UI/Main/Home/SettingsView/SettingsView.swift` —
+    la etiqueta "StikDebug"/"StikJIT" ahora se decide con
+    `detectStikTool()` en vez de la API privada (mismo commit).
   - `src/MeloNX/MeloNX/Info.plist` — esquemas `stikdebug`/`stikjit` añadidos
-    a `LSApplicationQueriesSchemes` (sin eliminar `melonx`).
+    a `LSApplicationQueriesSchemes` (sin eliminar `melonx`, mismo commit).
 
 ## Snapshot técnico en el SHA base
 
@@ -174,7 +180,7 @@ documentado aquí para esa fase, no se toca en este commit.
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
-| Commit | Qué cambia | Por qué |
-|---|---|---|
-| `fix(jit): invert TXM condition for StikDebug script attachment` | `StikEnableJIT.swift` | Condición invertida respecto a la documentación oficial de StikJIT — ver sección JIT arriba |
-| `feat(jit): declare stikdebug/stikjit URL schemes in Info.plist` | `Info.plist` | `LSApplicationQueriesSchemes` necesita los esquemas reales para que `canOpenURL` funcione de forma confiable |
+| Commit | SHA | Qué cambia | Por qué |
+|---|---|---|---|
+| `chore: establish performance fork baseline` | `b4f2c9b30` | Este documento | Registrar la base exacta antes de tocar nada |
+| `fix(jit): modernize external StikDebug activation` | `f873baf4b` | `StikEnableJIT.swift`, `SettingsView.swift`, `Info.plist` | Condición TXM invertida (ver sección JIT arriba) + URL vía `URLComponents` + detección por `canOpenURL` en vez de SpringBoardServices privado |
