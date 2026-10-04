@@ -69,6 +69,9 @@ Git innecesariamente.
     `detectStikTool()` en vez de la API privada (mismo commit).
   - `src/MeloNX/MeloNX/Info.plist` — esquemas `stikdebug`/`stikjit` añadidos
     a `LSApplicationQueriesSchemes` (sin eliminar `melonx`, mismo commit).
+  - `src/MeloNX/MeloNX/App/Core/JIT/JITCoordinator.swift` (nuevo) — loop de
+    sondeo único y cancelable para el estado de JIT, todavía sin conectar
+    a ningún call site existente (ver `#jit` abajo).
 
 ## Snapshot técnico en el SHA base
 
@@ -218,6 +221,13 @@ devuelto `true` al menos una vez.
      × 0.5s (3s) — pero es un camino distinto (resumir un juego tras
      relanzar la app desde la herramienta externa vía `gametorun`
      `AppStorage`), no la misma función.
+2b. **Fuga confirmada en `JITPopover`**: su `Timer` solo se invalida dentro
+   de la rama de éxito (`isJIT == true`); no hay `onDisappear` ni una
+   referencia guardada que lo cancele. Si el popover desaparece por
+   cualquier otro motivo (p. ej. `currentGame` vuelve a `nil`), el `Timer`
+   sigue vivo y sigue llamando `isJITEnabled()` cada 0.5s — y, a través de
+   ella, `RyujinxBridge.initialize_dualmapped()` — indefinidamente durante
+   el resto del proceso.
 3. **`JitStreamerEB/EnableJIT.swift` existe en el árbol pero no está
    conectado**: no hay ningún toggle en `nativeSettings` ni ninguna
    llamada desde `LaunchGameHandler.enableJIT()` que lo invoque. Es código
@@ -226,11 +236,16 @@ devuelto `true` al menos una vez.
    allocator): JitStreamerEB no es un quinto mecanismo activo, es código
    muerto.
 
-El `JITCoordinator` centraliza el punto 2 (una sola implementación de
-espera, con tope y manejo de fallo) y deja documentado el punto 1 para
-medición posterior, sin tocar `isJITEnabled()` (usado también desde
-`SettingsView` y `ContentView` fuera de este flujo — cambiar su firma ahí
-sería un cambio no relacionado, fuera de alcance de este commit).
+El `JITCoordinator` (`App/Core/JIT/JITCoordinator.swift`) centraliza los
+puntos 2 y 2b (una sola implementación de espera, cancelable, con tope
+opcional) y deja documentado el punto 1 para medición posterior, sin
+tocar `isJITEnabled()` (usado también desde `SettingsView` y `ContentView`
+fuera de este flujo — cambiar su firma ahí sería un cambio no relacionado,
+fuera de alcance de este commit). Es un archivo nuevo, aditivo: ningún
+call site existente lo usa todavía — `JITPopover` y
+`checkJITAndRunGame()` siguen con su lógica actual hasta el commit que
+los migre, que se hace por separado para no mezclar "agregar la pieza" con
+"cambiar el comportamiento en vivo del flujo de lanzamiento".
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
@@ -238,3 +253,5 @@ sería un cambio no relacionado, fuera de alcance de este commit).
 |---|---|---|---|
 | `chore: establish performance fork baseline` | `b4f2c9b30` | Este documento | Registrar la base exacta antes de tocar nada |
 | `fix(jit): modernize external StikDebug activation` | `f873baf4b` | `StikEnableJIT.swift`, `SettingsView.swift`, `Info.plist` | Condición TXM invertida (ver sección JIT arriba) + URL vía `URLComponents` + detección por `canOpenURL` en vez de SpringBoardServices privado |
+| `docs: correct the JIT-wait architectural claim...` | `f3f47d767` | `docs/PERFORMANCE_FORK.md` | Corrige el hallazgo erróneo de "JIT sin esperar"; documenta los problemas reales (polling duplicado, fuga de Timer en `JITPopover`, `JitStreamerEB` inactivo) |
+| `refactor(jit): add JIT coordinator foundation` | *(pendiente de build)* | `JITCoordinator.swift` (nuevo) | Pieza aditiva, sin call sites todavía: un solo loop de sondeo cancelable con tope opcional, reemplazando la futura migración de `JITPopover`/`checkJITAndRunGame` |
