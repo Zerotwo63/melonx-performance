@@ -70,6 +70,13 @@
 			remoteGlobalIDString = 5A1730877432D1026706D7E8;
 			remoteInfo = MeloNXJITHelper;
 		};
+		5A18CC6577428C2F6D6BC64E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4E80A9852CD6F54500029585 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BD43C6212D1B248D003BBC42;
+			remoteInfo = com.Stossy11.MeloNX.RyujinxAg;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -419,6 +426,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				5A185A22FAC180D6B2E6E1B4 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				5A17CE8038A39D5E0853964B /* MeloNXJITHelper */,
@@ -597,6 +605,11 @@
 			isa = PBXTargetDependency;
 			target = 5A1730877432D1026706D7E8 /* MeloNXJITHelper */;
 			targetProxy = 5A17575EC87A171AC826A6FC /* PBXContainerItemProxy */;
+		};
+		5A185A22FAC180D6B2E6E1B4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BD43C6212D1B248D003BBC42 /* com.Stossy11.MeloNX.RyujinxAg */;
+			targetProxy = 5A18CC6577428C2F6D6BC64E /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
