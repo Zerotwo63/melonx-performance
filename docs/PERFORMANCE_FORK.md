@@ -85,6 +85,10 @@ Git innecesariamente.
     `checkJITAndRunGame()` pierde su parámetro `attempt`/recursión manual;
     usa `JITCoordinator.shared.waitForJIT(maxAttempts: 6, interval: 0.5)`
     con el mismo tope de 6 intentos que tenía antes.
+  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJITAvailability.swift`
+    (nuevo) — preflight de disponibilidad para Built-in StikJIT (ver
+    `#builtin-stikjit` abajo). Sin call sites, sin enlazar ningún
+    framework nuevo.
 
 ## Snapshot técnico en el SHA base
 
@@ -260,6 +264,99 @@ call site existente lo usa todavía — `JITPopover` y
 los migre, que se hace por separado para no mezclar "agregar la pieza" con
 "cambiar el comportamiento en vivo del flujo de lanzamiento".
 
+<a id="builtin-stikjit"></a>
+## Built-in StikJIT (sección 9 del pedido original): arquitectura real, verificada
+
+Verificado contra el repo real `StikDebug/StikJIT` (licencia **MPL-2.0**,
+no GPLv3 — compatible como dependencia de un proyecto GPLv3 como MeloNX
+sin obligar a relicenciar nada propio) y su `INTEGRATION.md` actual, no
+inventado.
+
+### Qué es StikJIT.xcframework
+
+Un XCFramework precompilado que habilita JIT para otro proceso sobre el
+túnel RSD del dispositivo (el mismo mecanismo de depuración inalámbrica
+moderno de Apple). Bundlea su propio FFI de
+[`idevice`](https://github.com/jkcoxson/idevice) y los scripts
+`universal.js`/`legacy.js` — no hay que reimplementar el protocolo RSD ni
+el cliente idevice, se integra el framework ya compilado tal cual (esto
+es exactamente lo que la sección 19 del pedido pide: preferir integrar
+StikJIT directamente en vez de copiar de Madeira o reimplementar).
+
+### Por qué esto NO es "agregar un archivo Swift más"
+
+A diferencia de `JITCoordinator`, Built-in StikJIT **requiere un segundo
+proceso** — un proceso no puede adjuntarse un depurador a sí mismo:
+
+```text
+App anfitriona (MeloNX): PID objetivo, datos del pairing file, chequeo
+de get-task-allow
+    ↕ XPC u otro mecanismo de IPC
+Extensión helper (app extension): enlaza StikJIT.xcframework, cache de
+DDI, trabajo bloqueante
+```
+
+Esto significa crear un **nuevo target de Xcode** (una app extension)
+que enlace el `.xcframework` — MeloNX no debe enlazarlo fuerte en el
+target principal (para no romper el soporte de versiones de iOS más
+viejas que el mínimo del helper). Esta pieza **no se crea en este
+commit**: este repositorio no usa XcodeGen (a diferencia del propio
+StikJIT, que sí) — `project.pbxproj` está escrito a mano, y fabricar a
+mano un `PBXNativeTarget` nuevo completo (product type de app extension,
+build phases, embed-extension phase, Info.plist propio, entitlements
+propios) sin Xcode real para validarlo — solo con el build de CI como
+único feedback, a ~7 minutos por intento — es exactamente el tipo de
+cambio de alto riesgo y alto radio de impacto (podría dejar de compilar
+el proyecto *entero*, no solo la función nueva) que corresponde señalar
+explícitamente antes de intentarlo, en vez de hacerlo a ciegas.
+
+### Lo que sí se hizo en este commit (bajo riesgo, aditivo, verificado)
+
+`App/Core/JIT/BuiltInStikJITAvailability.swift` (nuevo) — el preflight
+del lado anfitrión que `INTEGRATION.md` exige ("Gate every entry point"),
+reutilizando utilidades que MeloNX ya tiene en vez de inventarlas:
+- `get-task-allow` → `checkAppEntitlement("get-task-allow")` (ya existe
+  en `EntitlementChecker.swift`, ya usado en `SettingsView.swift` para
+  mostrar estado — aquí se usa como gate real, no solo display).
+- Detección de LiveContainer → `isInLiveContainer.0` (ya existe en
+  `FilePickerfix.swift`, más completa que el `getenv("LC_HOME_PATH")`
+  genérico del ejemplo de `INTEGRATION.md`). Built-in StikJIT está
+  explícitamente excluido ahí porque LiveContainer no puede crear la
+  extensión helper requerida.
+- Existencia del pairing file en `Documents/StikJIT/pairingFile.plist`
+  (la ruta recomendada por `INTEGRATION.md`) — solo el *check de
+  existencia*; importar uno (picker, copia atómica, `UIFileSharingEnabled`)
+  es "pairing-file management", la sección 10 del pedido original, por
+  separado.
+- El gate de iOS 17.4+ que pide `INTEGRATION.md` se omite a propósito:
+  el deployment target de MeloNX ya es 18.1, así que esa comprobación
+  sería código muerto siempre-verdadero.
+
+No se conecta a ningún call site (`LaunchGameHandler.enableJIT()` no lo
+usa todavía) ni se enlaza el `.xcframework` — no hay extensión a la que
+llamar todavía. Es, otra vez, una pieza aditiva verificable por CI sin
+tocar el flujo de JIT en vivo.
+
+### API real de StikJIT (para cuando exista la extensión — no inventar luego)
+
+Del `INTEGRATION.md`, el helper llamaría (de forma síncrona/bloqueante,
+en una sola cola serial, nunca `async`/concurrente):
+- `StikJIT.isTXMPresent` — informativo, para mostrar estado en settings.
+- `StikJIT.prepareDevice(pairingFile:paths:progress:) -> .ready /
+  .unreachable(reason) / .preparationFailed(reason)`.
+- `StikJIT.enableJIT(targetPID:pairingFile:ddiPaths:script:forceScript:
+  preparationProgress:progress:)` — hace la preparación internamente, no
+  requiere llamar `prepareDevice` antes.
+- `StikJIT.resetCachedDDI(at:)`.
+- `DDIPaths.default(in:)`, viviendo en el directorio `Library` de la
+  **extensión** (no del host), persistente entre lanzamientos.
+- `StikJIT.Script`: `.universal`, `.legacy`, `.custom(URL)`,
+  `.customBase64(String)` — MeloNX ya usa el protocolo `universal.js`
+  client-side (`BreakpointJIT.framework`/`BreakpointHandler.swift`), así
+  que el script correcto a configurar aquí es `.universal`, fijo en
+  código, nunca expuesto como opción de usuario (regla explícita de
+  `INTEGRATION.md`).
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -268,4 +365,5 @@ los migre, que se hace por separado para no mezclar "agregar la pieza" con
 | `fix(jit): modernize external StikDebug activation` | `f873baf4b` | `StikEnableJIT.swift`, `SettingsView.swift`, `Info.plist` | Condición TXM invertida (ver sección JIT arriba) + URL vía `URLComponents` + detección por `canOpenURL` en vez de SpringBoardServices privado |
 | `docs: correct the JIT-wait architectural claim...` | `f3f47d767` | `docs/PERFORMANCE_FORK.md` | Corrige el hallazgo erróneo de "JIT sin esperar"; documenta los problemas reales (polling duplicado, fuga de Timer en `JITPopover`, `JitStreamerEB` inactivo) |
 | `refactor(jit): add JIT coordinator foundation` | `159ae9bb2` | `JITCoordinator.swift` (nuevo) | Pieza aditiva, sin call sites todavía: un solo loop de sondeo cancelable con tope opcional |
-| `refactor(jit): migrate JITPopover and checkJITAndRunGame onto JITCoordinator` | *(pendiente de build)* | `JITCoordinator.swift`, `JITPopover.swift`, `ContentView.swift` | Conecta los dos call sites; corrige la fuga de `Timer` de `JITPopover`; añade manejo de llamadores concurrentes (`pendingCompletions`) para no perder ni pisar completions entre los dos flujos |
+| `refactor(jit): migrate JITPopover and checkJITAndRunGame onto JITCoordinator` | `656e29273` | `JITCoordinator.swift`, `JITPopover.swift`, `ContentView.swift` | Conecta los dos call sites; corrige la fuga de `Timer` de `JITPopover`; añade manejo de llamadores concurrentes (`pendingCompletions`) para no perder ni pisar completions entre los dos flujos |
+| `feat(jit): add Built-in StikJIT host-side availability preflight` | *(pendiente de build)* | `BuiltInStikJITAvailability.swift` (nuevo) | Checks de disponibilidad verificados contra `INTEGRATION.md` real de StikJIT (ver `#builtin-stikjit`); el target de extensión que haría falta para enlazar `StikJIT.xcframework` queda fuera de este commit, señalado como el siguiente paso de mayor riesgo |
