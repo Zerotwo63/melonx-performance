@@ -9,67 +9,96 @@ import Foundation
 import Network
 import UIKit
 
-func stikJITorStikDebug() -> Int {
-    let teamid = SecTaskCopyTeamIdentifier(SecTaskCreateFromSelf(nil)!, nil)
-    
-    if checkifappinstalled("com.stik.sj") {
-        return 1 // StikDebug
-    }
-    
-    if checkifappinstalled("com.stik.sj.\(String(teamid ?? ""))") {
-        return 2 // StikJIT
-    }
-    
-    return 0 // Not Found
+/// Which external JIT-acquisition app is actually reachable right now.
+/// Replaces the previous SpringBoardServices-based probe (private API,
+/// `SBSLaunchApplicationWithIdentifier`, fragile result-code check) with
+/// the officially documented mechanism: declare the real URL schemes in
+/// `Info.plist`'s `LSApplicationQueriesSchemes` and ask
+/// `UIApplication.canOpenURL` directly. No technical reason was found for
+/// keeping the private API here — this call site only ever used the
+/// result to choose a label string in Settings, never to actually launch
+/// anything (`SBSLaunchApplicationWithIdentifier`'s `suspended: false` was
+/// never acted upon beyond reading its return code).
+enum StikTool {
+    case stikDebug // modern, "stikdebug://"
+    case stikJIT   // legacy, "stikjit://" — kept as a fallback, see enableJITStik()
+    case notFound
 }
 
-func checkforOld() -> Bool {
-    return true
+func detectStikTool() -> StikTool {
+    if let url = URL(string: "stikdebug://"), UIApplication.shared.canOpenURL(url) {
+        return .stikDebug
+    }
+    if let url = URL(string: "stikjit://"), UIApplication.shared.canOpenURL(url) {
+        return .stikJIT
+    }
+    return .notFound
 }
 
+/// StikDebug's modern `enable-jit` request, built the officially documented
+/// way (scheme `stikdebug`, host `enable-jit`, `bundle-id`/`pid` query items)
+/// via `URLComponents` instead of manual string concatenation — avoids the
+/// double-percent-encoding risk manual concatenation has if the value is
+/// later also run through a component-level encoder, and lets Foundation
+/// choose the correct escaping for the base64 script payload itself.
+private func buildEnableJITURL(
+    scheme: String,
+    attachScript: Bool,
+    bundle: String?
+) -> URL? {
+    var components = URLComponents()
+    components.scheme = scheme
+    components.host = "enable-jit"
 
-func checkifappinstalled(_ id: String) -> Bool {
-    guard let handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY) else {
-        return false
-    }
-    
-    typealias SBSLaunchApplicationWithIdentifierFunc = @convention(c) (CFString, Bool) -> Int32
-    guard let sym = dlsym(handle, "SBSLaunchApplicationWithIdentifier") else {
-        if let error = dlerror() {
-            print(String(cString: error))
+    var items: [URLQueryItem] = []
+    if isInLiveContainer.0 {
+        items.append(URLQueryItem(name: "pid", value: "\(getpid())"))
+        if attachScript {
+            items.append(URLQueryItem(name: "script-name", value: "MeloNX"))
         }
-        dlclose(handle)
-        return false
+    } else {
+        items.append(URLQueryItem(name: "bundle-id", value: bundle ?? Bundle.main.originalBundleID ?? ""))
     }
-    
-    let bundleID: CFString = id as CFString
-    let suspended: Bool = false
-    
 
-    let SBSLaunchApplicationWithIdentifier = unsafeBitCast(sym, to: SBSLaunchApplicationWithIdentifierFunc.self)
-    let result = SBSLaunchApplicationWithIdentifier(bundleID, suspended)
+    if attachScript {
+        // Pass the RAW (not pre-encoded) script — URLComponents encodes
+        // query item values itself; pre-encoding here (the previous
+        // behavior) and then handing it to URLComponents would encode it
+        // twice.
+        items.append(URLQueryItem(name: "script-data", value: script))
+    }
 
-    return result == 9
-} 
+    components.queryItems = items
+    return components.url
+}
 
 func enableJITStik() {
     let bundle = shouldAsCopy ? Bundle.main.swizzled_bundleIdentifier : Bundle.main.bundleIdentifier
-    var urlScheme: String = "stikjit://enable-jit"
-    
-    if #available(iOS 19.0, *), !ProcessInfo.processInfo.hasTXM {
-        let scriptdata = script.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        
-        urlScheme += isInLiveContainer.0 ? "?pid=\(getpid())&script-name=MeloNX" : ("?bundle-id=" + (bundle ?? Bundle.main.originalBundleID!))
-        
-        urlScheme += "&script-data=\(scriptdata)"
-    } else {
-        urlScheme += isInLiveContainer.0 ? "?pid=\(getpid())" : "?bundle-id=" + (bundle ?? Bundle.main.originalBundleID!)
+
+    // Fixed (2026-10-04, performance fork): this condition was inverted —
+    // it attached the breakpoint/script protocol when TXM/SPTM was ABSENT
+    // and skipped it when PRESENT, exactly backwards. Verified against
+    // StikDebug/StikJIT's own INTEGRATION.md ("Part 1: Add iOS 26 JIT
+    // support"): "On a device where TXM/SPTM is not present, attaching and
+    // detaching the debugger is enough to enable JIT. Where TXM/SPTM is
+    // present, the debugger flag alone is not enough: each executable
+    // memory region must be prepared through the debug connection before
+    // the app executes code from it." The script is required WHEN TXM is
+    // present, not when it's absent.
+    let attachScript = { if #available(iOS 19.0, *) { return ProcessInfo.processInfo.hasTXM } else { return false } }()
+
+    // Modern path first (stikdebug://), legacy StikJIT kept as a fallback
+    // for installs that still only have the older tool — never assumed,
+    // always driven by what canOpenURL actually reports right now.
+    let tool = detectStikTool()
+    let scheme = (tool == .stikJIT) ? "stikjit" : "stikdebug"
+
+    guard let launchURL = buildEnableJITURL(scheme: scheme, attachScript: attachScript, bundle: bundle),
+          !isJITEnabled() else {
+        return
     }
-    
-    
-    if let launchURL = URL(string: urlScheme), !isJITEnabled() {
-        UIApplication.shared.open(launchURL, options: [:], completionHandler: nil)
-    }
+
+    UIApplication.shared.open(launchURL, options: [:], completionHandler: nil)
 }
 
 let script = """

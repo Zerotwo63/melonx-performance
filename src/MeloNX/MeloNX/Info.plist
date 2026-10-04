@@ -39,6 +39,8 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>melonx</string>
+		<string>stikdebug</string>
+		<string>stikjit</string>
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>

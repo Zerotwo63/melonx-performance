@@ -1194,8 +1194,11 @@ struct SettingsViewNew: View {
     private var jitToggleView: some View {
         Group {
             if #available(iOS 17.0.1, *) {
-                let checked = stikJITorStikDebug()
-                let stikJIT = checked == 1 ? "StikDebug" : checked == 2 ? "StikJIT" : "StikDebug"
+                // Was stikJITorStikDebug() (SpringBoardServices private API,
+                // 2026-10-04 performance fork) — now driven by
+                // UIApplication.canOpenURL via the officially documented
+                // URL schemes (see StikEnableJIT.swift's detectStikTool()).
+                let stikJIT = detectStikTool() == .stikJIT ? "StikJIT" : "StikDebug"
                 SettingsToggle(isOn: nativeSettingsManager.stikJIT(isInLiveContainer.0).projectedValue, icon: "bolt.heart", label: "\(stikJIT)", infoMessage: "\(stikJIT) is an app used to Enable JIT on the go on-device, made by jkcoxson and Blu")
             } else {
                 SettingsToggle(isOn: $useTrollStore, icon: "troll.svg", label: "TrollStore JIT", infoMessage: "Enables JIT automatically using TrollStore's URL Scheme ('apple-magnifier://enable-jit?bundle-id')")
