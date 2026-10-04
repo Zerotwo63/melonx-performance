@@ -6,19 +6,9 @@
 import Foundation
 
 /// Host-side preflight for "Built-in StikJIT" — StikJIT.xcframework
-/// (MPL-2.0, https://github.com/StikDebug/StikJIT) embedded in a helper
-/// app extension, per its INTEGRATION.md "Gate every entry point" and
-/// "LiveContainer" sections.
-///
-/// This is availability-checking only. It does not link StikJIT.xcframework
-/// or talk to any helper extension, because neither exists in this project
-/// yet: Built-in StikJIT requires a second process (a process can't attach
-/// a debugger to itself), i.e. a helper app extension that links the
-/// framework and talks to the host over XPC. Adding that extension target
-/// is a separate, later step. This file exists so the gating logic — real,
-/// host-side, needed regardless of how the helper is eventually wired up —
-/// is in place and verified against the real integration contract now,
-/// rather than invented later under time pressure.
+/// (MPL-2.0, https://github.com/StikDebug/StikJIT) embedded in the
+/// MeloNXJITHelper app extension (App/Core/JIT/BuiltInStikJIT/), per
+/// INTEGRATION.md's "Gate every entry point" and "LiveContainer" sections.
 ///
 /// INTEGRATION.md lists iOS 17.4+ as a required gate, but MeloNX's own
 /// deployment target is already 18.1 — every running instance already
@@ -29,6 +19,20 @@ enum BuiltInStikJITAvailability {
         case missingGetTaskAllow
         case runningInLiveContainer
         case noPairingFileImported
+        case helperMissing
+    }
+
+    /// `MeloNXJITHelper.appex`'s bundle identifier in *this* installation,
+    /// read from its own Info.plist rather than assumed — a sideloader
+    /// that re-signs with the user's own Apple ID renames the host's
+    /// bundle ID (and the helper's along with it, since it's nested under
+    /// the host's), but can also strip app extensions entirely depending
+    /// on the tool, so this can legitimately be nil.
+    static var helperIdentifier: String? {
+        guard let url = Bundle.main.builtInPlugInsURL?.appendingPathComponent("MeloNXJITHelper.appex") else {
+            return nil
+        }
+        return Bundle(url: url)?.bundleIdentifier
     }
 
     /// `Documents/StikJIT/pairingFile.plist`, the location INTEGRATION.md
@@ -62,6 +66,10 @@ enum BuiltInStikJITAvailability {
 
         guard checkAppEntitlement("get-task-allow") else {
             return .missingGetTaskAllow
+        }
+
+        guard helperIdentifier != nil else {
+            return .helperMissing
         }
 
         guard hasImportedPairingFile else {

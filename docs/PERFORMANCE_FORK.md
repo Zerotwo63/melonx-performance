@@ -85,15 +85,20 @@ Git innecesariamente.
     `checkJITAndRunGame()` pierde su parámetro `attempt`/recursión manual;
     usa `JITCoordinator.shared.waitForJIT(maxAttempts: 6, interval: 0.5)`
     con el mismo tope de 6 intentos que tenía antes.
-  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJITAvailability.swift`
-    (nuevo) — preflight de disponibilidad para Built-in StikJIT (ver
-    `#builtin-stikjit` abajo). Sin call sites, sin enlazar ningún
-    framework nuevo.
-  - `src/MeloNX/MeloNXJITHelper/` (nuevo target `MeloNXJITHelper`,
-    producto `.appex`) — la extensión helper real que enlaza
+  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJITAvailability.swift` —
+    preflight de disponibilidad para Built-in StikJIT (ver
+    `#builtin-stikjit` abajo); ahora incluye `.helperMissing` y
+    `helperIdentifier` (bundle ID real del `.appex`, leído, no asumido).
+  - `src/MeloNX/MeloNXJITHelper/` (target `MeloNXJITHelper`, producto
+    `.appex`) — la extensión helper real que enlaza
     `StikJIT.xcframework` (ver `#builtin-stikjit`). Embebida en el host
     vía la fase "Embed Foundation Extensions" (ya existía vacía en el
-    proyecto). Sin lanzador del lado host todavía.
+    proyecto).
+  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJIT/` (nuevo) —
+    `MeloNXBuiltInJIT.swift` (el lanzador del lado host, API privada
+    `NSExtension`) y `MeloNXJITHelperRequest.swift` (copia del lado host
+    del modelo `Codable`). Sin call sites desde
+    `LaunchGameHandler`/`ContentView` todavía.
   - `src/MeloNX/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/`
     (vendoreado, `StikDebug/StikJIT` v1.9.0, MPL-2.0) — mismo patrón que
     los demás XCFrameworks ya vendoreados ahí (SDL2, FFmpeg, etc.).
@@ -416,16 +421,36 @@ problema (en vez de inventar), encontrando:
   decide internamente si hace falta el script según TXM, igual que ya
   hace `enableJITStik()` del lado StikDebug).
 
-**Qué NO se conectó todavía**: nada en `LaunchGameHandler`/`ContentView`
-llama a esta extensión — no existe el lanzador del lado host (el
-equivalente a `JITBuiltInHost.swift` de Madeira: buscar el `.appex` por
-bundle ID, armar el request, mandarlo vía la API privada de
-`NSExtension`). Tampoco existe todavía el flujo de importar un pairing
-file real (sección 10, pairing-file management, aparte). Sin un pairing
-file real y un dispositivo físico, nada de esto puede probarse de
-extremo a extremo — lo que CI puede verificar es compilación, enlazado y
-empaquetado, no que la extensión se lance o que el protocolo de JIT
-funcione en un dispositivo real. Eso se dice explícitamente, no se da por
+### Lanzador del lado host (commit siguiente)
+
+Se agregó el equivalente al `JITBuiltInHost.swift` de Madeira:
+`App/Core/JIT/BuiltInStikJIT/MeloNXBuiltInJIT.swift` — código propio,
+mismo mecanismo verificado (la API privada
+`NSExtension`/`ExtensionFoundation`, la misma que usa LiveContainer para
+su "LiveProcess"), más `MeloNXJITHelperRequest.swift` (copia del lado
+host del modelo `Codable`, por la misma razón de no tocar las
+excepciones del grupo sincronizado del host explicada arriba — ambas
+copias se verificaron idénticas byte a byte en su estructura).
+
+`BuiltInStikJITAvailability` se extendió con un caso nuevo,
+`.helperMissing`, y `helperIdentifier` (lee el bundle ID real de
+`MeloNXJITHelper.appex` desde `Bundle.main.builtInPlugInsURL`, en vez de
+asumirlo — un sideloader puede renombrarlo o, según la herramienta,
+eliminar las app extensions directamente). `MeloNXBuiltInJIT.send(...)`
+reutiliza este preflight completo antes de intentar nada.
+
+**Qué NO se conectó todavía**: `LaunchGameHandler`/`ContentView` no
+llaman a `MeloNXBuiltInJIT.send(...)` — eso sería agregar "Built-in
+StikJIT" como una tercera opción mutuamente excluyente en el selector de
+método de JIT (junto a Wait for Debugger/StikDebug), un cambio de
+comportamiento en vivo que además no puede probarse end-to-end sin el
+flujo de importar un pairing file real (sección 10, aparte) y un
+dispositivo físico. Lo que CI puede verificar aquí es que el lanzador
+compila y que su forma coincide con la API privada real (por tipo —
+Swift no puede verificar en tiempo de compilación que los selectores
+`@objc` existan de verdad en el runtime, eso solo se confirma en un
+dispositivo); no puede verificar que la extensión se lance o que el
+protocolo de JIT funcione. Eso se dice explícitamente, no se da por
 hecho.
 
 ## CHANGELOG de este fork (se actualiza por commit)
@@ -439,4 +464,5 @@ hecho.
 | `refactor(jit): migrate JITPopover and checkJITAndRunGame onto JITCoordinator` | `656e29273` | `JITCoordinator.swift`, `JITPopover.swift`, `ContentView.swift` | Conecta los dos call sites; corrige la fuga de `Timer` de `JITPopover`; añade manejo de llamadores concurrentes (`pendingCompletions`) para no perder ni pisar completions entre los dos flujos |
 | `feat(jit): add Built-in StikJIT host-side availability preflight` | `503c26705` | `BuiltInStikJITAvailability.swift` (nuevo) | Checks de disponibilidad verificados contra `INTEGRATION.md` real de StikJIT (ver `#builtin-stikjit`); el target de extensión que haría falta para enlazar `StikJIT.xcframework` queda fuera de este commit, señalado como el siguiente paso de mayor riesgo |
 | `feat(jit): add the Built-in StikJIT helper extension target` | `38c730419` | `project.pbxproj`, `MeloNXJITHelper/` (nuevo target+carpeta), `Dependencies/XCFrameworks/StikJIT.xcframework` (vendoreado), `ios-unsigned-ipa.yml` | El target real, verificado contra la arquitectura de Madeira (ver `#builtin-stikjit`); compila, enlaza StikJIT de verdad, se empaqueta en el IPA. No conectado a ningún call site del host todavía. **Primer intento de CI falló** — ver fila siguiente |
-| `fix(jit): give MeloNXJITHelper a build dependency on RyujinxAg` | *(pendiente de build)* | `project.pbxproj` | Causa real del fallo de CI (log real, no especulado): `OTHER_LDFLAGS`/`LIBRARY_SEARCH_PATHS` para `Ryujinx.Headless.SDL2.dylib` se pasan como override global de `xcodebuild` en `ios-unsigned-ipa.yml`, y ese override alcanza a TODOS los targets del build, no solo a `MeloNX`. `MeloNXJITHelper` no tenía dependencias declaradas, así que Xcode lo agendó antes de que el target `Ryujinx`/`RyujinxAg` (que produce ese .dylib vía su shell script) terminara — `clang: error: no such file or directory`. El propio target `MeloNX` no sufre esto porque ya depende de `RyujinxAg`. Se agrega la misma dependencia a `MeloNXJITHelper` para forzar el orden correcto — `MeloNXJITHelper` no necesita Ryujinx, es puramente para resolver la carrera; queda documentado como una verruga conocida (el .appex terminará enlazando innecesariamente ese dylib) |
+| `fix(jit): give MeloNXJITHelper a build dependency on RyujinxAg` | `041f56011` | `project.pbxproj` | Causa real del fallo de CI (log real, no especulado): `OTHER_LDFLAGS`/`LIBRARY_SEARCH_PATHS` para `Ryujinx.Headless.SDL2.dylib` se pasan como override global de `xcodebuild` en `ios-unsigned-ipa.yml`, y ese override alcanza a TODOS los targets del build, no solo a `MeloNX`. `MeloNXJITHelper` no tenía dependencias declaradas, así que Xcode lo agendó antes de que el target `Ryujinx`/`RyujinxAg` (que produce ese .dylib vía su shell script) terminara — `clang: error: no such file or directory`. El propio target `MeloNX` no sufre esto porque ya depende de `RyujinxAg`. Se agrega la misma dependencia a `MeloNXJITHelper` para forzar el orden correcto — `MeloNXJITHelper` no necesita Ryujinx, es puramente para resolver la carrera; queda documentado como una verruga conocida (el .appex terminará enlazando innecesariamente ese dylib) |
+| `feat(jit): add the host-side Built-in StikJIT launcher` | *(pendiente de build)* | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
