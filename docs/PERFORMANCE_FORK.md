@@ -130,6 +130,12 @@ JIT, coexistiendo:
    `LaunchGameHandler.configureEnvironmentVariables()`). Mantiene W^X real
    con dos mappings (uno RW, uno RX) del mismo backing — tampoco se toca.
 
+(Existe además `App/Core/JIT/JitStreamerEB/EnableJIT.swift`, un quinto
+mecanismo vía HTTP a `http://[fd00::]:9172/attach/<pid>` —
+pero no está conectado a ningún toggle ni llamado desde
+`LaunchGameHandler.enableJIT()`. Es código inactivo en este build, no un
+mecanismo real en uso; se menciona solo para que quede registrado.)
+
 Verificación de JIT listo: `isJITEnabled()` en `IsJITEnabled.swift`:
 - Si la app tiene el entitlement `dynamic-codesigning` (jailbreak/TrollStore
   con firma especial) → solo `allocateTest()` (mmap+mprotect real).
@@ -166,17 +172,65 @@ invertida — hace exactamente lo contrario de lo documentado. Esto se
 corrige en el primer commit de esta rama (ver el mensaje de ese commit
 para el detalle exacto del cambio).
 
-### Hueco arquitectónico detectado (NO corregido todavía — fuera de alcance de esta sesión)
+### Corrección: el hallazgo anterior sobre "JIT sin esperar" era incorrecto
 
-`LaunchGameHandler.startGame()` llama a `enableJIT()` (que solo *dispara*
-la apertura del esquema URL, fire-and-forget) y continúa de inmediato hacia
-`MetalView.createView()`/`ryujinx.start(...)` sin esperar ni sondear a que
-el JIT realmente quede listo. `UIApplication.open(url) == true` nunca
-implica "JIT listo" — eso solo lo confirma `isJITEnabled()`, y hoy nada
-vuelve a llamarlo después de abrir la URL externa antes de arrancar el
-juego. Este es exactamente el tipo de problema que el futuro
-`JITCoordinator` (sección 8 del pedido original) debe resolver — se deja
-documentado aquí para esa fase, no se toca en este commit.
+Una versión anterior de este documento afirmaba que `startGame()` no
+esperaba a que el JIT estuviera listo. Se verificó contra el flujo real de
+UI (`ContentView.swift`, `JITPopover.swift`, `LoadingOverlayView.swift`) y
+es **falso** — se corrige aquí según la regla de este fork de nunca dejar
+una hipótesis técnica errónea sin corregir.
+
+El flujo real sí bloquea el arranque del juego hasta que el JIT está
+confirmado:
+
+1. `LaunchGameHandler.shouldCheckJIT` es `true` cuando hay un juego
+   seleccionado y `ryujinx.jitenabled` todavía es `false`.
+2. Mientras sea `true`, `ContentView` presenta `JITPopover` como
+   `fullScreenCover` — **no** el flujo de emulación.
+3. `JITPopover.onAppear` llama a `gameHandler.enableJIT()` (dispara
+   TrollStore o StikDebug/StikJIT según el toggle activo) y arranca un
+   `Timer` que sondea `isJITEnabled()` cada 0.5s.
+4. Solo cuando ese sondeo devuelve `true` se cierra el popover, se llama
+   `Ryujinx.shared.checkForJIT()` (refresca `jitenabled`) y recién entonces
+   `shouldLaunchGame` pasa a `true`, mostrando `EmulationContainerView` →
+   `LoadingOverlayView`, cuyo `startEmulationCallback` es lo único que
+   invoca `gameHandler.startGame()`.
+
+El juego físicamente no puede arrancar antes de que `isJITEnabled()` haya
+devuelto `true` al menos una vez.
+
+### Problemas reales verificados (éstos sí son el objetivo del `JITCoordinator`)
+
+1. **`isJITEnabled()` tiene un efecto secundario no memoizado**: llama
+   incondicionalmente a `RyujinxBridge.initialize_dualmapped()` en cada
+   invocación (`IsJITEnabled.swift`). El `Timer` de `JITPopover` lo invoca
+   cada 0.5s mientras espera, así que esa rutina nativa de inicialización
+   del allocator dual-mapped puede ejecutarse decenas de veces durante una
+   sola espera de JIT. No se puede verificar desde Swift si llamadas
+   repetidas son seguras (la implementación está en el puente .NET) — se
+   deja documentado como riesgo medible, no como bug confirmado.
+2. **Dos implementaciones de "esperar al JIT" duplicadas e inconsistentes**:
+   - `JITPopover`: `Timer` sin límite de intentos ni timeout — si la
+     herramienta externa nunca responde (usuario cancela, app no
+     instalada, red/VPN caída), sondea cada 0.5s para siempre sin mostrar
+     error.
+   - `ContentView.checkJITAndRunGame()`: recursión con tope de 6 intentos
+     × 0.5s (3s) — pero es un camino distinto (resumir un juego tras
+     relanzar la app desde la herramienta externa vía `gametorun`
+     `AppStorage`), no la misma función.
+3. **`JitStreamerEB/EnableJIT.swift` existe en el árbol pero no está
+   conectado**: no hay ningún toggle en `nativeSettings` ni ninguna
+   llamada desde `LaunchGameHandler.enableJIT()` que lo invoque. Es código
+   inactivo en este build — se corrige aquí el conteo anterior de "cuatro
+   mecanismos de JIT" (TrollStore/StikDebug/breakpoints nativos/dual-mapped
+   allocator): JitStreamerEB no es un quinto mecanismo activo, es código
+   muerto.
+
+El `JITCoordinator` centraliza el punto 2 (una sola implementación de
+espera, con tope y manejo de fallo) y deja documentado el punto 1 para
+medición posterior, sin tocar `isJITEnabled()` (usado también desde
+`SettingsView` y `ContentView` fuera de este flujo — cambiar su firma ahí
+sería un cambio no relacionado, fuera de alcance de este commit).
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
