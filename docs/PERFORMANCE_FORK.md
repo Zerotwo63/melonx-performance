@@ -89,6 +89,19 @@ Git innecesariamente.
     (nuevo) — preflight de disponibilidad para Built-in StikJIT (ver
     `#builtin-stikjit` abajo). Sin call sites, sin enlazar ningún
     framework nuevo.
+  - `src/MeloNX/MeloNXJITHelper/` (nuevo target `MeloNXJITHelper`,
+    producto `.appex`) — la extensión helper real que enlaza
+    `StikJIT.xcframework` (ver `#builtin-stikjit`). Embebida en el host
+    vía la fase "Embed Foundation Extensions" (ya existía vacía en el
+    proyecto). Sin lanzador del lado host todavía.
+  - `src/MeloNX/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/`
+    (vendoreado, `StikDebug/StikJIT` v1.9.0, MPL-2.0) — mismo patrón que
+    los demás XCFrameworks ya vendoreados ahí (SDL2, FFmpeg, etc.).
+  - `.github/workflows/ios-unsigned-ipa.yml` — el paso de empaquetado
+    ahora también copia `StikJIT.framework` a
+    `MeloNX.app/Frameworks/` (igual que ya hace con
+    `Ryujinx.Headless.SDL2.dylib`) y verifica que el `.appex` quedó
+    embebido en `PlugIns/`.
 
 ## Snapshot técnico en el SHA base
 
@@ -332,30 +345,88 @@ reutilizando utilidades que MeloNX ya tiene en vez de inventarlas:
   el deployment target de MeloNX ya es 18.1, así que esa comprobación
   sería código muerto siempre-verdadero.
 
-No se conecta a ningún call site (`LaunchGameHandler.enableJIT()` no lo
-usa todavía) ni se enlaza el `.xcframework` — no hay extensión a la que
-llamar todavía. Es, otra vez, una pieza aditiva verificable por CI sin
-tocar el flujo de JIT en vivo.
+### Actualización: el target de extensión sí se creó (commit siguiente)
 
-### API real de StikJIT (para cuando exista la extensión — no inventar luego)
+Lo anterior describía el estado "solo preflight, sin extensión". Se
+decidió proceder con la extensión real — el usuario autorizó
+explícitamente intentar la cirugía de `project.pbxproj` a mano, con
+verificación dura vía CI. Antes de escribir una sola línea se buscó
+evidencia real de cómo otros integradores resuelven exactamente este
+problema (en vez de inventar), encontrando:
 
-Del `INTEGRATION.md`, el helper llamaría (de forma síncrona/bloqueante,
-en una sola cola serial, nunca `async`/concurrente):
-- `StikJIT.isTXMPresent` — informativo, para mostrar estado en settings.
-- `StikJIT.prepareDevice(pairingFile:paths:progress:) -> .ready /
-  .unreachable(reason) / .preparationFailed(reason)`.
-- `StikJIT.enableJIT(targetPID:pairingFile:ddiPaths:script:forceScript:
-  preparationProgress:progress:)` — hace la preparación internamente, no
-  requiere llamar `prepareDevice` antes.
-- `StikJIT.resetCachedDDI(at:)`.
-- `DDIPaths.default(in:)`, viviendo en el directorio `Library` de la
-  **extensión** (no del host), persistente entre lanzamientos.
-- `StikJIT.Script`: `.universal`, `.legacy`, `.custom(URL)`,
-  `.customBase64(String)` — MeloNX ya usa el protocolo `universal.js`
-  client-side (`BreakpointJIT.framework`/`BreakpointHandler.swift`), así
-  que el script correcto a configurar aquí es `.universal`, fijo en
-  código, nunca expuesto como opción de usuario (regla explícita de
-  `INTEGRATION.md`).
+- **`willfaust/Madeira`** (GPL-3.0-or-later, mismo árbol de licencia que
+  MeloNX/Ryujinx — su "Converter Exception" es sobre enlazar el Metal
+  Shader Converter de Apple, no relacionado, no restringe nada aquí): su
+  target `MadeiraJITHelper` es la referencia real de cómo construir este
+  tipo de extensión en iOS. No se copió su texto — se escribió código
+  propio — pero su arquitectura es la base verificada de lo que sigue.
+- El mecanismo real (confirmado en `project.pbxproj`/`Info.plist` de
+  Madeira) **no** es Network Extension ni ningún punto de extensión
+  documentado públicamente para esto: es un "classic app extension"
+  (`productType = com.apple.product-type.app-extension`) registrado bajo
+  `NSExtensionPointIdentifier = com.apple.ar.viewer` (un punto de
+  extensión AR Quick Look reutilizado, con
+  `NSExtensionActivationRule = FALSEPREDICATE` para que el sistema nunca
+  lo active por su vía normal) más un diccionario `XPCService`
+  (`CFBundlePackageType = XPC!`). Se arranca desde el host vía la API
+  privada `NSExtension`/`ExtensionFoundation`
+  (`extensionWithIdentifier:`/`beginExtensionRequestWithInputItems:...`)
+  — la misma que usa LiveContainer para su "LiveProcess". Es una API
+  privada, no seguro para App Store — consistente con el resto de este
+  proyecto (sideload-only, igual que `SecTaskCopyValueForEntitlement` en
+  `EntitlementChecker.swift`).
+- `StikJIT.xcframework` publica un release precompilado real
+  (`StikDebug/StikJIT` v1.9.0, `StikJIT.xcframework.zip`, solo
+  `ios-arm64`, sin slice de simulador). Se vendoreó directamente en
+  `src/MeloNX/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/`,
+  siguiendo la convención que MeloNX ya usa para SDL2/FFmpeg/etc. (no
+  Git LFS — esos tampoco lo usan, y el zip son solo 1.7MB) en vez del
+  patrón de Madeira de descargarlo en CI.
+- El `.swiftinterface` real del framework (compilador real, no
+  `INTEGRATION.md`) confirma `-target arm64-apple-ios17.4` — por eso el
+  target del helper usa `IPHONEOS_DEPLOYMENT_TARGET = 17.4`, no el 18.1
+  del host ni el 26.0 que eligió Madeira (una decisión propia de ellos,
+  sin relación con el mínimo real de StikJIT). También confirma el
+  overload de `enableJIT` recomendado (con `ddiPaths:`, no el deprecado
+  sin él) y que el framework no trae `Info.plist` propio (confirmado por
+  archivo, no por el comentario de Madeira) — se sintetizó uno estático
+  una sola vez en vez de regenerarlo en cada build como hace su shell
+  script.
+
+**Qué se construyó** (`src/MeloNX/MeloNXJITHelper/`, nuevo target
+`MeloNXJITHelper`, producto `MeloNXJITHelper.appex`):
+- `Info.plist` — el mismo mecanismo `com.apple.ar.viewer`/`XPCService`
+  verificado arriba.
+- `MeloNXJITHelperRequest.swift` — el modelo `Codable` del
+  request/response JSON que viaja en `NSExtensionItem.userInfo`.
+  Duplicado (no compartido vía membership cruzado de grupo sincronizado)
+  a propósito: compartirlo requeriría tocar las excepciones del grupo
+  sincronizado del HOST (`MeloNX`), que ya funciona — no vale el riesgo
+  por un struct de 20 líneas.
+- `MeloNXBreakpointScript.swift` — el mismo script base64 que
+  `StikEnableJIT.swift` le manda a la app externa StikDebug (verificado
+  byte a byte idéntico), para que ambos caminos de JIT ejecuten el mismo
+  protocolo. Duplicado por la misma razón que el modelo de arriba.
+- `MeloNXJITHelperHandler.swift` — `NSExtensionRequestHandling` real,
+  llamando `StikJIT.prepareDevice`/`enableJIT`/`resetCachedDDI` de
+  verdad, con `script: .customBase64(meloNXBreakpointScript)` (no
+  `.universal`: MeloNX tiene su propio archivo de protocolo, no el
+  `universal.js` empaquetado por StikJIT, aunque implemente el mismo
+  protocolo) y `forceScript: false` (el default documentado — StikJIT
+  decide internamente si hace falta el script según TXM, igual que ya
+  hace `enableJITStik()` del lado StikDebug).
+
+**Qué NO se conectó todavía**: nada en `LaunchGameHandler`/`ContentView`
+llama a esta extensión — no existe el lanzador del lado host (el
+equivalente a `JITBuiltInHost.swift` de Madeira: buscar el `.appex` por
+bundle ID, armar el request, mandarlo vía la API privada de
+`NSExtension`). Tampoco existe todavía el flujo de importar un pairing
+file real (sección 10, pairing-file management, aparte). Sin un pairing
+file real y un dispositivo físico, nada de esto puede probarse de
+extremo a extremo — lo que CI puede verificar es compilación, enlazado y
+empaquetado, no que la extensión se lance o que el protocolo de JIT
+funcione en un dispositivo real. Eso se dice explícitamente, no se da por
+hecho.
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
@@ -366,4 +437,5 @@ en una sola cola serial, nunca `async`/concurrente):
 | `docs: correct the JIT-wait architectural claim...` | `f3f47d767` | `docs/PERFORMANCE_FORK.md` | Corrige el hallazgo erróneo de "JIT sin esperar"; documenta los problemas reales (polling duplicado, fuga de Timer en `JITPopover`, `JitStreamerEB` inactivo) |
 | `refactor(jit): add JIT coordinator foundation` | `159ae9bb2` | `JITCoordinator.swift` (nuevo) | Pieza aditiva, sin call sites todavía: un solo loop de sondeo cancelable con tope opcional |
 | `refactor(jit): migrate JITPopover and checkJITAndRunGame onto JITCoordinator` | `656e29273` | `JITCoordinator.swift`, `JITPopover.swift`, `ContentView.swift` | Conecta los dos call sites; corrige la fuga de `Timer` de `JITPopover`; añade manejo de llamadores concurrentes (`pendingCompletions`) para no perder ni pisar completions entre los dos flujos |
-| `feat(jit): add Built-in StikJIT host-side availability preflight` | *(pendiente de build)* | `BuiltInStikJITAvailability.swift` (nuevo) | Checks de disponibilidad verificados contra `INTEGRATION.md` real de StikJIT (ver `#builtin-stikjit`); el target de extensión que haría falta para enlazar `StikJIT.xcframework` queda fuera de este commit, señalado como el siguiente paso de mayor riesgo |
+| `feat(jit): add Built-in StikJIT host-side availability preflight` | `503c26705` | `BuiltInStikJITAvailability.swift` (nuevo) | Checks de disponibilidad verificados contra `INTEGRATION.md` real de StikJIT (ver `#builtin-stikjit`); el target de extensión que haría falta para enlazar `StikJIT.xcframework` queda fuera de este commit, señalado como el siguiente paso de mayor riesgo |
+| `feat(jit): add the Built-in StikJIT helper extension target` | *(pendiente de build)* | `project.pbxproj`, `MeloNXJITHelper/` (nuevo target+carpeta), `Dependencies/XCFrameworks/StikJIT.xcframework` (vendoreado), `ios-unsigned-ipa.yml` | El target real, verificado contra la arquitectura de Madeira (ver `#builtin-stikjit`); compila, enlaza StikJIT de verdad, se empaqueta en el IPA. No conectado a ningún call site del host todavía |

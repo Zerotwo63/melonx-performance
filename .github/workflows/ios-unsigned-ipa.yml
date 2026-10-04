@@ -153,10 +153,31 @@ jobs:
           chmod 755 "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
           test -f "$app_path/Frameworks/Ryujinx.Headless.SDL2.dylib"
 
+          # MeloNXJITHelper.appex (embedded by the "Embed Foundation
+          # Extensions" build phase) links StikJIT via
+          # @executable_path/../../Frameworks, which resolves relative to
+          # the *host* app's executable, not the extension's own — so the
+          # framework must live in MeloNX.app/Frameworks, not inside the
+          # .appex. Mirrors the Ryujinx dylib handling just above.
+          stikjit_framework="$PWD/src/MeloNX/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework"
+          if [ ! -d "$stikjit_framework" ]; then
+            echo "StikJIT.framework was not found at $stikjit_framework" >&2
+            exit 1
+          fi
+          ditto "$stikjit_framework" "$app_path/Frameworks/StikJIT.framework"
+          test -f "$app_path/Frameworks/StikJIT.framework/StikJIT"
+
+          if [ ! -d "$app_path/PlugIns/MeloNXJITHelper.appex" ]; then
+            echo "MeloNXJITHelper.appex was not embedded into MeloNX.app/PlugIns" >&2
+            exit 1
+          fi
+
           rm -rf "$IPA_OUTPUT_DIR"
           mkdir -p "$IPA_OUTPUT_DIR/Payload"
           ditto "$app_path" "$IPA_OUTPUT_DIR/Payload/MeloNX.app"
           test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/Frameworks/Ryujinx.Headless.SDL2.dylib"
+          test -f "$IPA_OUTPUT_DIR/Payload/MeloNX.app/Frameworks/StikJIT.framework/StikJIT"
+          test -d "$IPA_OUTPUT_DIR/Payload/MeloNX.app/PlugIns/MeloNXJITHelper.appex"
           ditto "$PWD/src/MeloNX/MeloNX/MeloNX.entitlements" "$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
           /usr/libexec/PlistBuddy -c "Print :com.apple.developer.wifi-aware" "$IPA_OUTPUT_DIR/MeloNX-signing-entitlements.plist"
           (cd "$IPA_OUTPUT_DIR" && zip -qry MeloNX-unsigned.ipa Payload)

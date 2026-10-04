@@ -31,6 +31,7 @@
 		4E9DE38D2EB04E9F00053C88 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E9DE38C2EB04E9F00053C88 /* MetalKit.framework */; };
 		4EA5AE822D16807500AD0B9F /* SwiftSVG in Frameworks */ = {isa = PBXBuildFile; productRef = 4EA5AE812D16807500AD0B9F /* SwiftSVG */; };
 		CA8F9C322D3F5AB200D7E586 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E80AA622CD7122800029585 /* GameController.framework */; };
+		5A179B62179273C8EB5BB682 /* MeloNXJITHelper.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5A1705DA846A32C3BB81E3C2 /* MeloNXJITHelper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -62,6 +63,13 @@
 			remoteGlobalIDString = BD43C61D2D1B23AB003BBC42;
 			remoteInfo = Ryujinx;
 		};
+		5A17575EC87A171AC826A6FC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4E80A9852CD6F54500029585 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5A1730877432D1026706D7E8;
+			remoteInfo = MeloNXJITHelper;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -71,6 +79,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
+				5A179B62179273C8EB5BB682 /* MeloNXJITHelper.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -103,6 +112,7 @@
 		4E4037CC2E9802610083A2CB /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
 		4E7023A52D5A98E2002C7183 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		4E80A98D2CD6F54500029585 /* MeloNX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MeloNX.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5A1705DA846A32C3BB81E3C2 /* MeloNXJITHelper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MeloNXJITHelper.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4E80A99D2CD6F54700029585 /* MeloNXTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeloNXTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4E80A9A72CD6F54700029585 /* MeloNXUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeloNXUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4E80AA622CD7122800029585 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
@@ -119,6 +129,13 @@
 				Info.plist,
 			);
 			target = 4E80A98C2CD6F54500029585 /* MeloNX */;
+		};
+		5A1750AF03B971722F244F58 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 5A1730877432D1026706D7E8 /* MeloNXJITHelper */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -211,6 +228,7 @@
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4E80A98F2CD6F54500029585 /* MeloNX */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (CA8F9C2D2D3F5A3A00D7E586 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, CA0AE31D2D3EECBC00F6D350 /* PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = MeloNX; sourceTree = "<group>"; };
+		5A17CE8038A39D5E0853964B /* MeloNXJITHelper */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (5A1750AF03B971722F244F58 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = MeloNXJITHelper; sourceTree = "<group>"; };
 		4E80A9A02CD6F54700029585 /* MeloNXTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = MeloNXTests; sourceTree = "<group>"; };
 		4E80A9AA2CD6F54700029585 /* MeloNXUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = MeloNXUITests; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -244,6 +262,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5A1721A278F64F7FD633DBDD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -253,6 +278,7 @@
 				4E12B23B2D797CFA00FB2271 /* MeloNX.xcconfig */,
 				BD43C6282D1B2514003BBC42 /* Ryujinx.Headless.SDL2.dylib */,
 				4E80A98F2CD6F54500029585 /* MeloNX */,
+				5A17CE8038A39D5E0853964B /* MeloNXJITHelper */,
 				4E80A9A02CD6F54700029585 /* MeloNXTests */,
 				4E80A9AA2CD6F54700029585 /* MeloNXUITests */,
 				4E80AA192CD700F500029585 /* Frameworks */,
@@ -264,6 +290,7 @@
 			isa = PBXGroup;
 			children = (
 				4E80A98D2CD6F54500029585 /* MeloNX.app */,
+				5A1705DA846A32C3BB81E3C2 /* MeloNXJITHelper.appex */,
 				4E80A99D2CD6F54700029585 /* MeloNXTests.xctest */,
 				4E80A9A72CD6F54700029585 /* MeloNXUITests.xctest */,
 			);
@@ -321,6 +348,7 @@
 			);
 			dependencies = (
 				4EA9760D2E645BBE006A2EFB /* PBXTargetDependency */,
+				5A17E48478DCB74F21345D2C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				4E80A98F2CD6F54500029585 /* MeloNX */,
@@ -380,6 +408,26 @@
 			productReference = 4E80A9A72CD6F54700029585 /* MeloNXUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		5A1730877432D1026706D7E8 /* MeloNXJITHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5A1712DA86A78C49EA20E326 /* Build configuration list for PBXNativeTarget "MeloNXJITHelper" */;
+			buildPhases = (
+				5A17D669CBEE3772A0770217 /* Sources */,
+				5A1721A278F64F7FD633DBDD /* Frameworks */,
+				5A17E131CA3766E4D58E72E3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5A17CE8038A39D5E0853964B /* MeloNXJITHelper */,
+			);
+			name = MeloNXJITHelper;
+			productName = MeloNXJITHelper;
+			productReference = 5A1705DA846A32C3BB81E3C2 /* MeloNXJITHelper.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -407,6 +455,9 @@
 					BD43C6212D1B248D003BBC42 = {
 						CreatedOnToolsVersion = 16.2;
 					};
+					5A1730877432D1026706D7E8 = {
+						CreatedOnToolsVersion = 16.1;
+					};
 				};
 			};
 			buildConfigurationList = 4E80A9882CD6F54500029585 /* Build configuration list for PBXProject "MeloNX" */;
@@ -432,6 +483,7 @@
 				4E80A9A62CD6F54700029585 /* MeloNXUITests */,
 				BD43C61D2D1B23AB003BBC42 /* Ryujinx */,
 				BD43C6212D1B248D003BBC42 /* com.Stossy11.MeloNX.RyujinxAg */,
+				5A1730877432D1026706D7E8 /* MeloNXJITHelper */,
 			);
 		};
 /* End PBXProject section */
@@ -452,6 +504,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		4E80A9A52CD6F54700029585 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A17E131CA3766E4D58E72E3 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -504,6 +563,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5A17D669CBEE3772A0770217 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -526,6 +592,11 @@
 			isa = PBXTargetDependency;
 			target = BD43C61D2D1B23AB003BBC42 /* Ryujinx */;
 			targetProxy = BD43C6252D1B249E003BBC42 /* PBXContainerItemProxy */;
+		};
+		5A17E48478DCB74F21345D2C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5A1730877432D1026706D7E8 /* MeloNXJITHelper */;
+			targetProxy = 5A17575EC87A171AC826A6FC /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -3504,6 +3575,105 @@
 			};
 			name = Release;
 		};
+		5A1710275DFF6C15C0C8E9DF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4E12B23B2D797CFA00FB2271 /* MeloNX.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/ios-arm64",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MeloNXJITHelper/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					StikJIT,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.stossy11.personal.PLS-DONT-TAKE.MeloNX.MeloNXJITHelper";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		5A17469611A11F5125227C37 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4E12B23B2D797CFA00FB2271 /* MeloNX.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/ios-arm64",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MeloNXJITHelper/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					StikJIT,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.stossy11.personal.PLS-DONT-TAKE.MeloNX.MeloNXJITHelper";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		5A1784B27B95E90934833489 /* Archive */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4E12B23B2D797CFA00FB2271 /* MeloNX.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/ios-arm64",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MeloNXJITHelper/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					StikJIT,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.stossy11.personal.PLS-DONT-TAKE.MeloNX.MeloNXJITHelper";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Archive;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -3563,6 +3733,16 @@
 				BD43C6232D1B248D003BBC42 /* Debug */,
 				BD43C6242D1B248D003BBC42 /* Release */,
 				4E2CC22C2F3FEBDF00BE45F4 /* Archive */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Archive;
+		};
+		5A1712DA86A78C49EA20E326 /* Build configuration list for PBXNativeTarget "MeloNXJITHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A1710275DFF6C15C0C8E9DF /* Debug */,
+				5A17469611A11F5125227C37 /* Release */,
+				5A1784B27B95E90934833489 /* Archive */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Archive;
