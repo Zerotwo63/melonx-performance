@@ -8,6 +8,7 @@ on:
       - XC-ios-ht
       - main
       - master
+      - perf/jit-integration
     paths:
       - ".github/workflows/ios-unsigned-ipa.yml"
       - "Directory.Packages.props"
