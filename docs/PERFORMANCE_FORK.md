@@ -15,23 +15,31 @@
 Mantenernos lo más cerca posible de upstream. Nunca reescribir módulos
 existentes que ya funcionan. Cada mejora de rendimiento/JIT vive en su
 propio commit pequeño y, cuando el tamaño lo justifique, en su propia rama
-`perf/*`, para que `git fetch upstream && git merge upstream/XC-ios-ht`
-produzca el mínimo de conflictos posible.
+`perf/*`.
 
 No se modifica, ni se le escribe, ni se abre PR contra
 `AzureDominus/melonx`. Todo el trabajo vive únicamente en este fork.
 
-## Cómo actualizar desde upstream
+**Actualización (2026-10-05): `XC-ios-ht` dejó de ser un espejo
+limpio de upstream.** Por instrucción explícita, las 9 ramas de
+trabajo de abajo (29 commits, cada uno verificado en CI por
+separado) se fusionaron — vía fast-forward puro, sin conflictos —
+directo a la rama local `XC-ios-ht` de este fork, que ahora es la
+rama de integración real del fork, no un simple tracking branch de
+upstream. Esto es una decisión consciente, no un accidente: se avisó
+antes de hacerlo que tendría esta consecuencia exacta.
+
+## Cómo actualizar desde upstream (revisado tras la fusión)
+
+Ya no es un simple fast-forward — `XC-ios-ht` de este fork ahora tiene
+commits que `upstream/XC-ios-ht` no tiene, así que traer cambios
+nuevos de upstream requiere una fusión real, revisando conflictos:
 
 ```bash
 git fetch upstream
 git checkout XC-ios-ht
-git merge upstream/XC-ios-ht     # o rebase, según convenga por rama
+git merge upstream/XC-ios-ht     # fusión real ahora, no fast-forward — revisar conflictos uno por uno
 git push origin XC-ios-ht
-
-# luego, para traer la base nueva a una rama de trabajo:
-git checkout perf/jit-integration
-git merge XC-ios-ht              # nunca --force, nunca rebase de upstream sobre commits ya pusheados sin avisar
 ```
 
 No hay auto-merge de upstream configurado (ningún workflow lo hace
@@ -39,10 +47,11 @@ automáticamente) — se decide manualmente cada vez, revisando el diff real.
 
 ## Estrategia de ramas
 
+Cadena real (cada rama nace de la punta de la anterior — confirmado
+con `git merge-base --is-ancestor` antes de fusionar nada, no asumido):
+
 ```
-upstream/XC-ios-ht
-        ↓
-   XC-ios-ht (este fork, espejo de upstream)
+upstream/XC-ios-ht (55f84af15 — baseline, sin cambios)
         ↓
    perf/jit-integration   (13 commits, JIT estable + Built-in StikJIT completo)
         ↓
@@ -59,16 +68,16 @@ upstream/XC-ios-ht
    perf/shader-prewarm   (visibilidad real de caché; prewarm nativo ya existe)
         ↓
    perf/metalfx   (detección real de hardware; integración real fuera de alcance)
-```
-
-El save/backup manager no es una rama `perf/*` — es gestión de datos, no
-rendimiento, así que se nombra aparte de esta cadena:
-
-```
-perf/metalfx (punto de partida)
         ↓
-   feat/save-backup-manager   ← rama de trabajo actual
+   feat/save-backup-manager   (backup + restore reales — no es `perf/*`, es gestión de datos)
+        ↓
+   XC-ios-ht (local de este fork) ← fusionado aquí, fast-forward, 2026-10-05
 ```
+
+Las 9 ramas de trabajo siguen existiendo en `origin` tal cual —
+ninguna se borró (no hay autorización para eso, y no hacía falta: el
+fast-forward las deja como historial redundante pero intacto, cada
+una con su propio CI verificado por separado en su momento).
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
 (JIT, memoria, térmico, etc.) esté listo para empezar, para no complicar
