@@ -52,7 +52,9 @@ upstream/XC-ios-ht
         ↓
    perf/thermal-governor   (ThermalGovernor real, pasivo)
         ↓
-   perf/auto-performance   ← rama de trabajo actual
+   perf/auto-performance   (AutoPerformanceManager real, primera pieza que actúa)
+        ↓
+   perf/frame-pacing   ← rama de trabajo actual
         ↓
    (futuras: perf/metalfx, ...)
 ```
@@ -715,6 +717,65 @@ con esta, no con una de las observaciones pasivas otra vez.
   merece saber cuándo su resolución está siendo reducida
   automáticamente, no que cambie en silencio.
 
+<a id="frame-pacing"></a>
+## Frame Pacing (sección 15 del pedido original)
+
+Rama nueva (`perf/frame-pacing`), continúa desde la punta de
+`perf/auto-performance`.
+
+### Hallazgo real durante la investigación — documentado, NO corregido
+
+Leyendo `MetalView.swift` antes de tocar nada: el `CAMetalLayer` de la
+emulación tiene `displaySyncEnabled` deshabilitado por completo (vía
+`NSSelectorFromString("setDisplaySyncEnabled:")`, API privada en iOS) y
+`nominalFramesPerSecond` fijo a `60` sin condición — **completamente
+independiente** del toggle de VSync que el usuario sí controla
+(`Ryujinx.Arguments.disablevsync`, default `false`). Ese toggle, según
+su propio `infoMessage` en Settings, solo gobierna el ritmo interno del
+*Switch emulado* ("VSync makes the game try to run at the Switch's
+Framerate") — una cosa completamente distinta de la sincronización del
+compositor de Metal con la pantalla real.
+
+**No se cambió esto.** Dos razones concretas, no una excusa genérica:
+1. No hay forma de saber, leyendo solo el lado Swift/iOS, si
+   `displaySyncEnabled = false` es un error o una decisión deliberada —
+   podría existir precisamente para que el compositor de iOS no le
+   imponga una SEGUNDA autoridad de ritmo (potencialmente en conflicto)
+   encima del pacing interno que el núcleo nativo de Ryujinx ya hace
+   por su cuenta, algo que este código Swift no puede ver (vive en
+   C#/.NET, fuera de este árbol).
+2. Es la ruta de renderizado activa durante el gameplay real — la más
+   sensible de todo el proyecto — y este entorno de CI no tiene GPU ni
+   dispositivo físico para verificar si un cambio aquí mejora o empeora
+   el pacing real. "Compila" no es una señal útil para este tipo de
+   cambio.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/FramePacingMonitor.swift` (nuevo) — usa
+  `CADisplayLink` (la señal real del sistema para el ritmo de
+  refresco, no un timer reinventado) para medir algo que
+  `BenchmarkManager` NO mide: la uniformidad entre frames, no solo el
+  promedio de FPS. Un juego puede promediar 60 FPS y seguir
+  tartamudeando si los intervalos entre frames son desiguales.
+  `stop()` devuelve duración, cantidad de muestras, intervalo
+  promedio, el peor jitter, y `UIScreen.main.maximumFramesPerSecond`
+  (la tasa de refresco real del dispositivo — el dato que
+  `MetalView.swift` debería estar usando en vez del `60` fijo, para
+  quien decida corregirlo con un dispositivo real en mano).
+  **No toca `MetalView.swift` ni el pipeline de renderizado en
+  absoluto** — es un observador paralelo e independiente.
+- `PerformanceOverlay.swift` — botón real "Frame Pacing"/"Stop Frame
+  Pacing" + resumen, mismo patrón que `benchmarkControl`.
+
+### Qué sigue pendiente (requiere hardware real)
+
+Decidir si `displaySyncEnabled`/`nominalFramesPerSecond` en
+`MetalView.swift` deben cambiar — y si `UIScreen.main.maximumFramesPerSecond`
+en vez de `60` fijo ayuda o empeora las cosas en un ProMotion — es
+trabajo que necesita datos reales de `FramePacingMonitor` en un
+dispositivo físico, no una decisión de código a ciegas.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -735,3 +796,4 @@ con esta, no con una de las observaciones pasivas otra vez.
 | `feat(perf): add MemoryGuard` | `0e9072f33` | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |
 | `feat(perf): add ThermalGovernor` | `818515b40` | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |
 | `feat(perf): add AutoPerformanceManager` | `b21d043e3` | `AutoPerformanceManager.swift` (nuevo), `ContentView.swift`, `SettingsView.swift`, `PerformanceOverlay.swift` | Inicio de `perf/auto-performance` (ver `#auto-performance`). Primera pieza que actúa de verdad — reduce `resscale` en vivo vía `InGameSettingsManager` (confirmado que no persiste a disco) cuando térmico/memoria cruzan umbral; apagado por defecto |
+| `feat(perf): add FramePacingMonitor` | *(pendiente de build)* | `FramePacingMonitor.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/frame-pacing` (ver `#frame-pacing`). Mide jitter real entre frames vía `CADisplayLink` — no toca `MetalView.swift`; documenta (sin corregir) el hallazgo de `displaySyncEnabled`/`nominalFramesPerSecond` fijo independiente del toggle de VSync del usuario |

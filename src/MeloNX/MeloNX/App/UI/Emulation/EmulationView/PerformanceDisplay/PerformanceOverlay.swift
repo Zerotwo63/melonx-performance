@@ -12,6 +12,7 @@ struct PerformanceOverlayView: View  {
 
     @StateObject private var fpsmonitor = FPSMonitor()
     @StateObject private var benchmarkManager = BenchmarkManager()
+    @ObservedObject private var framePacingMonitor = FramePacingMonitor.shared
     @ObservedObject private var autoPerformance = AutoPerformanceManager.shared
     @State private var batteryLevel: Int = Int(UIDevice.current.batteryLevel * 100)
 
@@ -42,6 +43,28 @@ struct PerformanceOverlayView: View  {
         }
     }
 
+    /// True frame-pacing (interval evenness), not just average FPS — see
+    /// App/Core/Performance/FramePacingMonitor.swift.
+    @ViewBuilder
+    private var framePacingControl: some View {
+        Button {
+            if framePacingMonitor.isRunning {
+                framePacingMonitor.stop()
+            } else {
+                framePacingMonitor.start()
+            }
+        } label: {
+            Text(framePacingMonitor.isRunning ? "Stop Frame Pacing" : "Frame Pacing")
+                .foregroundStyle(.white)
+        }
+
+        if !framePacingMonitor.isRunning, let result = framePacingMonitor.lastResult {
+            Text(String(format: "Jitter %.1fms / Display %dHz", result.worstJitter * 1000, result.deviceMaximumFPS))
+                .foregroundStyle(.white)
+                .font(.caption2)
+        }
+    }
+
     @ViewBuilder
     var content: some View {
         if horizontalorvertical {
@@ -59,6 +82,7 @@ struct PerformanceOverlayView: View  {
                         .foregroundStyle(.orange)
                 }
                 benchmarkControl
+                framePacingControl
             }
             .padding(10)
         } else {
@@ -76,6 +100,7 @@ struct PerformanceOverlayView: View  {
                         .foregroundStyle(.orange)
                 }
                 benchmarkControl
+                framePacingControl
             }
             .padding(10)
             .frame(minWidth: 150)
