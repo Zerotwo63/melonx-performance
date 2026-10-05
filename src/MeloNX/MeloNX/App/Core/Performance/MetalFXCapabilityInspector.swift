@@ -6,11 +6,14 @@
 import Metal
 import MetalFX
 
-/// Real device capability check for MetalFX upscaling — MTLFXSpatialScalerDescriptor
-/// (iOS 16+) / MTLFXTemporalScalerDescriptor (iOS 17+), both unconditionally
-/// available on MeloNX's 18.1 deployment target, so no #available guard is
-/// needed here (same reasoning as the iOS 17.4 check already skipped
-/// elsewhere in this fork).
+/// Real device capability check for MetalFX upscaling —
+/// MTLFXSpatialScalerDescriptor / MTLFXTemporalScalerDescriptor. Despite
+/// MeloNX's 18.1 deployment target comfortably exceeding both APIs'
+/// stated iOS 16/17 minimums, the compiler still required an explicit
+/// #available guard here (confirmed by a real build failure, not
+/// assumed from the doc comment that used to be here claiming the
+/// guard was dead weight — that assumption was wrong for this specific
+/// pair of symbols, unlike the iOS 17.4 case elsewhere in this fork).
 ///
 /// This is informational only — it does not perform any upscaling.
 /// Genuine MetalFX integration needs to intercept the rendered frame
@@ -34,6 +37,8 @@ enum MetalFXCapabilityInspector {
 
     static func current() -> Capability? {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+
+        guard #available(iOS 16.0, *) else { return nil }
 
         return Capability(
             supportsSpatialScaling: MTLFXSpatialScalerDescriptor.supportsDevice(device),
