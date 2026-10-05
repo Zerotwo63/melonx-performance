@@ -1125,10 +1125,41 @@ verificar primero el FSR manual."
   archivo.)
 
 Con esto, `AutoPerformanceManager` ya puede alternar FSR en vivo de la
-misma forma en que ya alterna `resscale` — la integración en sí
-(cambiar `scalingFilter` automáticamente cuando `resscale` baja de
-1.0x) sigue sin implementarse, porque no se pidió todavía; solo se
-quitó el bloqueo real que lo impedía.
+misma forma en que ya alterna `resscale`.
+
+### Integración Auto Performance + FSR (commit siguiente)
+
+Implementada tal como se pidió, por instrucción explícita posterior:
+
+- `AutoPerformanceManager.swift` — `beginThrottling()` ahora, además
+  de reducir `resscale`, revisa si el valor resultante queda por
+  debajo de `1.0x`; si es así y el filtro actual no es ya `.fsr`,
+  guarda el filtro original (`baselineScalingFilter`) y cambia a
+  `.fsr`. `restoreBaselineIfNeeded()` restaura ambos (`resscale` y
+  `scalingFilter`) juntos cuando la presión baja. `scalingFilterLevel`
+  (la intensidad de sharpening) nunca se toca — esto solo decide
+  Bilinear vs FSR, no el nivel de nitidez, respetando lo que el
+  usuario ya tenga configurado.
+- Caso borde verificado: si el usuario ya tenía FSR activado
+  manualmente antes de que entrara la presión, `baselineScalingFilter`
+  queda `nil` (la condición `config.scalingFilter != .fsr` ya era
+  falsa) — no hay nada que "restaurar", se deja la elección del
+  usuario intacta.
+- Caso borde verificado: si el `resscale` del usuario ya es alto
+  (p. ej. 1.5x) y el paso de throttle lo deja todavía ≥ 1.0x (p. ej.
+  1.25x), **no** se fuerza FSR — coincide exactamente con "1.00x → no
+  hace falta forzar FSR" generalizado a cualquier valor que no haya
+  cruzado el umbral.
+- `PerformanceOverlay.swift` — el indicador "Throttled" ahora dice
+  "Throttled (FSR)" cuando el cambio automático de filtro está activo,
+  misma razón que el indicador original: el usuario merece saber qué
+  se le cambió, no que ocurra en silencio.
+
+Esto solo funciona porque el arreglo de `ApplyDynamicSettings` (commit
+anterior) ya está en vivo — antes de ese arreglo, esto habría
+compilado pero no habría tenido ningún efecto real hasta el próximo
+relanzamiento, justo el tipo de "declarar que funciona solo porque
+compila" que se pidió evitar explícitamente.
 
 ### FASE 2 — Implementación
 
@@ -1286,3 +1317,4 @@ Verificado, no asumido:
 | `docs: record the merge of all 9 work branches into XC-ios-ht` | `30fb45f7d` | `PERFORMANCE_FORK.md` | `XC-ios-ht` deja de ser espejo limpio de upstream por instrucción explícita — fast-forward puro, 29 commits, cero conflictos |
 | `feat(fsr): expose the core's existing FSR 1.0 to MeloNX/iOS` | `1f61944e2` | `ScalingFilter.swift` (nuevo), `BenchmarkManager.swift` (extendido), `Ryujinx.swift`, `PerGameSettingsView.swift`, `PerformanceOverlay.swift` | Ver `#fsr-ios-integration`. Corrección: el core C#/.NET SÍ está en este repo, no "fuera de alcance" como se dijo antes. FSR ya funciona completo sobre MoltenVK/iOS, sin exclusión de plataforma — solo faltaba pasar `--scaling-filter`/`--scaling-filter-level` desde Swift. Hueco real documentado (no corregido): el camino de actualización en vivo no propaga el filtro — relevante para la integración futura con Auto Performance, explícitamente diferida |
 | `fix(fsr): propagate ScalingFilter in ApplyDynamicSettings` | `b365fae67` | `Ryujinx.Headless.SDL2/Program.cs`, `Ryujinx.Headless.SDL2/WindowBase.cs` | Primer cambio de este fork en código C#/.NET. `SetScalingFilter()` de `private` a `internal` (mínimo cambio de visibilidad, mismo ensamblado) para reutilizarlo desde `ApplyDynamicSettings` en vez de duplicar su lógica. Desbloquea que `AutoPerformanceManager` pueda alternar FSR en vivo — la integración en sí sigue sin implementarse, solo se quitó el bloqueo |
+| `feat(fsr): auto-switch to FSR when AutoPerformanceManager throttles below 1.0x` | *(pendiente de build)* | `AutoPerformanceManager.swift`, `PerformanceOverlay.swift` | Implementada tal como se pidió. Restaura `resscale` y `scalingFilter` juntos; nunca toca `scalingFilterLevel`; respeta si el usuario ya tenía FSR activado manualmente; no fuerza FSR si el throttle no cruza 1.0x. Solo funciona porque el fix anterior de `ApplyDynamicSettings` ya está en vivo |

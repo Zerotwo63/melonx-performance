@@ -81,7 +81,7 @@ struct PerformanceOverlayView: View  {
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
                 if autoPerformance.isThrottling {
-                    Text("Throttled")
+                    Text(autoPerformance.isUsingAutoFSR ? "Throttled (FSR)" : "Throttled")
                         .foregroundStyle(.orange)
                 }
                 benchmarkControl
@@ -99,7 +99,7 @@ struct PerformanceOverlayView: View  {
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
                 if autoPerformance.isThrottling {
-                    Text("Throttled")
+                    Text(autoPerformance.isUsingAutoFSR ? "Throttled (FSR)" : "Throttled")
                         .foregroundStyle(.orange)
                 }
                 benchmarkControl
