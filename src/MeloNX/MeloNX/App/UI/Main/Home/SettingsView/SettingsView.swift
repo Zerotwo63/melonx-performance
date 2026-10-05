@@ -1151,7 +1151,9 @@ struct SettingsViewNew: View {
             VStack(spacing: 4) {
                 jitToggleView
                 Divider()
-                
+                PairingFileImportRow()
+                Divider()
+
                 // SettingsToggle(isOn: nativeSettingsManager.setting(forKey: "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", default: true).projectedValue, icon: "line.diagonal", label: "MVK: Synchronous Queue Submits", infoMessage: "This option may help if Mario Kart 8 is crashing at Grand Prix mode.")
                 // Divider()
                 

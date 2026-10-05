@@ -94,10 +94,12 @@ Git innecesariamente.
     `StikJIT.xcframework` (ver `#builtin-stikjit`). Embebida en el host
     vía la fase "Embed Foundation Extensions" (ya existía vacía en el
     proyecto).
-  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJIT/` (nuevo) —
+  - `src/MeloNX/MeloNX/App/Core/JIT/BuiltInStikJIT/` —
     `MeloNXBuiltInJIT.swift` (el lanzador del lado host, API privada
-    `NSExtension`) y `MeloNXJITHelperRequest.swift` (copia del lado host
-    del modelo `Codable`). Sin call sites desde
+    `NSExtension`), `MeloNXJITHelperRequest.swift` (copia del lado host
+    del modelo `Codable`), `PairingFileImporter.swift` +
+    `PairingFileImportRow.swift` (import real del pairing file, ver
+    `#builtin-stikjit`). Sin call sites desde
     `LaunchGameHandler`/`ContentView` todavía.
   - `src/MeloNX/MeloNX/Dependencies/XCFrameworks/StikJIT.xcframework/`
     (vendoreado, `StikDebug/StikJIT` v1.9.0, MPL-2.0) — mismo patrón que
@@ -453,6 +455,47 @@ dispositivo); no puede verificar que la extensión se lance o que el
 protocolo de JIT funcione. Eso se dice explícitamente, no se da por
 hecho.
 
+### Pairing-file management (sección 10, commit siguiente)
+
+Implementado según `INTEGRATION.md` ("Built-in StikJIT: Store and import
+the pairing file"), verificado contra el texto real, no inventado:
+
+- `PairingFileImporter.swift` (nuevo) — copia el archivo elegido a
+  `BuiltInStikJITAvailability.pairingFileURL`
+  (`Documents/StikJIT/pairingFile.plist`, la ruta que recomienda el
+  propio `INTEGRATION.md`), con acceso security-scoped durante la copia
+  (`startAccessingSecurityScopedResource`) y reemplazo atómico
+  (`Data.write(options: .atomic)`). No registra el contenido del archivo
+  en ningún log, como pide la guía.
+- `PairingFileImportRow.swift` (nuevo) — la fila de UI real ("Import
+  Pairing File" + estado "Imported"/"None"), usando `.fileImporter` de
+  SwiftUI (no un `UIDocumentPickerViewController` envuelto a mano — ya es
+  lo idiomático en una app 100% SwiftUI como esta). Insertada con un
+  único cambio de una línea en `SettingsView.swift`
+  (`jitAndMiscCard`, justo debajo de `jitToggleView`) — no se tocó nada
+  más de ese archivo de ~3000 líneas.
+- `Info.plist`: se agregó `LSSupportsOpeningDocumentsInPlace` (acceso en
+  el lugar desde la app Archivos, la otra mitad opcional de la
+  recomendación). `UIFileSharingEnabled` ya estaba presente desde antes
+  de este fork — no fue necesario agregarlo.
+- `import UniformTypeIdentifiers` (para `UTType` en `.fileImporter`) es,
+  hasta donde se pudo confirmar grepeando el proyecto, el primer uso real
+  de ese framework en todo el código — estaba listado en el grupo
+  "Frameworks" del navegador pero sin ningún `PBXBuildFile` que lo
+  enlazara y sin ningún `import` previo. No se asumió que esto compilaría
+  limpio solo porque el framework "está en el proyecto" — se dejó que el
+  build de CI lo confirmara (frameworks de solo-tipos como este
+  normalmente auto-enlazan, pero "normalmente" no es lo mismo que
+  verificado).
+
+**Qué NO se conectó todavía**: el botón de importar guarda el archivo y
+actualiza su propio estado visual, pero nada en `LaunchGameHandler`
+todavía LEE ese archivo para intentar JIT — eso solo pasa cuando se
+conecte "Built-in StikJIT" como tercer método en el selector (seguimos
+sin tocar esa UI, a propósito, por la misma razón que las veces
+anteriores: es un cambio de comportamiento en vivo, y sin probarlo en un
+dispositivo real no hay forma honesta de verificarlo aquí).
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -465,4 +508,5 @@ hecho.
 | `feat(jit): add Built-in StikJIT host-side availability preflight` | `503c26705` | `BuiltInStikJITAvailability.swift` (nuevo) | Checks de disponibilidad verificados contra `INTEGRATION.md` real de StikJIT (ver `#builtin-stikjit`); el target de extensión que haría falta para enlazar `StikJIT.xcframework` queda fuera de este commit, señalado como el siguiente paso de mayor riesgo |
 | `feat(jit): add the Built-in StikJIT helper extension target` | `38c730419` | `project.pbxproj`, `MeloNXJITHelper/` (nuevo target+carpeta), `Dependencies/XCFrameworks/StikJIT.xcframework` (vendoreado), `ios-unsigned-ipa.yml` | El target real, verificado contra la arquitectura de Madeira (ver `#builtin-stikjit`); compila, enlaza StikJIT de verdad, se empaqueta en el IPA. No conectado a ningún call site del host todavía. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(jit): give MeloNXJITHelper a build dependency on RyujinxAg` | `041f56011` | `project.pbxproj` | Causa real del fallo de CI (log real, no especulado): `OTHER_LDFLAGS`/`LIBRARY_SEARCH_PATHS` para `Ryujinx.Headless.SDL2.dylib` se pasan como override global de `xcodebuild` en `ios-unsigned-ipa.yml`, y ese override alcanza a TODOS los targets del build, no solo a `MeloNX`. `MeloNXJITHelper` no tenía dependencias declaradas, así que Xcode lo agendó antes de que el target `Ryujinx`/`RyujinxAg` (que produce ese .dylib vía su shell script) terminara — `clang: error: no such file or directory`. El propio target `MeloNX` no sufre esto porque ya depende de `RyujinxAg`. Se agrega la misma dependencia a `MeloNXJITHelper` para forzar el orden correcto — `MeloNXJITHelper` no necesita Ryujinx, es puramente para resolver la carrera; queda documentado como una verruga conocida (el .appex terminará enlazando innecesariamente ese dylib) |
-| `feat(jit): add the host-side Built-in StikJIT launcher` | *(pendiente de build)* | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
+| `feat(jit): add the host-side Built-in StikJIT launcher` | `21ebfbb78` | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
+| `feat(jit): add the pairing-file import flow` | *(pendiente de build)* | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
