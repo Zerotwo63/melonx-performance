@@ -54,7 +54,9 @@ upstream/XC-ios-ht
         ↓
    perf/auto-performance   (AutoPerformanceManager real, primera pieza que actúa)
         ↓
-   perf/frame-pacing   ← rama de trabajo actual
+   perf/frame-pacing   (FramePacingMonitor real; hallazgo de MetalView documentado sin tocar)
+        ↓
+   perf/shader-prewarm   ← rama de trabajo actual
         ↓
    (futuras: perf/metalfx, ...)
 ```
@@ -776,6 +778,52 @@ en vez de `60` fijo ayuda o empeora las cosas en un ProMotion — es
 trabajo que necesita datos reales de `FramePacingMonitor` en un
 dispositivo físico, no una decisión de código a ciegas.
 
+<a id="shader-prewarm"></a>
+## Shader Prewarm (sección 16 del pedido original)
+
+Rama nueva (`perf/shader-prewarm`), continúa desde la punta de
+`perf/frame-pacing`.
+
+### Lo que ya existía — verificado antes de diseñar nada
+
+El toggle "Shader Cache" (`Ryujinx.Arguments.enableShaderCache`, **default
+`false`**) YA es, literalmente, prewarming — su propio `infoMessage` en
+Settings dice: *"Shader Cache saves shaders to a file and preloads them
+on game install."* `LoadingOverlayView` ya muestra progreso real de esto
+(`ProgressWithPTCorShaderCache`, un callback que llega directo del
+núcleo nativo) durante la pantalla de carga, antes del primer frame.
+
+Se revisó exhaustivamente la superficie completa de `RyujinxBridge`
+(cada función expuesta, no una suposición) buscando algún punto de
+entrada separado para "precalentar sin jugar" — **no existe ninguno**.
+La única forma en que esa caché se construye es jugando de verdad vía
+`mainRyu()`; no hay gancho de "instalación" real tampoco, a pesar de lo
+que sugiere el texto del toggle — esa frase describe la caché
+acumulándose con el tiempo, no un paso separado en el momento de
+instalar. No se puede invocar un prewarm real desde Swift porque la
+pieza que lo haría (el núcleo nativo en C#/.NET) no expone esa
+capacidad — no es algo que se pueda inventar desde este lado sin tocar
+ese núcleo, fuera de alcance aquí.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/ShaderCacheInspector.swift` (nuevo) — lee el
+  tamaño/cantidad de archivos reales en
+  `Documents/games/<titleId>/cache` (la misma carpeta que
+  `Ryujinx.clearShaderCache()` ya borra), por juego o en total. Pura
+  lectura de disco, cero riesgo de renderizado.
+- `App/Core/Performance/ShaderCacheStatusRow.swift` +
+  `PerGameSettingsView.swift` (+2 líneas) — muestra el tamaño real de
+  la caché justo al lado del toggle existente, que hoy no da ninguna
+  indicación de si realmente está acumulando algo. Deliberadamente sin
+  botón de limpiar propio: `Ryujinx.clearShaderCache()` ya borra de
+  forma asíncrona detrás de una alerta de confirmación sin callback de
+  finalización — no hay forma confiable de saber cuándo terminó para
+  refrescar después, así que no se inventó ese mecanismo.
+
+No se tocó `enableShaderCache`, su valor por defecto, ni ningún flag
+pasado al núcleo nativo.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -797,3 +845,4 @@ dispositivo físico, no una decisión de código a ciegas.
 | `feat(perf): add ThermalGovernor` | `818515b40` | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |
 | `feat(perf): add AutoPerformanceManager` | `b21d043e3` | `AutoPerformanceManager.swift` (nuevo), `ContentView.swift`, `SettingsView.swift`, `PerformanceOverlay.swift` | Inicio de `perf/auto-performance` (ver `#auto-performance`). Primera pieza que actúa de verdad — reduce `resscale` en vivo vía `InGameSettingsManager` (confirmado que no persiste a disco) cuando térmico/memoria cruzan umbral; apagado por defecto |
 | `feat(perf): add FramePacingMonitor` | `a246fde88` | `FramePacingMonitor.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/frame-pacing` (ver `#frame-pacing`). Mide jitter real entre frames vía `CADisplayLink` — no toca `MetalView.swift`; documenta (sin corregir) el hallazgo de `displaySyncEnabled`/`nominalFramesPerSecond` fijo independiente del toggle de VSync del usuario |
+| `feat(perf): add shader cache visibility` | *(pendiente de build)* | `ShaderCacheInspector.swift`, `ShaderCacheStatusRow.swift` (nuevos), `PerGameSettingsView.swift` (+2 líneas) | Inicio de `perf/shader-prewarm` (ver `#shader-prewarm`). El prewarm real ya existe (`enableShaderCache`) y no hay API nativa para uno independiente de jugar — confirmado revisando toda la superficie de `RyujinxBridge`. Visibilidad real del tamaño de caché en disco en su lugar |

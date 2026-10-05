@@ -362,7 +362,9 @@ struct PerGameSettingsView: View {
             SettingsCard {
                 VStack(spacing: 4) {
                     PerSettingsToggle(isOn: configBinding(\.enableShaderCache), icon: "memorychip", label: "Shader Cache")
-                    
+
+                    ShaderCacheStatusRow(titleId: titleId)
+
                     Divider()
                     
                     PerSettingsToggle(isOn: configBinding(\.disablevsync).reversed, icon: "arrow.triangle.2.circlepath", label: "VSync")
