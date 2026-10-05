@@ -50,7 +50,9 @@ upstream/XC-ios-ht
         ↓
    perf/memory-guard   (MemoryGuard real, pasivo)
         ↓
-   perf/thermal-governor   ← rama de trabajo actual
+   perf/thermal-governor   (ThermalGovernor real, pasivo)
+        ↓
+   perf/auto-performance   ← rama de trabajo actual
         ↓
    (futuras: perf/metalfx, ...)
 ```
@@ -654,6 +656,65 @@ aplicado a la señal térmica real en vez de la de memoria:
   gateado por toggle (`nativeSettings.thermalGovernor(true)`), junto a
   `Watchdog`/`MemoryGuard`.
 
+<a id="auto-performance"></a>
+## Auto Performance (sección 14 del pedido original)
+
+Rama nueva (`perf/auto-performance`), continúa desde la punta de
+`perf/thermal-governor`. A diferencia de `MemoryGuard`/`ThermalGovernor`
+(deliberadamente pasivos), esta pieza SÍ actúa — es el consumidor
+natural de esas dos señales, y el usuario pidió explícitamente empezar
+con esta, no con una de las observaciones pasivas otra vez.
+
+### Investigación real antes de diseñar nada
+
+- `RyujinxBridge.updateSettingsExternal(argv:)` ya existe y ya tiene un
+  llamador real: `InGameSettingsManager.saveSettings()` (construye los
+  argumentos vía `Ryujinx.buildCommandLineArgs` y los empuja en vivo al
+  core nativo en ejecución). Verificado que `InGameSettingsManager` no
+  tiene NINGÚN otro llamador en todo el proyecto — está presente pero
+  sin usar desde ninguna UI actual. Esto es justo el mecanismo que
+  hacía falta para "ajustar algo durante una sesión activa", ya
+  construido, no inventado.
+- Verificación crítica antes de tocar nada: ¿`InGameSettingsManager`
+  escribe a disco? Se leyó su `saveSettings()` completo — **no**, solo
+  llama al puente nativo. La persistencia a disco real vive en una
+  clase COMPLETAMENTE DISTINTA, `PerGameSettingsManager`
+  (`PerGameSettingsView.swift`), que tiene su propio `saveSettings()`
+  con `data.write(to: fileURL)`. Mismo nombre de método, misma
+  protocolo (`PerGameSettingsManaging`), dos clases separadas con
+  propósitos opuestos — confirmado leyendo ambas implementaciones
+  completas antes de escribir `AutoPerformanceManager`, no asumido por
+  el nombre.
+- `Ryujinx.Arguments` es una `class` (no `struct`) — mutarla in-place
+  es seguro aquí precisamente porque se confirmó que nada más la
+  persiste automáticamente; restaurar el valor original más tarde deja
+  cero rastro en el archivo de settings guardado del usuario.
+
+### Qué se agregó
+
+- `App/Core/Performance/AutoPerformanceManager.swift` (nuevo) —
+  arranca `ThermalGovernor`/`MemoryGuard` él mismo (ambos ya se
+  protegen contra arranque doble) y se suscribe a sus `@Published` vía
+  Combine. Política conservadora para esta primera versión: actúa en
+  térmico `.serious`/`.critical` (las apps de calidad adaptativa suelen
+  empezar en `.serious`, no esperar a `.critical`, que normalmente ya
+  es tarde) o memoria `.critical` únicamente (memoria `.warning` es
+  común bajo carga normal — reaccionar ahí haría esto demasiado
+  nervioso). Reduce `resscale` en un paso fijo (0.25, piso 0.5) vía
+  `InGameSettingsManager.shared.saveSettings()` — reutilizado
+  tal cual, no reimplementado — y restaura el valor original del
+  usuario en cuanto la presión baja.
+- `ContentView.swift`/`SettingsView.swift` — mismo patrón de toggle que
+  los anteriores, pero **apagado por defecto**
+  (`nativeSettings.autoPerformance(false)`): a diferencia de los
+  observadores pasivos, esto cambia visiblemente la calidad de render
+  sin confirmación puntual del usuario, así que es opt-in, no
+  on-by-default.
+- `PerformanceOverlay.swift` — indicador "Throttled" en el HUD cuando
+  `AutoPerformanceManager.shared.isThrottling` es verdadero. El usuario
+  merece saber cuándo su resolución está siendo reducida
+  automáticamente, no que cambie en silencio.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -672,4 +733,5 @@ aplicado a la señal térmica real en vez de la de memoria:
 | `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
 | `feat(perf): add BenchmarkManager` | `088fce471` | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
 | `feat(perf): add MemoryGuard` | `0e9072f33` | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |
-| `feat(perf): add ThermalGovernor` | *(pendiente de build)* | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |
+| `feat(perf): add ThermalGovernor` | `818515b40` | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |
+| `feat(perf): add AutoPerformanceManager` | *(pendiente de build)* | `AutoPerformanceManager.swift` (nuevo), `ContentView.swift`, `SettingsView.swift`, `PerformanceOverlay.swift` | Inicio de `perf/auto-performance` (ver `#auto-performance`). Primera pieza que actúa de verdad — reduce `resscale` en vivo vía `InGameSettingsManager` (confirmado que no persiste a disco) cuando térmico/memoria cruzan umbral; apagado por defecto |

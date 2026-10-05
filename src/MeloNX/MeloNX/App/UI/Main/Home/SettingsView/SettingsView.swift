@@ -891,6 +891,9 @@ struct SettingsViewNew: View {
                 SettingsToggle(isOn: nativeSettingsManager.thermalGovernor(true).projectedValue, icon: "thermometer.medium", label: "Thermal Governor", infoMessage: "Watches the device's real thermal state in the background. Currently observation-only — it logs thermal changes and doesn't throttle anything yet.\n\nLeave ON if unsure.")
                 Divider()
 
+                SettingsToggle(isOn: nativeSettingsManager.autoPerformance(false).projectedValue, icon: "speedometer", label: "Auto Performance", infoMessage: "When the device gets hot or low on memory, temporarily lowers the current game's resolution scale and restores it once things settle. Your saved per-game settings are never changed — this only affects the live session.\n\nOff by default.")
+                Divider()
+
                 Button {
                     inSetup = true
                 } label: {

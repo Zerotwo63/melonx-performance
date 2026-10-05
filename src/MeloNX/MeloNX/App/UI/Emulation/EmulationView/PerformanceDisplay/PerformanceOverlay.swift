@@ -12,6 +12,7 @@ struct PerformanceOverlayView: View  {
 
     @StateObject private var fpsmonitor = FPSMonitor()
     @StateObject private var benchmarkManager = BenchmarkManager()
+    @ObservedObject private var autoPerformance = AutoPerformanceManager.shared
     @State private var batteryLevel: Int = Int(UIDevice.current.batteryLevel * 100)
 
     @AppStorage("showBatteryPercentage") var showBatteryPercentage: Bool = false
@@ -53,6 +54,10 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                if autoPerformance.isThrottling {
+                    Text("Throttled")
+                        .foregroundStyle(.orange)
+                }
                 benchmarkControl
             }
             .padding(10)
@@ -66,6 +71,10 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                if autoPerformance.isThrottling {
+                    Text("Throttled")
+                        .foregroundStyle(.orange)
+                }
                 benchmarkControl
             }
             .padding(10)

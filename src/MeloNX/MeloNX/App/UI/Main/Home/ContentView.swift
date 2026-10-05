@@ -116,6 +116,10 @@ struct ContentView: View {
                     if nativeSettings.thermalGovernor(true).value {
                         ThermalGovernor.shared.start()
                     }
+
+                    if nativeSettings.autoPerformance(false).value {
+                        AutoPerformanceManager.shared.start()
+                    }
                 }
             }
             .environmentObject(gameHandler)
