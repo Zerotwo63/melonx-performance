@@ -1027,6 +1027,7 @@ struct SettingsViewNew: View {
             networkConfigCard
             uiTogglesCard
             jitAndMiscCard
+            SaveDataBackupCard()
         }
     }
     

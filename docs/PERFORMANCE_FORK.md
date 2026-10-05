@@ -58,9 +58,16 @@ upstream/XC-ios-ht
         ↓
    perf/shader-prewarm   (visibilidad real de caché; prewarm nativo ya existe)
         ↓
-   perf/metalfx   ← rama de trabajo actual
+   perf/metalfx   (detección real de hardware; integración real fuera de alcance)
+```
+
+El save/backup manager no es una rama `perf/*` — es gestión de datos, no
+rendimiento, así que se nombra aparte de esta cadena:
+
+```
+perf/metalfx (punto de partida)
         ↓
-   (futuras: save/backup manager)
+   feat/save-backup-manager   ← rama de trabajo actual
 ```
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
@@ -876,6 +883,60 @@ quien eventualmente aborde la integración nativa — un trabajo mucho
 más grande, que requiere tocar el core C#/.NET, fuera de alcance de
 este fork tal como está planteado hoy.
 
+<a id="save-backup-manager"></a>
+## Save/Backup Manager
+
+Rama `feat/save-backup-manager` (no `perf/*` — ver arriba). Última
+pieza del pedido original.
+
+### Investigación real antes de diseñar nada
+
+Grepeando el proyecto entero por `SaveManager`/`GameSave`/`exportSave`/
+`backupSave`/`SaveDataFileSystem`: cero resultados — no existía nada.
+`PerGameSettingsView.swift` tiene un `@State private var selectedView
+= "Data Management"` que no se lee en ningún otro lugar del archivo —
+código vestigial, probablemente un placeholder de una sección nunca
+implementada, confirmando que esto era terreno realmente nuevo.
+
+Los datos reales del emulador viven en `Documents/bis` — confirmado
+leyendo `Ryujinx.removeFirmware()`, el único código existente que toca
+esa carpeta (`bis/system/Contents/registered` contiene las NCA del
+firmware). No hay ninguna función en `RyujinxBridge` para consultar
+qué `saveDataId` corresponde a qué juego, así que un backup granular
+por juego no es posible desde Swift sin tocar el núcleo nativo — igual
+que los hallazgos de MetalFX/Frame Pacing/Shader Prewarm. Por eso
+`SaveDataInspector`/`SaveDataBackupManager` tratan "todo `bis` menos el
+`system` confirmado como firmware" como el alcance real, en vez de
+adivinar nombres de subcarpetas (`user`, `safe`, etc.) que ningún
+código Swift menciona.
+
+iOS/Foundation no tiene un escritor de archivos `.zip` incluido — se
+decidió no reimplementar el formato zip a mano para una primera
+versión (riesgo real de corrupción silenciosa sin forma de probarlo
+aquí). El backup copia los archivos tal cual a una carpeta con fecha
+en el destino que el usuario elige, preservando rutas relativas.
+
+### Qué se agregó
+
+- `App/Core/Performance/SaveDataInspector.swift` (nuevo) — tamaño/
+  cantidad de archivos reales en el alcance confirmado arriba. Misma
+  familia que `ShaderCacheInspector`: pura lectura de disco.
+- `App/Core/Performance/SaveDataBackupManager.swift` (nuevo) —
+  `exportBackup(to:)` real, copia los archivos a una carpeta elegida
+  vía `.fileImporter(allowedContentTypes: [.folder])`.
+- `App/UI/Main/Home/SettingsView/SaveDataBackupCard.swift` (nuevo) +
+  `SettingsView.swift` (+1 línea en `miscSettings`) — tarjeta real con
+  tamaño actual y botón "Back Up Save Data" que funciona de verdad.
+
+### Qué NO se hizo — a propósito
+
+**No hay restaurar.** Copiar un backup de vuelta sobre `bis` en vivo
+sobrescribe el progreso de guardado actual — una acción destructiva de
+alto riesgo que merece su propio paso, con su propia confirmación
+explícita, no empaquetada en el mismo commit que el primer camino de
+backup/export. Documentado en el comentario de
+`SaveDataBackupManager.swift`, no solo aquí.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -900,3 +961,4 @@ este fork tal como está planteado hoy.
 | `feat(perf): add shader cache visibility` | `0afbbd877` | `ShaderCacheInspector.swift`, `ShaderCacheStatusRow.swift` (nuevos), `PerGameSettingsView.swift` (+2 líneas) | Inicio de `perf/shader-prewarm` (ver `#shader-prewarm`). El prewarm real ya existe (`enableShaderCache`) y no hay API nativa para uno independiente de jugar — confirmado revisando toda la superficie de `RyujinxBridge`. Visibilidad real del tamaño de caché en disco en su lugar |
 | `feat(perf): add MetalFX capability detection` | `d178530a8` | `MetalFXCapabilityInspector.swift` (nuevo), `SettingsView.swift` | Inicio de `perf/metalfx` (ver `#metalfx`). `MeloMTKView`/`MetalViewContainer` confirmados sin ningún punto de intercepción de frame — la integración real requiere el core nativo C#/.NET, fuera de alcance. Detección real de soporte de hardware en su lugar, primer uso de `MetalFX.framework` en el proyecto. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(perf): add missing #available guard for MetalFX descriptors` | `d08f07335` | `MetalFXCapabilityInspector.swift` | Error real de compilación (log real): `'MTLFXSpatialScalerDescriptor' is only available in iOS 16.0 or newer` — a pesar de que el deployment target (18.1) excede 16.0, el compilador exigió un guard explícito para este par de símbolos. Corregido el comentario que afirmaba (incorrectamente, para este caso específico) que el guard era innecesario |
+| `feat: add save data backup (export only)` | *(pendiente de build)* | `SaveDataInspector.swift`, `SaveDataBackupManager.swift`, `SaveDataBackupCard.swift` (nuevos), `SettingsView.swift` (+1 línea) | Inicio de `feat/save-backup-manager` (ver `#save-backup-manager`). Backup real (copia, no zip) de `Documents/bis` menos `system` (firmware confirmado) a una carpeta elegida por el usuario. Sin restaurar — deliberadamente diferido, acción destructiva aparte |
