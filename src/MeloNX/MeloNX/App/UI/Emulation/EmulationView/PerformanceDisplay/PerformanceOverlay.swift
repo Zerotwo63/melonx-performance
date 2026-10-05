@@ -37,7 +37,10 @@ struct PerformanceOverlayView: View  {
         }
 
         if !benchmarkManager.isRunning, let result = benchmarkManager.lastResult {
-            Text(String(format: "Avg %.0f / Min %.0f / Max %.0f FPS", result.averageFPS, result.minFPS, result.maxFPS))
+            Text(String(format: "Avg %.0f / 1%% low %.0f / Min %.0f FPS", result.averageFPS, result.fps1PercentLow, result.minFPS))
+                .foregroundStyle(.white)
+                .font(.caption2)
+            Text("\(result.activeScalingFilter.displayName) @ \(String(format: "%.2f", result.resolutionScale))x · jitter \(String(format: "%.1f", result.worstFrameJitter * 1000))ms")
                 .foregroundStyle(.white)
                 .font(.caption2)
         }

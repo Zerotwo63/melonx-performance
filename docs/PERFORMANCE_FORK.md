@@ -72,6 +72,8 @@ upstream/XC-ios-ht (55f84af15 — baseline, sin cambios)
    feat/save-backup-manager   (backup + restore reales — no es `perf/*`, es gestión de datos)
         ↓
    XC-ios-ht (local de este fork) ← fusionado aquí, fast-forward, 2026-10-05
+        ↓
+   perf/fsr-ios-integration   ← rama de trabajo actual
 ```
 
 Las 9 ramas de trabajo siguen existiendo en `origin` tal cual —
@@ -969,6 +971,271 @@ el primer camino de backup/export.
   tanto la carpeta elegida como la snapshot de seguridad automática
   antes de ejecutar nada.
 
+<a id="fsr-ios-integration"></a>
+## FSR en iOS (sección nueva, rama `perf/fsr-ios-integration`)
+
+### Corrección importante antes de empezar
+
+En las secciones de MetalFX, Frame Pacing y Shader Prewarm arriba se
+afirmó repetidamente que "el núcleo nativo (C#/.NET) está fuera de
+este árbol" / "fuera de alcance". **Eso era incorrecto.** El árbol
+completo de Ryujinx (`src/Ryujinx.Graphics.Vulkan`,
+`src/Ryujinx.Graphics.GAL`, `src/Ryujinx.HLE`, `src/Ryujinx.Headless.SDL2`,
+etc.) está presente en este mismo repositorio — simplemente nunca se
+había investigado esa parte del árbol en sesiones anteriores, porque
+cada investigación se limitó a `src/MeloNX/`. Esta sección queda como
+corrección explícita, no se reescriben las secciones anteriores — sus
+hallazgos sobre la capa Swift siguen siendo válidos, pero su
+afirmación sobre "fuera de alcance" no lo era.
+
+### FASE 1 — Auditoría del camino completo de FSR (verificado leyendo
+código real, nada asumido)
+
+**Resumen: el núcleo YA soporta FSR por completo, incluyendo sobre
+MoltenVK/iOS, sin ninguna exclusión de plataforma. MeloNX simplemente
+nunca pasa la opción.**
+
+Camino completo, archivo por archivo:
+
+1. `src/Ryujinx.Common/Configuration/ScalingFilter.cs` — el enum real:
+   `Bilinear`, `Nearest`, `Fsr`. (Hay un segundo enum,
+   `Ryujinx.Graphics.GAL.ScalingFilter` en `UpscaleType.cs`, con un
+   cuarto valor `Area` — son dos enums paralelos en capas distintas,
+   convertidos entre sí por cast explícito, no un error.)
+2. `src/Ryujinx.Headless.SDL2/Options.cs` líneas 286-290 — **las
+   opciones de CLI ya existen**: `--scaling-filter [Bilinear|Nearest|Fsr]`
+   (default `Bilinear`) y `--scaling-filter-level [0-100]` (default
+   `0`, pero ver más abajo por qué ese default no es el que hay que
+   usar).
+3. `src/Ryujinx.Headless.SDL2/Program.cs` línea 1808-1809 — el
+   `Main()` del binario asigna `_window.ScalingFilter = options.ScalingFilter`
+   y `_window.ScalingFilterLevel = options.ScalingFilterLevel` al
+   arrancar.
+4. `src/Ryujinx.Headless.SDL2/WindowBase.cs` — `Render()` llama
+   `SetScalingFilter()` una vez, que a su vez llama
+   `Renderer?.Window.SetScalingFilter(...)` /
+   `SetScalingFilterLevel(...)` — estos son los métodos de la interfaz
+   `IWindow` (`src/Ryujinx.Graphics.GAL/IWindow.cs`), genéricos,
+   independientes de backend.
+5. `src/Ryujinx.Graphics.Vulkan/Window.cs` líneas 498-585 — la
+   implementación Vulkan real. `SetScalingFilter(type)` guarda el tipo
+   pedido; `UpdateEffect()` (llamada antes de cada present) hace el
+   `switch` real:
+   - `.Bilinear`/`.Nearest` → libera el filtro, usa el muestreo lineal
+     normal de la swapchain.
+   - `.Fsr` → `new FsrScalingFilter(_gd, _device)` si no existía ya uno.
+   - `.Area` → `AreaScalingFilter` (no expuesto por MeloNX, ver abajo).
+   **Cero condicionales de plataforma (`#if`, chequeo de MoltenVK,
+   iOS, macOS) en todo este archivo** — confirmado con grep, no
+   asumido.
+6. `src/Ryujinx.Graphics.Vulkan/Effects/FsrScalingFilter.cs` — la
+   implementación real de FSR 1.0: dos shaders de **compute** Vulkan
+   estándar (`FsrScaling.spv` = EASU, `FsrSharpening.spv` = RCAS),
+   cargados vía `EmbeddedResources.Read(...)`. Nada de extensiones
+   exóticas (sin subgroup ops, sin ray tracing) — compute shaders +
+   imágenes de almacenamiento son funcionalidad base de Vulkan 1.0/1.1,
+   que MoltenVK soporta desde hace años. Confirmado que ambos `.spv`
+   están declarados `<EmbeddedResource>` en
+   `Ryujinx.Graphics.Vulkan.csproj` (líneas 19-20) — no hace falta
+   tocar el build.
+7. `src/Ryujinx.Headless.SDL2/MoltenVK/MoltenVKWindow.cs` — la clase
+   específica de MoltenVK para iOS. Extiende `WindowBase` y **no
+   sobreescribe `Render()` ni `SetScalingFilter()` en absoluto** — solo
+   sobreescribe la creación de superficie (`VK_EXT_metal_surface`,
+   `CreateWindowSurface`) y el tamaño de ventana. El camino genérico
+   del punto 4 corre sin cambios sobre MoltenVK.
+8. `distribution/ios/xc-compile.sh` + `Ryujinx.Headless.SDL2.csproj`
+   línea 98 — `ProjectReference` a `Ryujinx.Graphics.Vulkan` es
+   incondicional (no depende del RID), y el paquete
+   `Ryujinx.Graphics.Vulkan.Dependencies.MoltenVK` se incluye para
+   cualquier RID que no sea Linux/Windows — es decir, para `ios-arm64`
+   sí. El binario `Ryujinx.Headless.SDL2.dylib` que ya usa MeloNX
+   **ya contiene FSR compilado**, ahora mismo, sin cambiar nada.
+
+**Conclusión de la Fase 1 (respondiendo exactamente lo que se pidió
+determinar):**
+- FsrScalingFilter se crea en `Ryujinx.Graphics.Vulkan/Window.cs`,
+  método `UpdateEffect()`, rama `case ScalingFilter.Fsr`.
+- La condición que selecciona FSR es, literalmente,
+  `_currentScalingFilter == ScalingFilter.Fsr` — fijado por
+  `SetScalingFilter(type)`, que a su vez viene del valor de CLI
+  `--scaling-filter` parseado en `Options.cs`.
+- El filtro seleccionado se guarda en el campo privado `_scalingFilter`
+  de la instancia `Window` (Vulkan), una por ventana/sesión.
+- La ruta funciona también sobre MoltenVK: confirmado que
+  `MoltenVKWindow` no la intercepta ni la desactiva.
+- **No existe ninguna exclusión de iOS/macOS/MoltenVK** en todo el
+  camino — ni en el core, ni en el `.csproj`, ni en el script de build.
+- Los compute shaders SPIR-V requeridos son funcionalidad base de
+  Vulkan y ya están embebidos en el binario que MeloNX ya distribuye.
+- **MeloNX simplemente no expone la opción.** No faltaba conectar nada
+  en el core — faltaba pasar `--scaling-filter`/`--scaling-filter-level`
+  desde `Ryujinx.swift`. Confirmado grepeando
+  `buildCommandLineArgs` antes de este cambio: solo pasaba
+  `--resolution-scale`, nunca `--scaling-filter`.
+- Revisada toda la superficie de `RyujinxBridge` (Fase 1, punto 4 del
+  pedido): no existía ninguna función para scaling filter, resolution
+  scale (más allá de lo que ya se pasaba), sharpening, ni configuración
+  gráfica adicional — todo lo nuevo se expone reutilizando
+  `buildCommandLineArgs`/`mainRyu`, no una API nueva.
+
+### Hallazgo adicional: el camino de actualización EN VIVO no propaga FSR
+
+Al trazar `RyujinxBridge.updateSettingsExternal` (el camino que
+`AutoPerformanceManager` ya usa para `resscale` en vivo, ver sección
+Auto Performance arriba) hasta su handler nativo real
+(`Program.cs`, `UpdateSettingsExternal` → `ApplyDynamicSettings`):
+este método sí reasigna `GraphicsConfig.ResScale`,
+`GraphicsConfig.MaxAnisotropy`, `EnableShaderCache`,
+`EnableTextureRecompression`, `EnableMacroHLE`, y varias propiedades de
+`_emulationContext` (vsync, idioma, región, etc.) — **pero nunca
+reasigna `_window.ScalingFilter`/`ScalingFilterLevel` ni vuelve a
+llamar `SetScalingFilter()`**. Confirmado leyendo el método completo
+(`Program.cs` líneas 2094-2118), no asumido.
+
+Esto significa: cambiar el filtro de escalado **en el editor de
+ajustes por juego (pre-lanzamiento)** funciona perfectamente, porque
+ese camino relanza el juego con `mainRyu` y argumentos de CLI nuevos
+(la Fase 1 ya confirmó que ese camino está completo). Pero intentar
+cambiarlo **en vivo, a mitad de sesión**, vía
+`updateSettingsExternal` (el mecanismo que usaría
+`AutoPerformanceManager` para alternar FSR automáticamente) **no
+tendría ningún efecto hoy** — es un hueco real, pequeño, y
+arreglable (`_window.Renderer?.Window.SetScalingFilter(...)` /
+`SetScalingFilterLevel(...)` son ambos miembros públicos, el arreglo
+sería de dos líneas en `ApplyDynamicSettings`, mismo patrón que
+`ResScale`) — pero **no se toca en este commit**, exactamente porque
+el pedido fue explícito: "no implementes [la integración con Auto
+Performance] hasta verificar primero el FSR manual." Queda
+documentado aquí para cuando se aborde esa integración.
+
+### FASE 2 — Implementación
+
+Camino mínimo, tal como se pidió: `RyujinxBridge` (ya existente) →
+`buildCommandLineArgs` (ya existente) → `ScalingFilter.Fsr` (ya
+existente en el core). Cero funciones nuevas en `RyujinxBridge`, cero
+reimplementación de FSR en Swift.
+
+- `App/Core/Ryujinx/ScalingFilter.swift` (nuevo) — enum Swift que
+  refleja `Ryujinx.Common.Configuration.ScalingFilter`. Solo expone
+  `.bilinear`/`.fsr` (no `.nearest`, no `.area` — el pedido fue
+  específicamente "Bilinear, FSR").
+- `Ryujinx.swift` (`Arguments`) — dos campos nuevos:
+  `scalingFilter: ScalingFilter = .bilinear`,
+  `scalingFilterLevel: Double = 80`. El `80` no es arbitrario: es el
+  default real que usa el propio Ryujinx de escritorio
+  (`ConfigurationState.cs` líneas 813/1394) — el default de `0` en el
+  `--scaling-filter-level` de la CLI es solo el default entero de
+  CommandLineParser, no un valor considerado (la fórmula del shader de
+  sharpening es `1.5 - nivel×0.015`, así que `0` significa sharpening
+  MÁXIMO, no "sin ajuste").
+- `Ryujinx.swift` (`buildCommandLineArgs`) — agrega
+  `--scaling-filter`/`--scaling-filter-level` solo cuando
+  `scalingFilter != .bilinear` (mismo patrón que `resscale`, que solo
+  se pasa si no es `1.0`).
+- `PerGameSettingsView.swift` — tarjeta nueva "Upscaling": un
+  `Picker` segmentado Bilinear/FSR, y un `Slider` de "FSR Sharpness"
+  (0-100, con las etiquetas "Sharper"/"Softer" en el orden correcto
+  según la fórmula real del shader) que **solo aparece cuando FSR está
+  seleccionado** — nunca un control desconectado visible sin motivo.
+
+### Cómo verificar que esto se activa de verdad (no solo que compila)
+
+"Compila" no cuenta como evidencia de que FSR está activo — lo pidió
+así el usuario explícitamente. La verificación real, sin dispositivo
+físico disponible en este entorno, se hizo por **trazado de código
+fuente real, línea por línea, de la condición de selección hasta la
+creación de la instancia `FsrScalingFilter`**, documentado arriba — no
+por ejecutar nada. En un dispositivo real, la verificación adicional
+sería: activar "FSR" en Upscaling, lanzar un juego, y confirmar en los
+logs de Ryujinx (`--enable-debug-logs`) o por captura de frame en Xcode
+GPU debugger que el pipeline de compute `FsrScaling`/`FsrSharpening`
+efectivamente se despacha — eso queda pendiente de hardware real, no
+de código.
+
+### CPU/GPU frame time: no existe una fuente real, no se simuló
+
+Se buscó explícitamente. `Device.Statistics.GetGameFrameTime()`
+(`src/Ryujinx.HLE/PerformanceStatistics.cs` línea 162) existe, pero es
+literalmente `1000 / _frameRate` — una derivación pura del mismo FPS
+que `RyujinxBridge.currentFPS` ya expone, no una medición
+independiente. Agregarlo habría duplicado el mismo número bajo otro
+nombre. Sí existe un número genuinamente distinto,
+`GetFifoPercent()` (porcentaje de tiempo ocupado procesando el FIFO de
+comandos de GPU, no tiempo en milisegundos) — real, pero no es "frame
+time", y no se expuso en este commit porque no se pidió explícitamente
+y no hay un consumidor claro para él todavía; queda anotado aquí como
+disponible si hace falta después.
+
+### BenchmarkManager extendido
+
+`App/Core/Performance/BenchmarkManager.swift` — mismo manager, no uno
+nuevo. Agregados:
+- `fps1PercentLow` — promedio del peor 1% de las muestras de FPS ya
+  recolectadas.
+- `worstFrameJitter` — mismo mecanismo que `FramePacingMonitor`
+  (`CADisplayLink`), incorporado directamente aquí para que un solo
+  `start()`/`stop()` capture todo lo pedido, en vez de requerir
+  coordinar dos herramientas separadas.
+- `resolutionScale`, `activeScalingFilter`, `thermalState` — snapshots
+  leídos de `Ryujinx.shared.config`/`ThermalGovernor.shared` al momento
+  de `stop()`. `averageMemory`/`peakMemory` ya existían.
+- `PerformanceOverlay.swift` — el resumen del botón "Benchmark" ahora
+  muestra 1% low y el filtro/resolución/jitter activos, no solo
+  avg/min/max.
+
+Con esto, correr el benchmark una vez en cada uno de los 4 escenarios
+pedidos (A: 1.00x Bilinear, B: 0.75x Bilinear, C: 0.75x FSR, D: 0.67x
+FSR) en un dispositivo real ya captura todo lo solicitado excepto
+CPU/GPU frame time (no disponible, explicado arriba). Ese es el
+siguiente paso que necesita hardware, no código.
+
+### 120Hz — investigado, NO implementado (tal como se pidió)
+
+Verificado, no asumido:
+
+- `src/MeloNX/MeloNX/Info.plist` **no tiene**
+  `CADisableMinimumFrameDurationOnPhone` — la clave real que Apple
+  documenta para que un iPhone (no iPad) libere `CADisplayLink` de su
+  tope de 60Hz. Sin esa clave, cualquier código basado en
+  `CADisplayLink`/`preferredFrameRateRange` se queda limitado a 60Hz en
+  iPhone aunque el panel sea ProMotion — iPad no la necesita.
+- **Pero MeloNX no presenta frames vía `CADisplayLink` en absoluto.**
+  `MeloMTKView` no implementa `MTKViewDelegate` ni `draw(in:)`
+  (confirmado en la sección de MetalFX arriba) — el present real ocurre
+  dentro del núcleo nativo, vía Vulkan/MoltenVK directamente sobre el
+  `CAMetalLayer` (`RyujinxBridge.setNativeWindow`). Esto significa que
+  no está claro si `CADisableMinimumFrameDurationOnPhone` aplicaría
+  siquiera a este camino — esa clave está documentada específicamente
+  en el contexto de `CADisplayLink`, no de presentación Vulkan/Metal
+  cruda. **Esto queda como incertidumbre real, no como respuesta
+  verificada** — solo se puede resolver probando en un dispositivo
+  ProMotion físico.
+- `src/Ryujinx.Graphics.Vulkan/Window.cs` función
+  `ChooseSwapPresentMode` (líneas 282-294): con vsync desactivado
+  (`disablevsync` del usuario, default `false` = vsync ON), el
+  swapchain Vulkan elige `PresentModeKHR.ImmediateKhr` o `MailboxKhr`
+  — **sin tope de FPS impuesto por Vulkan mismo** en ese caso. Con
+  vsync activado (el default), usa `FifoKhr`, que sí se sincroniza al
+  refresco real del compositor — y ahí es donde entra la pregunta de
+  si el compositor negocia 120Hz para esta superficie o no, que es
+  exactamente lo que no se puede confirmar sin hardware.
+  Independientemente del modo elegido por Vulkan, `MetalView.swift`
+  (lado Swift) llama por separado
+  `setDisplaySyncEnabled:false` incondicionalmente sobre el
+  `CAMetalLayer` (ver sección Frame Pacing arriba) — dos mecanismos de
+  sincronización distintos, en capas distintas, cuya interacción real
+  no se puede resolver leyendo código, solo probando.
+- Cambiar `setNominalFramesPerSecond:` de `60` a `120` sin resolver lo
+  anterior arriesgaría: (a) ningún efecto real si el cuello de botella
+  es otro (el juego ya no llega a 60 en la mayoría de los casos, que es
+  precisamente el problema que FSR/resscale intentan resolver), o (b)
+  mayor consumo de batería/calor si el sistema SÍ permite más de 60
+  presentaciones por segundo sin que haya contenido nuevo que mostrar
+  en cada una.
+- **No se cambió nada de esto.** El objetivo inmediato sigue siendo 60
+  estables, tal como se indicó.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -995,3 +1262,5 @@ el primer camino de backup/export.
 | `fix(perf): add missing #available guard for MetalFX descriptors` | `d08f07335` | `MetalFXCapabilityInspector.swift` | Error real de compilación (log real): `'MTLFXSpatialScalerDescriptor' is only available in iOS 16.0 or newer` — a pesar de que el deployment target (18.1) excede 16.0, el compilador exigió un guard explícito para este par de símbolos. Corregido el comentario que afirmaba (incorrectamente, para este caso específico) que el guard era innecesario |
 | `feat: add save data backup (export only)` | `045c86141` | `SaveDataInspector.swift`, `SaveDataBackupManager.swift`, `SaveDataBackupCard.swift` (nuevos), `SettingsView.swift` (+1 línea) | Inicio de `feat/save-backup-manager` (ver `#save-backup-manager`). Backup real (copia, no zip) de `Documents/bis` menos `system` (firmware confirmado) a una carpeta elegida por el usuario. Sin restaurar — deliberadamente diferido, acción destructiva aparte |
 | `feat: add save data restore` | `7b8648056` | `SaveDataRestoreManager.swift` (nuevo), `SaveDataBackupManager.swift` (+`createPreRestoreSnapshot()`/`overwriteContents(of:into:)`), `SaveDataBackupCard.swift` | El paso destructivo diferido antes. Snapshot de seguridad automático siempre antes de sobrescribir; confirmación explícita vía `.alert`; valida el prefijo del nombre de carpeta contra la carpeta equivocada |
+| `docs: record the merge of all 9 work branches into XC-ios-ht` | `30fb45f7d` | `PERFORMANCE_FORK.md` | `XC-ios-ht` deja de ser espejo limpio de upstream por instrucción explícita — fast-forward puro, 29 commits, cero conflictos |
+| `feat(fsr): expose the core's existing FSR 1.0 to MeloNX/iOS` | *(pendiente de build)* | `ScalingFilter.swift` (nuevo), `BenchmarkManager.swift` (extendido), `Ryujinx.swift`, `PerGameSettingsView.swift`, `PerformanceOverlay.swift` | Ver `#fsr-ios-integration`. Corrección: el core C#/.NET SÍ está en este repo, no "fuera de alcance" como se dijo antes. FSR ya funciona completo sobre MoltenVK/iOS, sin exclusión de plataforma — solo faltaba pasar `--scaling-filter`/`--scaling-filter-level` desde Swift. Hueco real documentado (no corregido): el camino de actualización en vivo no propaga el filtro — relevante para la integración futura con Auto Performance, explícitamente diferida |
