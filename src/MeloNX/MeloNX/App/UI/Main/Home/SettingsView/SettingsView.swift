@@ -1206,7 +1206,7 @@ struct SettingsViewNew: View {
                 SettingsToggle(isOn: $useTrollStore, icon: "troll.svg", label: "TrollStore JIT", infoMessage: "Enables JIT automatically using TrollStore's URL Scheme ('apple-magnifier://enable-jit?bundle-id')")
             }
 
-            SettingsToggle(isOn: nativeSettingsManager.builtInStikJIT(false).projectedValue, icon: "bolt.square", label: "Built-in StikJIT", infoMessage: builtInStikJITInfoMessage)
+            SettingsToggle(isOn: nativeSettingsManager.builtInStikJIT(false).projectedValue, icon: "bolt.square", label: "Built-in StikJIT", infoMessage: LocalizedStringKey(builtInStikJITInfoMessage))
                 .disabled(!BuiltInStikJITAvailability.isAvailable)
         }
     }
