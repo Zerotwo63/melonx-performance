@@ -9,14 +9,38 @@ import SwiftUI
 
 struct PerformanceOverlayView: View  {
     @StateObject private var memorymonitor = MemoryUsageMonitor()
-    
+
     @StateObject private var fpsmonitor = FPSMonitor()
+    @StateObject private var benchmarkManager = BenchmarkManager()
     @State private var batteryLevel: Int = Int(UIDevice.current.batteryLevel * 100)
-    
+
     @AppStorage("showBatteryPercentage") var showBatteryPercentage: Bool = false
-    
+
     @AppStorage("horizontalorvertical") var horizontalorvertical: Bool = false
-    
+
+    /// Objective start/stop measurement (BenchmarkManager) rather than
+    /// just the live, unrecorded FPS text above — see
+    /// App/Core/Performance/BenchmarkManager.swift.
+    @ViewBuilder
+    private var benchmarkControl: some View {
+        Button {
+            if benchmarkManager.isRunning {
+                benchmarkManager.stop()
+            } else {
+                benchmarkManager.start()
+            }
+        } label: {
+            Text(benchmarkManager.isRunning ? "Stop Benchmark" : "Benchmark")
+                .foregroundStyle(.white)
+        }
+
+        if !benchmarkManager.isRunning, let result = benchmarkManager.lastResult {
+            Text(String(format: "Avg %.0f / Min %.0f / Max %.0f FPS", result.averageFPS, result.minFPS, result.maxFPS))
+                .foregroundStyle(.white)
+                .font(.caption2)
+        }
+    }
+
     @ViewBuilder
     var content: some View {
         if horizontalorvertical {
@@ -29,6 +53,7 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                benchmarkControl
             }
             .padding(10)
         } else {
@@ -41,6 +66,7 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                benchmarkControl
             }
             .padding(10)
             .frame(minWidth: 150)

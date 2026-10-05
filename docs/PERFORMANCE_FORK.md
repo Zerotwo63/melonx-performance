@@ -44,9 +44,11 @@ upstream/XC-ios-ht
         ↓
    XC-ios-ht (este fork, espejo de upstream)
         ↓
-   perf/jit-integration   ← rama de trabajo actual
+   perf/jit-integration   (13 commits, JIT estable + Built-in StikJIT completo)
         ↓
-   (futuras: perf/benchmark-manager, perf/memory-guard, perf/metalfx, ...)
+   perf/benchmark-manager   ← rama de trabajo actual
+        ↓
+   (futuras: perf/memory-guard, perf/metalfx, ...)
 ```
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
@@ -533,6 +535,49 @@ el helper realmente se lance, que el protocolo de JIT complete, ni que
 Eso requiere un pairing file real y hardware físico, ninguno de los
 cuales existe en este entorno de CI.
 
+<a id="benchmark-manager"></a>
+## BenchmarkManager (sección 11 del pedido original)
+
+Esta rama (`perf/benchmark-manager`) empieza desde la punta de
+`perf/jit-integration` ya terminada, no desde `XC-ios-ht` — el diagrama
+de "Estrategia de ramas" arriba ya lo marcaba así, y no hay nada en
+JIT que BenchmarkManager necesite deshacer o evitar.
+
+### Qué ya existía (verificado antes de escribir nada, no inventado)
+
+MeloNX ya tiene monitores de rendimiento en vivo:
+`FPSMonitor.swift` (sondea `RyujinxBridge.currentFPS` cada 100ms) y
+`MemoryUsageMonitor.swift` (sondea `task_info`/`phys_footprint` cada
+200ms), combinados en `PerformanceOverlayView` (el HUD en pantalla
+durante el juego). Ninguno de los dos guarda historial ni calcula
+estadísticas — solo muestran el valor actual. Grepeando el proyecto por
+`RyujinxBridge.` se confirmó que **`currentFPS` es el único dato de
+rendimiento que expone el puente nativo** — no hay timestamps por
+frame ni tiempos de GPU. Esto importa: `BenchmarkManager` reporta
+estadísticas sobre muestras periódicas de ese escalar, no percentiles
+reales de frame time — no se puede medir lo que el puente no expone, y
+el código/documentación no debe insinuar que mide más de lo que mide.
+
+### Qué se agregó
+
+- `App/Core/Performance/BenchmarkManager.swift` (nuevo) — `start()`/
+  `stop() -> Result?`, muestreando `RyujinxBridge.currentFPS` +
+  memoria (mismo método `task_info` que `MemoryUsageMonitor`,
+  duplicado a propósito — es una función privada de otra clase, y este
+  muestreo necesita compartir cadencia con la muestra de FPS, no un
+  segundo poll loop independiente) cada 100ms mientras corre. `stop()`
+  devuelve duración, cantidad de muestras, FPS promedio/mínimo/máximo y
+  memoria promedio/pico.
+- `PerformanceOverlayView.swift` — un botón "Benchmark"/"Stop
+  Benchmark" + resumen de una línea una vez detenido, agregado a los
+  dos layouts existentes (horizontal/vertical) vía una sola
+  `benchmarkControl` compartida — no se duplicó el bloque de UI dos
+  veces a mano.
+
+No hay persistencia ni exportación de resultados todavía (el resultado
+vive solo en memoria, en `BenchmarkManager.lastResult`, mientras la
+vista del HUD exista) — eso, si hace falta, es un paso aparte.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -548,4 +593,5 @@ cuales existe en este entorno de CI.
 | `feat(jit): add the host-side Built-in StikJIT launcher` | `21ebfbb78` | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
 | `feat(jit): add the pairing-file import flow` | `f40cc3a9c` | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
 | `feat(jit): wire Built-in StikJIT into the JIT method picker` | `f721bba88` | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()`. **Primer intento de CI falló** — ver fila siguiente |
-| `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | *(pendiente de build)* | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
+| `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
+| `feat(perf): add BenchmarkManager` | *(pendiente de build)* | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
