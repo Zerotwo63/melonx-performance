@@ -2099,6 +2099,17 @@ namespace Ryujinx.Headless.SDL2
             GraphicsConfig.EnableTextureRecompression = options.EnableTextureRecompression;
             GraphicsConfig.EnableMacroHLE = !options.DisableMacroHLE;
 
+            // Was missing entirely: this method propagated ResScale/MaxAnisotropy/etc.
+            // but never re-applied ScalingFilter/ScalingFilterLevel, so a live
+            // update_settings_external call changing --scaling-filter had no
+            // effect until the next full relaunch.
+            if (_window != null)
+            {
+                _window.ScalingFilter = options.ScalingFilter;
+                _window.ScalingFilterLevel = options.ScalingFilterLevel;
+                _window.SetScalingFilter();
+            }
+
             if (_emulationContext != null)
             {
                 _emulationContext.SetVolume(options.AudioVolume);

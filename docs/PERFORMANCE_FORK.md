@@ -1079,7 +1079,8 @@ determinar):**
   gráfica adicional — todo lo nuevo se expone reutilizando
   `buildCommandLineArgs`/`mainRyu`, no una API nueva.
 
-### Hallazgo adicional: el camino de actualización EN VIVO no propaga FSR
+### Hallazgo adicional (corregido en el commit siguiente): el camino de
+actualización EN VIVO no propagaba FSR
 
 Al trazar `RyujinxBridge.updateSettingsExternal` (el camino que
 `AutoPerformanceManager` ya usa para `resscale` en vivo, ver sección
@@ -1089,25 +1090,45 @@ este método sí reasigna `GraphicsConfig.ResScale`,
 `GraphicsConfig.MaxAnisotropy`, `EnableShaderCache`,
 `EnableTextureRecompression`, `EnableMacroHLE`, y varias propiedades de
 `_emulationContext` (vsync, idioma, región, etc.) — **pero nunca
-reasigna `_window.ScalingFilter`/`ScalingFilterLevel` ni vuelve a
-llamar `SetScalingFilter()`**. Confirmado leyendo el método completo
-(`Program.cs` líneas 2094-2118), no asumido.
+reasignaba `_window.ScalingFilter`/`ScalingFilterLevel` ni volvía a
+llamar `SetScalingFilter()`**. Confirmado leyendo el método completo,
+no asumido.
 
-Esto significa: cambiar el filtro de escalado **en el editor de
-ajustes por juego (pre-lanzamiento)** funciona perfectamente, porque
-ese camino relanza el juego con `mainRyu` y argumentos de CLI nuevos
-(la Fase 1 ya confirmó que ese camino está completo). Pero intentar
-cambiarlo **en vivo, a mitad de sesión**, vía
-`updateSettingsExternal` (el mecanismo que usaría
-`AutoPerformanceManager` para alternar FSR automáticamente) **no
-tendría ningún efecto hoy** — es un hueco real, pequeño, y
-arreglable (`_window.Renderer?.Window.SetScalingFilter(...)` /
-`SetScalingFilterLevel(...)` son ambos miembros públicos, el arreglo
-sería de dos líneas en `ApplyDynamicSettings`, mismo patrón que
-`ResScale`) — pero **no se toca en este commit**, exactamente porque
-el pedido fue explícito: "no implementes [la integración con Auto
-Performance] hasta verificar primero el FSR manual." Queda
-documentado aquí para cuando se aborde esa integración.
+Esto significaba: cambiar el filtro de escalado **en el editor de
+ajustes por juego (pre-lanzamiento)** funcionaba perfectamente, porque
+ese camino relanza el juego con `mainRyu` y argumentos de CLI nuevos.
+Pero cambiarlo **en vivo, a mitad de sesión**, vía
+`updateSettingsExternal` (el mecanismo que `AutoPerformanceManager`
+necesitaría para alternar FSR automáticamente) no tenía ningún efecto.
+Documentado primero, sin tocar nada, exactamente porque el pedido fue
+explícito: "no implementes [la integración con Auto Performance] hasta
+verificar primero el FSR manual."
+
+**Arreglado en el commit siguiente**, por pedido explícito posterior
+("arregla el hueco en `ApplyDynamicSettings` para Auto Performance"):
+
+- `src/Ryujinx.Headless.SDL2/WindowBase.cs` — `SetScalingFilter()` pasó
+  de `private` a `internal` (mismo ensamblado, cambio mínimo de
+  visibilidad) para poder reutilizar su lógica existente de dos líneas
+  desde `Program.cs`, en vez de duplicarla ahí.
+- `src/Ryujinx.Headless.SDL2/Program.cs`, `ApplyDynamicSettings` —
+  agregado, en un bloque `if (_window != null)` (mismo patrón que el
+  `if (_emulationContext != null)` que ya existe justo debajo):
+  ```csharp
+  _window.ScalingFilter = options.ScalingFilter;
+  _window.ScalingFilterLevel = options.ScalingFilterLevel;
+  _window.SetScalingFilter();
+  ```
+  (`_window?.ScalingFilter = ...` no es válido C# — el operador `?.`
+  no puede ser el destino de una asignación de propiedad — de ahí el
+  `if` explícito en vez de encadenar `?.` como en el resto del
+  archivo.)
+
+Con esto, `AutoPerformanceManager` ya puede alternar FSR en vivo de la
+misma forma en que ya alterna `resscale` — la integración en sí
+(cambiar `scalingFilter` automáticamente cuando `resscale` baja de
+1.0x) sigue sin implementarse, porque no se pidió todavía; solo se
+quitó el bloqueo real que lo impedía.
 
 ### FASE 2 — Implementación
 
@@ -1264,3 +1285,4 @@ Verificado, no asumido:
 | `feat: add save data restore` | `7b8648056` | `SaveDataRestoreManager.swift` (nuevo), `SaveDataBackupManager.swift` (+`createPreRestoreSnapshot()`/`overwriteContents(of:into:)`), `SaveDataBackupCard.swift` | El paso destructivo diferido antes. Snapshot de seguridad automático siempre antes de sobrescribir; confirmación explícita vía `.alert`; valida el prefijo del nombre de carpeta contra la carpeta equivocada |
 | `docs: record the merge of all 9 work branches into XC-ios-ht` | `30fb45f7d` | `PERFORMANCE_FORK.md` | `XC-ios-ht` deja de ser espejo limpio de upstream por instrucción explícita — fast-forward puro, 29 commits, cero conflictos |
 | `feat(fsr): expose the core's existing FSR 1.0 to MeloNX/iOS` | `1f61944e2` | `ScalingFilter.swift` (nuevo), `BenchmarkManager.swift` (extendido), `Ryujinx.swift`, `PerGameSettingsView.swift`, `PerformanceOverlay.swift` | Ver `#fsr-ios-integration`. Corrección: el core C#/.NET SÍ está en este repo, no "fuera de alcance" como se dijo antes. FSR ya funciona completo sobre MoltenVK/iOS, sin exclusión de plataforma — solo faltaba pasar `--scaling-filter`/`--scaling-filter-level` desde Swift. Hueco real documentado (no corregido): el camino de actualización en vivo no propaga el filtro — relevante para la integración futura con Auto Performance, explícitamente diferida |
+| `fix(fsr): propagate ScalingFilter in ApplyDynamicSettings` | *(pendiente de build)* | `Ryujinx.Headless.SDL2/Program.cs`, `Ryujinx.Headless.SDL2/WindowBase.cs` | Primer cambio de este fork en código C#/.NET. `SetScalingFilter()` de `private` a `internal` (mínimo cambio de visibilidad, mismo ensamblado) para reutilizarlo desde `ApplyDynamicSettings` en vez de duplicar su lógica. Desbloquea que `AutoPerformanceManager` pueda alternar FSR en vivo — la integración en sí sigue sin implementarse, solo se quitó el bloqueo |
