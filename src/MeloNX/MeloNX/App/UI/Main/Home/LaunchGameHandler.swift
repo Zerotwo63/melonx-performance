@@ -46,7 +46,12 @@ class LaunchGameHandler: ObservableObject {
     }
     
     var shouldShowEntitlement: Bool {
-        isGameReady && !hasJITEntitlement
+        // Surface the signing/provisioning problem immediately. The previous
+        // condition depended on isGameReady, which itself requires JIT. When
+        // both JIT and the memory entitlement were missing, neither the JIT
+        // sheet nor the entitlement alert could appear, so tapping a game
+        // looked like a no-op.
+        currentGame != nil && !hasJITEntitlement
     }
     
     var shouldShowPopover: Bool {
@@ -97,6 +102,18 @@ class LaunchGameHandler: ObservableObject {
                 enableJITStik()
             } else if self.nativeSettings.builtInStikJIT.value {
                 MeloNXBuiltInJIT.enableCurrentProcess()
+            } else {
+                print("[JIT] no fallback available")
+
+                // ContentView also probes JIT on app launch while no game is
+                // selected. Avoid showing an error there; only explain the
+                // blocker when the user actually tried to start a game.
+                if self.currentGame != nil {
+                    presentAlert(
+                        title: "JIT Not Acquired",
+                        message: "MeloNX could not acquire JIT with the internal JitStreamer path, and no fallback JIT method is enabled. Configure a working JIT method before launching the game."
+                    )
+                }
             }
         }
     }
