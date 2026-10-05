@@ -884,7 +884,10 @@ struct SettingsViewNew: View {
                 
                 SettingsToggle(isOn: nativeSettingsManager.mainThreadWatchdog(true).projectedValue, icon: "clock.badge.exclamationmark", label: "Enables Main Thread Watchdog", infoMessage: "Meant to help troubleshooting.\n\nLeave ON if unsure.")
                 Divider()
-                
+
+                SettingsToggle(isOn: nativeSettingsManager.memoryGuard(true).projectedValue, icon: "memorychip", label: "Memory Pressure Guard", infoMessage: "Watches for real system memory pressure in the background. Currently observation-only — it logs pressure changes and doesn't take any action yet.\n\nLeave ON if unsure.")
+                Divider()
+
                 Button {
                     inSetup = true
                 } label: {

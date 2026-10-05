@@ -46,9 +46,11 @@ upstream/XC-ios-ht
         ↓
    perf/jit-integration   (13 commits, JIT estable + Built-in StikJIT completo)
         ↓
-   perf/benchmark-manager   ← rama de trabajo actual
+   perf/benchmark-manager   (BenchmarkManager real, conectado al HUD)
         ↓
-   (futuras: perf/memory-guard, perf/metalfx, ...)
+   perf/memory-guard   ← rama de trabajo actual
+        ↓
+   (futuras: perf/metalfx, ...)
 ```
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
@@ -578,6 +580,51 @@ No hay persistencia ni exportación de resultados todavía (el resultado
 vive solo en memoria, en `BenchmarkManager.lastResult`, mientras la
 vista del HUD exista) — eso, si hace falta, es un paso aparte.
 
+<a id="memory-guard"></a>
+## MemoryGuard (sección 12 del pedido original)
+
+Rama nueva (`perf/memory-guard`), por la misma regla de no mezclar
+temas — continúa la cadena desde la punta de `perf/benchmark-manager`.
+
+### Qué ya existía (verificado antes de escribir nada)
+
+Grepeando el proyecto entero por `didReceiveMemoryWarning`,
+`memoryPressure` y `makeMemoryPressureSource`: **cero resultados**. No
+hay ningún observador de presión de memoria real en todo el código —
+`MemoryUsageMonitor` solo sondea el `phys_footprint` de este proceso
+cada 200ms, una señal distinta y más débil (que el propio footprint
+suba no significa que el sistema esté bajo presión real, y el sistema
+puede estar bajo presión por OTROS procesos sin que el footprint propio
+cambie). `Ryujinx.clearShaderCache()` es el único hook de limpieza de
+caché que existe, y es una acción destructiva que hoy solo se dispara
+con confirmación explícita del usuario (botones con alerta "¿Estás
+seguro?" en Settings/GamesListView) — nunca automáticamente.
+
+### Qué se agregó
+
+- `App/Core/Performance/MemoryGuard.swift` (nuevo) — usa
+  `DispatchSource.makeMemoryPressureSource(eventMask: [.warning,
+  .critical], queue: .main)`, la API real de Apple para esto (no un
+  polling propio reinventado), expone `currentLevel`
+  (`.normal`/`.warning`/`.critical`) y `lastTransitionAt`.
+  **Deliberadamente pasivo**: solo registra transiciones (`print`), no
+  limpia caché ni ajusta nada por su cuenta. Conectar una reacción real
+  (limpiar caché, bajar `resscale`, etc.) es un paso aparte,
+  explícitamente no hecho aquí — automatizar una acción destructiva
+  existente sin que se pida es exactamente el tipo de cambio de
+  comportamiento que este fork evita por defecto.
+- `ContentView.swift` — arranque gateado por un toggle nuevo
+  (`nativeSettings.memoryGuard(true)`), insertado junto al arranque
+  existente de `Watchdog.shared.start()` (mismo patrón: monitor de
+  fondo opcional, activado por defecto, con un `SettingsToggle`
+  correspondiente en `SettingsView.swift` explicando que por ahora es
+  solo observación).
+
+El cierre con retención débil (`[weak self]` leyendo `self.source`
+dentro del handler, no la variable local `pressureSource`) evita el
+ciclo de retención clásico de GCD donde el event handler de un
+`DispatchSourceMemoryPressure` captura la propia fuente.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -594,4 +641,5 @@ vista del HUD exista) — eso, si hace falta, es un paso aparte.
 | `feat(jit): add the pairing-file import flow` | `f40cc3a9c` | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
 | `feat(jit): wire Built-in StikJIT into the JIT method picker` | `f721bba88` | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()`. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
-| `feat(perf): add BenchmarkManager` | *(pendiente de build)* | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
+| `feat(perf): add BenchmarkManager` | `088fce471` | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
+| `feat(perf): add MemoryGuard` | *(pendiente de build)* | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |

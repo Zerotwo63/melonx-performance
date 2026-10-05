@@ -108,6 +108,10 @@ struct ContentView: View {
                     if nativeSettings.mainThreadWatchdog.value {
                         Watchdog.shared.start()
                     }
+
+                    if nativeSettings.memoryGuard(true).value {
+                        MemoryGuard.shared.start()
+                    }
                 }
             }
             .environmentObject(gameHandler)
