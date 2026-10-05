@@ -56,9 +56,11 @@ upstream/XC-ios-ht
         ↓
    perf/frame-pacing   (FramePacingMonitor real; hallazgo de MetalView documentado sin tocar)
         ↓
-   perf/shader-prewarm   ← rama de trabajo actual
+   perf/shader-prewarm   (visibilidad real de caché; prewarm nativo ya existe)
         ↓
-   (futuras: perf/metalfx, ...)
+   perf/metalfx   ← rama de trabajo actual
+        ↓
+   (futuras: save/backup manager)
 ```
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
@@ -824,6 +826,56 @@ ese núcleo, fuera de alcance aquí.
 No se tocó `enableShaderCache`, su valor por defecto, ni ningún flag
 pasado al núcleo nativo.
 
+<a id="metalfx"></a>
+## MetalFX (sección 17 del pedido original)
+
+Rama nueva (`perf/metalfx`), continúa desde la punta de
+`perf/shader-prewarm`.
+
+### Por qué no hay integración real de MetalFX aquí
+
+Se leyó `MeloMTKView.swift` y `MetalViewContainer.swift` completos
+antes de diseñar nada. `MeloMTKView` es **puramente manejo de touch
+input** — no implementa `MTKViewDelegate` ni `draw(in:)`, no toca un
+frame jamás. `MetalViewContainer`/`targetSize(...)` solo calculan el
+tamaño del `CAMetalLayer` en la jerarquía de SwiftUI (layout), no la
+resolución interna de render. `RyujinxBridge.setNativeWindow(_:)` le
+entrega el `CAMetalLayer` directamente al núcleo nativo (Vulkan vía
+MoltenVK, C#/.NET, fuera de este árbol) — el núcleo nativo posee TODO
+el pipeline de render-a-presentación. El escalado que hoy existe entre
+la resolución interna (`--resolution-scale`) y el tamaño real de
+pantalla es el bilinear implícito que Core Animation ya hace cuando el
+`drawableSize` de una capa no coincide con sus `bounds` — no MetalFX.
+
+Integrar MetalFX de verdad (`MTLFXSpatialScaler`/`MTLFXTemporalScaler`)
+requiere interceptar el frame de baja resolución **antes** de que se
+presente — reemplazar ese bilinear implícito por un paso explícito de
+upscaling. Ese punto de intercepción vive enteramente dentro del
+código nativo de swapchain (Vulkan/MoltenVK, C#/.NET), que este árbol
+Swift no puede ver ni modificar. No se inventó una integración falsa
+que compile pero no haga nada real.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/MetalFXCapabilityInspector.swift` (nuevo) —
+  chequeo real de soporte de hardware vía
+  `MTLFXSpatialScalerDescriptor.supportsDevice(_:)` /
+  `MTLFXTemporalScalerDescriptor.supportsDevice(_:)` (API real de
+  Apple, no inventada). Puramente informativo — no hace ningún
+  upscaling. `MetalFX.framework` no estaba enlazado en el proyecto
+  antes de este archivo (verificado en `project.pbxproj`); al ser un
+  framework de sistema (como `UniformTypeIdentifiers` antes), se
+  espera auto-enlazado — confirmado, no asumido, vía el build de CI.
+- `SettingsView.swift` (+1 línea de estado, +1 bloque de texto) —
+  muestra si el dispositivo soporta MetalFX spatial upscaling, justo
+  debajo de la tarjeta de Resolution Scale, dejando explícito que
+  todavía no lo usa el renderizador.
+
+Esto deja la información real de capacidad del dispositivo lista para
+quien eventualmente aborde la integración nativa — un trabajo mucho
+más grande, que requiere tocar el core C#/.NET, fuera de alcance de
+este fork tal como está planteado hoy.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -846,3 +898,4 @@ pasado al núcleo nativo.
 | `feat(perf): add AutoPerformanceManager` | `b21d043e3` | `AutoPerformanceManager.swift` (nuevo), `ContentView.swift`, `SettingsView.swift`, `PerformanceOverlay.swift` | Inicio de `perf/auto-performance` (ver `#auto-performance`). Primera pieza que actúa de verdad — reduce `resscale` en vivo vía `InGameSettingsManager` (confirmado que no persiste a disco) cuando térmico/memoria cruzan umbral; apagado por defecto |
 | `feat(perf): add FramePacingMonitor` | `a246fde88` | `FramePacingMonitor.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/frame-pacing` (ver `#frame-pacing`). Mide jitter real entre frames vía `CADisplayLink` — no toca `MetalView.swift`; documenta (sin corregir) el hallazgo de `displaySyncEnabled`/`nominalFramesPerSecond` fijo independiente del toggle de VSync del usuario |
 | `feat(perf): add shader cache visibility` | `0afbbd877` | `ShaderCacheInspector.swift`, `ShaderCacheStatusRow.swift` (nuevos), `PerGameSettingsView.swift` (+2 líneas) | Inicio de `perf/shader-prewarm` (ver `#shader-prewarm`). El prewarm real ya existe (`enableShaderCache`) y no hay API nativa para uno independiente de jugar — confirmado revisando toda la superficie de `RyujinxBridge`. Visibilidad real del tamaño de caché en disco en su lugar |
+| `feat(perf): add MetalFX capability detection` | *(pendiente de build)* | `MetalFXCapabilityInspector.swift` (nuevo), `SettingsView.swift` | Inicio de `perf/metalfx` (ver `#metalfx`). `MeloMTKView`/`MetalViewContainer` confirmados sin ningún punto de intercepción de frame — la integración real requiere el core nativo C#/.NET, fuera de alcance. Detección real de soporte de hardware en su lugar, primer uso de `MetalFX.framework` en el proyecto |

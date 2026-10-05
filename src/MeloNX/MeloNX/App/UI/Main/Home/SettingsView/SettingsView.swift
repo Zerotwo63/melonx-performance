@@ -28,6 +28,7 @@ struct SettingsViewNew: View {
     @Environment(\.horizontalSizeClass) var horizontalSizeClass: UserInterfaceSizeClass?
     
     @State private var selectedCategory: SettingsCategory = .graphics
+    @State private var metalFXCapability = MetalFXCapabilityInspector.current()
     @State private var showResolutionInfo = false
     @State private var showAnisotropicInfo = false
     @State private var showControllerInfo = false
@@ -464,6 +465,14 @@ struct SettingsViewNew: View {
                         minLabel: "0.1x",
                         maxLabel: "3.0x"
                     )
+                }
+
+                if let capability = metalFXCapability {
+                    Text(capability.supportsSpatialScaling
+                        ? "This device supports MetalFX spatial upscaling, not yet used by the renderer."
+                        : "This device does not support MetalFX upscaling.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
             }
             .contextMenu {
