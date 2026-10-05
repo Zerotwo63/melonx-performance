@@ -79,6 +79,10 @@ class LaunchGameHandler: ObservableObject {
                 gametorunDate = "\(Date().timeIntervalSince1970)"
                 gametorun = currentGame?.titleId ?? ""
                 enableJITStik()
+            } else if nativeSettings.builtInStikJIT.value {
+                gametorunDate = "\(Date().timeIntervalSince1970)"
+                gametorun = currentGame?.titleId ?? ""
+                MeloNXBuiltInJIT.enableCurrentProcess()
             } else {
                 // nothing
             }

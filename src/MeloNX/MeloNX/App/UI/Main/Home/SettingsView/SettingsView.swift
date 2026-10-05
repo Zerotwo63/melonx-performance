@@ -1205,6 +1205,29 @@ struct SettingsViewNew: View {
             } else {
                 SettingsToggle(isOn: $useTrollStore, icon: "troll.svg", label: "TrollStore JIT", infoMessage: "Enables JIT automatically using TrollStore's URL Scheme ('apple-magnifier://enable-jit?bundle-id')")
             }
+
+            SettingsToggle(isOn: nativeSettingsManager.builtInStikJIT(false).projectedValue, icon: "bolt.square", label: "Built-in StikJIT", infoMessage: builtInStikJITInfoMessage)
+                .disabled(!BuiltInStikJITAvailability.isAvailable)
+        }
+    }
+
+    /// Mirrors BuiltInStikJITAvailability.unavailableReason() into a
+    /// user-facing explanation for why the toggle above is disabled —
+    /// INTEGRATION.md's "Hide or disable Built-in StikJIT below iOS 17.4
+    /// and while running inside LiveContainer" extended to the other
+    /// reasons this fork's preflight already covers.
+    private var builtInStikJITInfoMessage: String {
+        switch BuiltInStikJITAvailability.unavailableReason() {
+        case .missingGetTaskAllow:
+            return "Requires an install with the get-task-allow entitlement."
+        case .runningInLiveContainer:
+            return "Unavailable inside LiveContainer — it can't create the required helper extension."
+        case .helperMissing:
+            return "MeloNX's JIT helper extension is missing from this install."
+        case .noPairingFileImported:
+            return "Import a pairing file above first."
+        case nil:
+            return "Uses MeloNX's own built-in JIT helper extension instead of a separate app."
         }
     }
     

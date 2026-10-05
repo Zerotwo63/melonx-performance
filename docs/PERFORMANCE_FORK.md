@@ -488,13 +488,50 @@ the pairing file"), verificado contra el texto real, no inventado:
   normalmente auto-enlazan, pero "normalmente" no es lo mismo que
   verificado).
 
-**Qué NO se conectó todavía**: el botón de importar guarda el archivo y
-actualiza su propio estado visual, pero nada en `LaunchGameHandler`
-todavía LEE ese archivo para intentar JIT — eso solo pasa cuando se
-conecte "Built-in StikJIT" como tercer método en el selector (seguimos
-sin tocar esa UI, a propósito, por la misma razón que las veces
-anteriores: es un cambio de comportamiento en vivo, y sin probarlo en un
-dispositivo real no hay forma honesta de verificarlo aquí).
+### Conectado al selector de método de JIT (commit siguiente)
+
+El selector real de MeloNX no es un enum de tres opciones mutuamente
+excluyentes como sugiere `INTEGRATION.md` — es una cadena
+`if/else if` sobre dos `Bool` independientes
+(`nativeSettings.useTrollStore`, `nativeSettings.stikJIT`) en
+`LaunchGameHandler.enableJIT()`, cada uno respaldado por
+`NativeSettingsManager`'s `@dynamicMemberLookup` (`Setting<T>`
+respaldado en `UserDefaults`, sin clase nueva que escribir — el mismo
+mecanismo que ya usan `stikJIT`/`useTrollStore`/`checkForUpdate`/etc.).
+Se respetó esa arquitectura real en vez de reemplazarla por un enum
+"ideal": se agregó una tercera rama, `nativeSettings.builtInStikJIT`,
+al final de la cadena existente:
+
+```swift
+} else if nativeSettings.builtInStikJIT.value {
+    gametorunDate = "\(Date().timeIntervalSince1970)"
+    gametorun = currentGame?.titleId ?? ""
+    MeloNXBuiltInJIT.enableCurrentProcess()
+}
+```
+
+`MeloNXBuiltInJIT.enableCurrentProcess()` (nuevo) lee el pairing file
+importado, arma el `MeloNXJITHelperRequest(operation: .enable, ...)` y
+llama `send(...)` — dispara la solicitud y retorna, igual que
+`askForJIT()`/`enableJITStik()`. No hace falta tocar `JITCoordinator`:
+un `StikJIT.enableJIT()` exitoso deja `CS_DEBUGGED` activo en este
+proceso, que es exactamente lo que `isJITEnabled()` ya comprueba — el
+mismo poll de `JITPopover`/`checkJITAndRunGame` que ya funciona para
+los otros dos métodos observa el resultado sin cambios.
+
+En `SettingsView.swift` (`jitToggleView`) se agregó el tercer
+`SettingsToggle`, deshabilitado vía `.disabled(!BuiltInStikJITAvailability.isAvailable)`
+con un mensaje que explica el motivo exacto (reutilizando
+`unavailableReason()` — el mismo preflight que ya usa
+`MeloNXBuiltInJIT.send`, una sola fuente de verdad).
+
+**Qué sigue sin poder verificarse aquí**: CI confirma que esto compila
+y que la cadena de prioridad/el toggle encajan con el resto del
+código real del proyecto (no uno inventado) — no puede confirmar que
+el helper realmente se lance, que el protocolo de JIT complete, ni que
+`isJITEnabled()` efectivamente pase a `true` en un dispositivo real.
+Eso requiere un pairing file real y hardware físico, ninguno de los
+cuales existe en este entorno de CI.
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
@@ -509,4 +546,5 @@ dispositivo real no hay forma honesta de verificarlo aquí).
 | `feat(jit): add the Built-in StikJIT helper extension target` | `38c730419` | `project.pbxproj`, `MeloNXJITHelper/` (nuevo target+carpeta), `Dependencies/XCFrameworks/StikJIT.xcframework` (vendoreado), `ios-unsigned-ipa.yml` | El target real, verificado contra la arquitectura de Madeira (ver `#builtin-stikjit`); compila, enlaza StikJIT de verdad, se empaqueta en el IPA. No conectado a ningún call site del host todavía. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(jit): give MeloNXJITHelper a build dependency on RyujinxAg` | `041f56011` | `project.pbxproj` | Causa real del fallo de CI (log real, no especulado): `OTHER_LDFLAGS`/`LIBRARY_SEARCH_PATHS` para `Ryujinx.Headless.SDL2.dylib` se pasan como override global de `xcodebuild` en `ios-unsigned-ipa.yml`, y ese override alcanza a TODOS los targets del build, no solo a `MeloNX`. `MeloNXJITHelper` no tenía dependencias declaradas, así que Xcode lo agendó antes de que el target `Ryujinx`/`RyujinxAg` (que produce ese .dylib vía su shell script) terminara — `clang: error: no such file or directory`. El propio target `MeloNX` no sufre esto porque ya depende de `RyujinxAg`. Se agrega la misma dependencia a `MeloNXJITHelper` para forzar el orden correcto — `MeloNXJITHelper` no necesita Ryujinx, es puramente para resolver la carrera; queda documentado como una verruga conocida (el .appex terminará enlazando innecesariamente ese dylib) |
 | `feat(jit): add the host-side Built-in StikJIT launcher` | `21ebfbb78` | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
-| `feat(jit): add the pairing-file import flow` | *(pendiente de build)* | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
+| `feat(jit): add the pairing-file import flow` | `f40cc3a9c` | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
+| `feat(jit): wire Built-in StikJIT into the JIT method picker` | *(pendiente de build)* | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()` |

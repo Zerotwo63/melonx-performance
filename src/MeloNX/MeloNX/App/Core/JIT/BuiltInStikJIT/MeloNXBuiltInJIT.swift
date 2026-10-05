@@ -96,6 +96,33 @@ enum MeloNXBuiltInJIT {
     fileprivate static func finished(_ helper: HelperRequest) {
         running.removeAll { $0 === helper }
     }
+
+    /// LaunchGameHandler.enableJIT()'s Built-in StikJIT branch calls this
+    /// directly, mirroring askForJIT()/enableJITStik(): read the imported
+    /// pairing file, fire the request, and return — JITCoordinator's
+    /// existing isJITEnabled() poll (already driving JITPopover and
+    /// checkJITAndRunGame) picks up the result the same way it does for
+    /// the other two JIT methods, since a successful
+    /// StikJIT.enableJIT() leaves CS_DEBUGGED set on this process, which
+    /// is exactly what isJITEnabled() already checks for.
+    static func enableCurrentProcess() {
+        guard let pairingData = try? Data(contentsOf: BuiltInStikJITAvailability.pairingFileURL) else {
+            print("[jit-helper] Built-in StikJIT: couldn't read the imported pairing file.")
+            return
+        }
+
+        let request = MeloNXJITHelperRequest(
+            operation: .enable,
+            targetPID: Int32(getpid()),
+            pairingData: pairingData
+        )
+
+        send(request) { result in
+            if case .failure(let error) = result {
+                print("[jit-helper] Built-in StikJIT failed: \(error.localizedDescription)")
+            }
+        }
+    }
 }
 
 /// One request to the helper, from its start to its one result.
