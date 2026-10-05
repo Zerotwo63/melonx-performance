@@ -48,7 +48,9 @@ upstream/XC-ios-ht
         ↓
    perf/benchmark-manager   (BenchmarkManager real, conectado al HUD)
         ↓
-   perf/memory-guard   ← rama de trabajo actual
+   perf/memory-guard   (MemoryGuard real, pasivo)
+        ↓
+   perf/thermal-governor   ← rama de trabajo actual
         ↓
    (futuras: perf/metalfx, ...)
 ```
@@ -625,6 +627,33 @@ dentro del handler, no la variable local `pressureSource`) evita el
 ciclo de retención clásico de GCD donde el event handler de un
 `DispatchSourceMemoryPressure` captura la propia fuente.
 
+<a id="thermal-governor"></a>
+## ThermalGovernor (sección 13 del pedido original)
+
+Rama nueva (`perf/thermal-governor`), continúa la cadena desde la
+punta de `perf/memory-guard`. Mismo patrón exacto que `MemoryGuard`,
+aplicado a la señal térmica real en vez de la de memoria:
+
+- Verificado primero: cero resultados grepeando el proyecto por
+  `thermalState`/`ThermalState`/`thermalStateDidChange` — no existía
+  ningún observador térmico.
+- `App/Core/Performance/ThermalGovernor.swift` (nuevo) — usa
+  `ProcessInfo.processInfo.thermalState` +
+  `ProcessInfo.thermalStateDidChangeNotification` (la API real de
+  Apple para esto, no polling inventado). A diferencia de
+  `MemoryGuard`, no hace falta un enum propio — `ProcessInfo.ThermalState`
+  (`.nominal`/`.fair`/`.serious`/`.critical`) ya es exactamente lo que
+  se necesita expuesto, envolverlo en otro tipo habría sido una
+  abstracción innecesaria.
+- **Deliberadamente pasivo**, misma razón que `MemoryGuard`: solo
+  registra transiciones, no ajusta `resscale` ni ninguna otra cosa por
+  su cuenta — el nombre "governor" no implica que ya gobierne algo;
+  eso es trabajo aparte, para cuando exista una acción real que
+  conectar.
+- `ContentView.swift`/`SettingsView.swift` — mismo patrón de arranque
+  gateado por toggle (`nativeSettings.thermalGovernor(true)`), junto a
+  `Watchdog`/`MemoryGuard`.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -642,4 +671,5 @@ ciclo de retención clásico de GCD donde el event handler de un
 | `feat(jit): wire Built-in StikJIT into the JIT method picker` | `f721bba88` | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()`. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
 | `feat(perf): add BenchmarkManager` | `088fce471` | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
-| `feat(perf): add MemoryGuard` | *(pendiente de build)* | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |
+| `feat(perf): add MemoryGuard` | `0e9072f33` | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |
+| `feat(perf): add ThermalGovernor` | *(pendiente de build)* | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |

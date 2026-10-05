@@ -112,6 +112,10 @@ struct ContentView: View {
                     if nativeSettings.memoryGuard(true).value {
                         MemoryGuard.shared.start()
                     }
+
+                    if nativeSettings.thermalGovernor(true).value {
+                        ThermalGovernor.shared.start()
+                    }
                 }
             }
             .environmentObject(gameHandler)

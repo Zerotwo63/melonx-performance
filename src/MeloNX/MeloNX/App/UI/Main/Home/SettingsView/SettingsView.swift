@@ -888,6 +888,9 @@ struct SettingsViewNew: View {
                 SettingsToggle(isOn: nativeSettingsManager.memoryGuard(true).projectedValue, icon: "memorychip", label: "Memory Pressure Guard", infoMessage: "Watches for real system memory pressure in the background. Currently observation-only — it logs pressure changes and doesn't take any action yet.\n\nLeave ON if unsure.")
                 Divider()
 
+                SettingsToggle(isOn: nativeSettingsManager.thermalGovernor(true).projectedValue, icon: "thermometer.medium", label: "Thermal Governor", infoMessage: "Watches the device's real thermal state in the background. Currently observation-only — it logs thermal changes and doesn't throttle anything yet.\n\nLeave ON if unsure.")
+                Divider()
+
                 Button {
                     inSetup = true
                 } label: {
