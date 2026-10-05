@@ -7,13 +7,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Real save-data backup: shows the actual size of the console's
-/// save/user data (SaveDataInspector) and a working "Back Up Save Data"
-/// action that copies it to a folder the user picks (SaveDataBackupManager).
-/// No restore here yet — see SaveDataBackupManager's own doc comment for
-/// why that's a deliberately separate, later step.
+/// save/user data (SaveDataInspector), a working "Back Up Save Data"
+/// action that copies it to a folder the user picks
+/// (SaveDataBackupManager), and "Restore from Backup"
+/// (SaveDataRestoreManager) — gated behind an explicit confirmation
+/// since it overwrites live save data, matching the same
+/// confirm-before-destroying pattern Ryujinx.clearShaderCache() already
+/// uses elsewhere in this app.
 struct SaveDataBackupCard: View {
     @State private var info: SaveDataInspector.Info?
-    @State private var isPickingFolder = false
+    @State private var isPickingBackupFolder = false
+    @State private var isPickingRestoreFolder = false
+    @State private var pendingRestoreFolder: URL?
+    @State private var showRestoreConfirmation = false
     @State private var statusMessage: String?
     @State private var statusIsError = false
 
@@ -40,11 +46,21 @@ struct SaveDataBackupCard: View {
                 }
 
                 Button {
-                    isPickingFolder = true
+                    isPickingBackupFolder = true
                 } label: {
                     HStack {
                         Image(systemName: "folder.badge.plus")
                         Text("Back Up Save Data")
+                        Spacer()
+                    }
+                }
+
+                Button(role: .destructive) {
+                    isPickingRestoreFolder = true
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.counterclockwise")
+                        Text("Restore from Backup")
                         Spacer()
                     }
                 }
@@ -57,13 +73,14 @@ struct SaveDataBackupCard: View {
             }
             .padding(.vertical, 4)
         }
-        .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
+        .fileImporter(isPresented: $isPickingBackupFolder, allowedContentTypes: [.folder]) { result in
             switch result {
             case .success(let url):
                 do {
                     let backupFolder = try SaveDataBackupManager.exportBackup(to: url)
                     statusMessage = "Backed up to \(backupFolder.lastPathComponent)."
                     statusIsError = false
+                    refresh()
                 } catch {
                     statusMessage = error.localizedDescription
                     statusIsError = true
@@ -73,8 +90,43 @@ struct SaveDataBackupCard: View {
                 statusIsError = true
             }
         }
+        .fileImporter(isPresented: $isPickingRestoreFolder, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url):
+                pendingRestoreFolder = url
+                showRestoreConfirmation = true
+            case .failure(let error):
+                statusMessage = error.localizedDescription
+                statusIsError = true
+            }
+        }
+        .alert("Restore Save Data?", isPresented: $showRestoreConfirmation) {
+            Button("Cancel", role: .cancel) {
+                pendingRestoreFolder = nil
+            }
+            Button("Restore", role: .destructive) {
+                performRestore()
+            }
+        } message: {
+            Text("This overwrites your current save data with the contents of \(pendingRestoreFolder?.lastPathComponent ?? "this backup"). A safety copy of your current data is made first, just in case.")
+        }
         .onAppear {
             refresh()
+        }
+    }
+
+    private func performRestore() {
+        guard let folder = pendingRestoreFolder else { return }
+        pendingRestoreFolder = nil
+
+        do {
+            let snapshot = try SaveDataRestoreManager.restoreBackup(from: folder)
+            statusMessage = "Restored. Previous data saved to \(snapshot.lastPathComponent)."
+            statusIsError = false
+            refresh()
+        } catch {
+            statusMessage = error.localizedDescription
+            statusIsError = true
         }
     }
 

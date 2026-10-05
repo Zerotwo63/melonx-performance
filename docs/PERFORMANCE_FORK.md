@@ -928,14 +928,37 @@ en el destino que el usuario elige, preservando rutas relativas.
   `SettingsView.swift` (+1 línea en `miscSettings`) — tarjeta real con
   tamaño actual y botón "Back Up Save Data" que funciona de verdad.
 
-### Qué NO se hizo — a propósito
+### Qué NO se hizo en el primer commit — a propósito, y qué se agregó después
 
-**No hay restaurar.** Copiar un backup de vuelta sobre `bis` en vivo
-sobrescribe el progreso de guardado actual — una acción destructiva de
-alto riesgo que merece su propio paso, con su propia confirmación
-explícita, no empaquetada en el mismo commit que el primer camino de
-backup/export. Documentado en el comentario de
-`SaveDataBackupManager.swift`, no solo aquí.
+**No había restaurar en el primer commit.** Copiar un backup de vuelta
+sobre `bis` en vivo sobrescribe el progreso de guardado actual — una
+acción destructiva de alto riesgo que merecía su propio paso, con su
+propia confirmación explícita, no empaquetada en el mismo commit que
+el primer camino de backup/export.
+
+### Restaurar (commit siguiente)
+
+- `App/Core/Performance/SaveDataRestoreManager.swift` (nuevo) —
+  `restoreBackup(from:)` real. Antes de sobrescribir nada, **siempre**
+  crea una snapshot de seguridad de los datos actuales
+  (`SaveDataBackupManager.createPreRestoreSnapshot()`, nuevo también,
+  reutiliza el mismo primitivo de copia que `exportBackup` ya tenía —
+  no se duplicó la lógica) guardada dentro del sandbox de la app en
+  `Documents/SaveBackups/`, sin necesitar un picker de carpeta para esa
+  parte. Valida que la carpeta elegida empiece con el prefijo exacto
+  que `exportBackup` usa (`MeloNX-SaveBackup-`) — no es a prueba de
+  todo, pero es una verificación real contra el error más probable
+  (elegir la carpeta equivocada por accidente).
+- `App/Core/Performance/SaveDataBackupManager.swift` — se agregó
+  `overwriteContents(of:into:)`, una variante de `copyContents` que sí
+  reemplaza archivos existentes (necesaria para restaurar sobre datos
+  en vivo; `copyContents` original asume un destino vacío, válido
+  siempre para exportar/snapshot pero no para restaurar).
+- `SaveDataBackupCard.swift` — botón real "Restore from Backup"
+  (`role: .destructive`), con una `.alert` de confirmación explícita
+  (mismo patrón que `Ryujinx.clearShaderCache()` ya usa) que menciona
+  tanto la carpeta elegida como la snapshot de seguridad automática
+  antes de ejecutar nada.
 
 ## CHANGELOG de este fork (se actualiza por commit)
 
@@ -962,3 +985,4 @@ backup/export. Documentado en el comentario de
 | `feat(perf): add MetalFX capability detection` | `d178530a8` | `MetalFXCapabilityInspector.swift` (nuevo), `SettingsView.swift` | Inicio de `perf/metalfx` (ver `#metalfx`). `MeloMTKView`/`MetalViewContainer` confirmados sin ningún punto de intercepción de frame — la integración real requiere el core nativo C#/.NET, fuera de alcance. Detección real de soporte de hardware en su lugar, primer uso de `MetalFX.framework` en el proyecto. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(perf): add missing #available guard for MetalFX descriptors` | `d08f07335` | `MetalFXCapabilityInspector.swift` | Error real de compilación (log real): `'MTLFXSpatialScalerDescriptor' is only available in iOS 16.0 or newer` — a pesar de que el deployment target (18.1) excede 16.0, el compilador exigió un guard explícito para este par de símbolos. Corregido el comentario que afirmaba (incorrectamente, para este caso específico) que el guard era innecesario |
 | `feat: add save data backup (export only)` | `045c86141` | `SaveDataInspector.swift`, `SaveDataBackupManager.swift`, `SaveDataBackupCard.swift` (nuevos), `SettingsView.swift` (+1 línea) | Inicio de `feat/save-backup-manager` (ver `#save-backup-manager`). Backup real (copia, no zip) de `Documents/bis` menos `system` (firmware confirmado) a una carpeta elegida por el usuario. Sin restaurar — deliberadamente diferido, acción destructiva aparte |
+| `feat: add save data restore` | *(pendiente de build)* | `SaveDataRestoreManager.swift` (nuevo), `SaveDataBackupManager.swift` (+`createPreRestoreSnapshot()`/`overwriteContents(of:into:)`), `SaveDataBackupCard.swift` | El paso destructivo diferido antes. Snapshot de seguridad automático siempre antes de sobrescribir; confirmación explícita vía `.alert`; valida el prefijo del nombre de carpeta contra la carpeta equivocada |

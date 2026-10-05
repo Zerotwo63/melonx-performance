@@ -15,12 +15,10 @@ import Foundation
 /// is copied as-is into a dated subfolder at the destination, preserving
 /// its relative path.
 ///
-/// Restore (copying a previous backup back into the live bis folder,
-/// overwriting current save data) is deliberately NOT implemented here
-/// — that's a destructive, high-stakes action affecting live save
-/// progress, and belongs in its own, separate, carefully-confirmed step
-/// rather than bundled into the same commit as the first backup/export
-/// path.
+/// Restore lives in SaveDataRestoreManager.swift, its own, separate,
+/// later step — see that file. It calls back into
+/// createPreRestoreSnapshot() and overwriteContents(of:into:) below to
+/// reuse this file's copy primitives rather than duplicating them.
 enum SaveDataBackupManager {
     enum BackupError: LocalizedError {
         case accessDenied
@@ -88,6 +86,61 @@ enum SaveDataBackupManager {
                 try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: true)
             } else {
                 try fileManager.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fileManager.copyItem(at: fileURL, to: targetURL)
+            }
+        }
+    }
+
+    /// A safety snapshot of the CURRENT live save data, taken
+    /// automatically before SaveDataRestoreManager overwrites anything.
+    /// Stays entirely inside the app's own sandbox (Documents/SaveBackups),
+    /// so — unlike exportBackup(to:) — it needs no folder picker and no
+    /// security-scoped access.
+    @discardableResult
+    static func createPreRestoreSnapshot() throws -> URL {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let snapshotFolder = URL.documentsDirectory
+            .appendingPathComponent("SaveBackups")
+            .appendingPathComponent("pre-restore-\(dateFormatter.string(from: Date()))")
+
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: snapshotFolder, withIntermediateDirectories: true)
+
+        for folder in SaveDataInspector.saveRelevantFolders {
+            let folderDestination = snapshotFolder.appendingPathComponent(folder.lastPathComponent)
+            try copyContents(of: folder, to: folderDestination, fileManager: fileManager)
+        }
+
+        return snapshotFolder
+    }
+
+    /// Copies `source`'s contents into `destination`, replacing any
+    /// file that already exists there — unlike copyContents(of:to:)
+    /// above, which assumes a fresh, empty destination (true for every
+    /// export/snapshot folder, since each is freshly timestamped) and
+    /// would simply fail if a target file already existed. Restoring
+    /// into the live bis folder is exactly the case where the
+    /// destination already has files that need overwriting.
+    static func overwriteContents(of source: URL, into destination: URL, fileManager: FileManager) throws {
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        guard let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: [.isDirectoryKey], options: []) else {
+            return
+        }
+
+        for case let fileURL as URL in enumerator {
+            let relativePath = fileURL.path.replacingOccurrences(of: source.path, with: "")
+            let targetURL = destination.appendingPathComponent(relativePath)
+
+            let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if isDirectory {
+                try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: true)
+            } else {
+                try fileManager.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: targetURL.path) {
+                    try fileManager.removeItem(at: targetURL)
+                }
                 try fileManager.copyItem(at: fileURL, to: targetURL)
             }
         }
