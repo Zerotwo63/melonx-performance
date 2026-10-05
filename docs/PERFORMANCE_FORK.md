@@ -533,6 +533,77 @@ el helper realmente se lance, que el protocolo de JIT complete, ni que
 Eso requiere un pairing file real y hardware físico, ninguno de los
 cuales existe en este entorno de CI.
 
+## JitStreamerEB como mecanismo interno (StikDebug ya no es requisito)
+
+**Causa real, verificada por lectura del repositorio (no asumida):**
+el pedido original decía que `JITCoordinator` "todavía no está
+conectado", pero una lectura fresca de `JITPopover.swift` y
+`ContentView.checkJITAndRunGame()` mostró que ambos YA llamaban a
+`JITCoordinator.shared.waitForJIT(...)` desde el commit
+`656e29273` (ver fila del changelog). Lo que sí estaba desconectado
+—con cero llamadores en todo el repo— era
+`JitStreamerEB/EnableJIT.swift`: un cliente HTTP completo para
+`jkcoxson/JitStreamer-EB` que nunca se invocaba desde
+`LaunchGameHandler.enableJIT()`. Esa es la razón real por la que JIT
+requería StikDebug: no porque faltara el mecanismo interno, sino
+porque el mecanismo interno existía en el código y no se usaba.
+
+**Qué es `JitStreamerEB` en realidad** (confirmado contra el README
+real del proyecto vía `gh api repos/jkcoxson/JitStreamer-EB`, no
+inventado): un servidor Rust + VPN WireGuard que, tras recibir un
+pairing file, entrega al dispositivo una config que enruta
+`fd00::/64` hacia `fd00::9172`, donde expone `/attach/<pid>` (adjunta
+un debugger al proceso indicado, otorgando JIT) y `/hello` (liveness).
+"LocalDevVPN" —que el usuario ya tiene configurado como parte de su
+flujo— es el cliente VPN externo que provee ese túnel; MeloNX nunca
+necesitó construir la VPN, solo ser un cliente HTTP correcto una vez
+que el túnel está arriba. Los valores `9172`/`fd00::` que ya estaban
+hardcodeados en el archivo muerto coinciden exactamente con los
+default reales del proyecto — no eran arbitrarios, solo nunca se
+habían conectado a nada.
+
+**Qué se cambió:**
+
+- `JitStreamerEB/EnableJIT.swift`: reescrito de llamadas basadas en
+  completion-handlers/`DispatchSource` a `async`/`await`
+  (`try await URLSession.shared.data(for:)`,
+  `try? await Task.sleep(nanoseconds:)`). Expone
+  `JITStreamerEB.attach() async -> Bool` — antes la función disparaba
+  la petición y solo informaba el resultado vía alerta, sin que ningún
+  llamador pudiera decidir nada en base al resultado real. Se eliminó
+  código sin llamadores externos (`enableJITEB`, `enableJITEBRequest`,
+  `LaunchApp`, `showLaunchAppAlert`); `presentAlert(...)` se preservó
+  intacto porque `Ryujinx.swift` sí lo usa.
+- `LaunchGameHandler.enableJIT()`: ahora intenta `JITStreamerEB.attach()`
+  primero y de forma incondicional, dentro de
+  `Task { @MainActor in ... }`. Solo si falla (`!acquired`) cae a la
+  cadena existente TrollStore → StikDebug → Built-in StikJIT, cada
+  una todavía gateada por su propio toggle en `nativeSettings` — esos
+  tres métodos no cambiaron de comportamiento, solo pasaron a ser
+  fallback explícito en vez de ser el único camino.
+- `JITCoordinator.swift`: sin cambios de lógica (el dedup vía
+  `pendingCompletions` y el no-op de `cancel()` cuando hay otros
+  llamadores en espera ya eran correctos desde `656e29273`); solo se
+  agregaron los `print("[JIT] ...")` pedidos en los puntos de
+  transición de estado reales (`waiting` al iniciar el primer poll,
+  `acquired`/`timed out` en ambas rutas de resolución).
+
+Flujo resultante al tocar Play: `enableJIT()` dispara
+`JITStreamerEB.attach()` → si el túnel LocalDevVPN está arriba y
+`/attach/<pid>` responde con éxito, `Ryujinx.checkForJIT()` se
+re-evalúa y el poll existente de `JITPopover`/`checkJITAndRunGame` vía
+`JITCoordinator` observa `isJITEnabled() == true` sin cambios — nunca
+hizo falta tocar esa ruta de espera, porque ya era correcta. Si el
+intento interno falla, recién ahí entra la cadena de fallback, y solo
+si el usuario activó alguno de esos toggles.
+
+**Qué sigue sin poder verificarse aquí**: igual que con Built-in
+StikJIT, CI solo puede confirmar que esto compila y que la cadena de
+prioridad es real (no inventada). No puede confirmar que
+`fd00::9172` responda, que LocalDevVPN entregue el túnel, ni que
+`/attach/<pid>` devuelva `success: true` — eso requiere el túnel
+LocalDevVPN real y hardware físico.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -548,4 +619,5 @@ cuales existe en este entorno de CI.
 | `feat(jit): add the host-side Built-in StikJIT launcher` | `21ebfbb78` | `BuiltInStikJIT/MeloNXBuiltInJIT.swift`, `BuiltInStikJIT/MeloNXJITHelperRequest.swift` (nuevos), `BuiltInStikJITAvailability.swift` | El lanzador real (API privada `NSExtension`, ver `#builtin-stikjit`). Puramente aditivo en la carpeta sincronizada existente del host — sin cambios a `project.pbxproj`. Sin call sites desde `LaunchGameHandler`/`ContentView` |
 | `feat(jit): add the pairing-file import flow` | `f40cc3a9c` | `BuiltInStikJIT/PairingFileImporter.swift`, `BuiltInStikJIT/PairingFileImportRow.swift` (nuevos), `SettingsView.swift` (+1 línea), `Info.plist` (+`LSSupportsOpeningDocumentsInPlace`) | Import real vía `.fileImporter`, copia atómica + security-scoped, per `INTEGRATION.md`. Primer uso real de `UniformTypeIdentifiers` en el proyecto (estaba en el navegador pero sin enlazar) |
 | `feat(jit): wire Built-in StikJIT into the JIT method picker` | `f721bba88` | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()`. **Primer intento de CI falló** — ver fila siguiente |
-| `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | *(pendiente de build)* | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
+| `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
+| `feat(jit): activate JitStreamerEB as the internal JIT path, StikDebug as fallback-only` | *(pendiente de build)* | `JitStreamerEB/EnableJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift` (logs), `MeloNXTests/JITFlowTests.swift` (nuevo) | Causa real (ver sección arriba): el archivo cliente de `jkcoxson/JitStreamer-EB` existía con cero llamadores; StikDebug no era "requisito" por falta de mecanismo interno, sino porque el mecanismo interno nunca se conectó. `JITStreamerEB.attach()` migrado a `async`/`await` y conectado como primer intento, incondicional, en `enableJIT()`; TrollStore/StikDebug/Built-in StikJIT quedan como fallback explícito solo si `attach()` falla. `JITCoordinator` no necesitó cambios de lógica, solo los `print("[JIT] ...")` pedidos |

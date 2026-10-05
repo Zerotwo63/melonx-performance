@@ -63,12 +63,14 @@ final class JITCoordinator: ObservableObject {
 
         if isJITEnabled() {
             state = .ready
+            print("[JIT] acquired")
             completion(true)
             return true
         }
 
         var attempt = 0
         state = .waiting(attempt: attempt)
+        print("[JIT] waiting")
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] timer in
             guard let self else {
@@ -81,6 +83,7 @@ final class JITCoordinator: ObservableObject {
             if isJITEnabled() {
                 self.stopPolling()
                 self.state = .ready
+                print("[JIT] acquired")
                 self.resolve(true, primary: completion)
                 return
             }
@@ -88,6 +91,7 @@ final class JITCoordinator: ObservableObject {
             if maxAttempts > 0 && attempt >= maxAttempts {
                 self.stopPolling()
                 self.state = .timedOut
+                print("[JIT] timed out")
                 self.resolve(false, primary: completion)
                 return
             }

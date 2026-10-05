@@ -2,111 +2,122 @@
 //  EnableJIT.swift
 //  MeloNX
 //
-//  Created by Stossy11 on 10/02/2025.
-//
 
 import Foundation
 import Network
 import UIKit
 
-func enableJITEB() {
-    if UserDefaults.standard.bool(forKey: "waitForVPN") {
-        waitForVPNConnection { connected in
-            if connected {
-                enableJITEBRequest()
+/// MeloNX's internal JIT activation path — needs no app installed
+/// on-device beyond the existing "LocalDevVPN" tunnel (no StikDebug, no
+/// spent AltStore slot). Verified against the real jkcoxson/JitStreamer-EB
+/// project (its README, not assumed): it hands a device a WireGuard
+/// config that routes fd00::/64 to a server reachable at exactly
+/// fd00::9172 — the same address this file already targeted. The
+/// VPN/server side is owned by LocalDevVPN + whatever JitStreamer-EB
+/// instance it's configured against; this file is only the HTTP client
+/// for the `/attach/<pid>` endpoint that project documents.
+///
+/// This was fully implemented but never called from anywhere —
+/// LaunchGameHandler.enableJIT() now calls `JITStreamerEB.attach()` as
+/// the first, internal attempt before falling back to
+/// TrollStore/StikDebug/Built-in StikJIT.
+enum JITStreamerEB {
+    struct AttachResult: Codable {
+        let success: Bool
+        let message: String
+    }
+
+    /// Attempts to acquire JIT for the current process via the
+    /// LocalDevVPN-reachable JitStreamer EB server. Returns whether it
+    /// actually succeeded — callers decide whether to fall back.
+    static func attach(requestTimeout: TimeInterval = 5, vpnWaitTimeout: TimeInterval = 30) async -> Bool {
+        print("[JIT] internal method selected")
+
+        if UserDefaults.standard.bool(forKey: "waitForVPN") {
+            guard await waitForVPNConnection(timeout: vpnWaitTimeout) else {
+                print("[JIT] timed out")
+                return false
             }
         }
-    } else {
-        enableJITEBRequest()
-    }
-}
 
-func enableJITEBRequest() {
-    let pid = Int(getpid())
-    // print(pid)
-    
-    let address = URL(string: "http://[fd00::]:9172/attach/\(pid)")!
-    var request = URLRequest(url: address)
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    
-    let task = URLSession.shared.dataTask(with: request) { data, response, error in
-        if let error = error {
-            presentAlert(title: "Request Error", message: error.localizedDescription)
-            return
+        print("[JIT] waiting")
+
+        guard let result = await requestAttach(timeout: requestTimeout) else {
+            print("[JIT] timed out")
+            return false
         }
-        
-       Task { @MainActor in
-            if let data = data, let viewController = AppDelegate.window?.rootViewController {
-                showLaunchAppAlert(jsonData: data, in: viewController)
-            } else {
-                fatalError("Unable to get Window")
+
+        if result.success {
+            print("[JIT] acquired")
+            await MainActor.run {
+                Ryujinx.shared.checkForJIT()
             }
-        }
-    }
-    
-    task.resume()
-}
-
-func waitForVPNConnection(timeout: TimeInterval = 30, interval: TimeInterval = 1, _ completion: @escaping (Bool) -> Void) {
-    let startTime = Date()
-    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
-    
-    timer.schedule(deadline: .now(), repeating: interval)
-    
-    timer.setEventHandler {
-        pingSite { connected in
-            if connected {
-                timer.cancel()
-               Task { @MainActor in
-                    completion(true)
-                }
-            } else if Date().timeIntervalSince(startTime) > timeout {
-                timer.cancel()
-               Task { @MainActor in
-                    completion(false)
-                }
-            }
-        }
-    }
-    
-    timer.resume()
-}
-
-func pingSite(host: String = "http://[fd00::]:9172/hello", completion: @escaping (Bool) -> Void) {
-    guard let url = URL(string: host) else {
-        completion(false)
-        return
-    }
-    
-    let config = URLSessionConfiguration.default
-    config.timeoutIntervalForRequest = 2.0
-    config.timeoutIntervalForResource = 2.0
-    
-    let session = URLSession(configuration: config)
-    
-    var request = URLRequest(url: url)
-    request.httpMethod = "GET"
-    
-    let task = session.dataTask(with: request) { _, response, error in
-        if let error = error {
-            // print("Ping failed: \(error.localizedDescription)")
-            completion(false)
-        } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-            completion(true)
         } else {
-            let httpResponse = response as? HTTPURLResponse
-            completion(false)
+            print("[JIT] timed out")
+            let message = result.message
+            Task { @MainActor in
+                presentAlert(title: "JIT Error", message: message)
+            }
+        }
+
+        return result.success
+    }
+
+    private static func requestAttach(timeout: TimeInterval) async -> AttachResult? {
+        guard let url = URL(string: "http://[fd00::]:9172/attach/\(getpid())") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            return try JSONDecoder().decode(AttachResult.self, from: data)
+        } catch {
+            print("[JIT] internal method request failed: \(error.localizedDescription)")
+            return nil
         }
     }
-    
-    task.resume()
-}
 
+    private static func waitForVPNConnection(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            if await pingSite() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        return false
+    }
+
+    private static func pingSite(host: String = "http://[fd00::]:9172/hello") async -> Bool {
+        guard let url = URL(string: host) else { return false }
+
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 2.0
+        config.timeoutIntervalForResource = 2.0
+        let session = URLSession(configuration: config)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
+    }
+}
 
 func presentAlert(title: String, message: String, imageName: String? = nil, completion: (() -> Void)? = nil) {
     guard let rootVC = AppDelegate.window?.rootViewController else { return }
-    
+
     if let imageName = imageName, UIImage(named: imageName) != nil {
         let customAlert = MacClassicAlertViewController(title: title, message: message, imageName: imageName, completion: completion)
         Task { @MainActor in
@@ -119,44 +130,6 @@ func presentAlert(title: String, message: String, imageName: String? = nil, comp
         })
         Task { @MainActor in
             rootVC.present(alert, animated: true)
-        }
-    }
-}
-
-
-struct LaunchApp: Codable {
-    let success: Bool
-    let message: String
-}
-
-func showLaunchAppAlert(jsonData: Data, in viewController: UIViewController) {
-    do {
-        let result = try JSONDecoder().decode(LaunchApp.self, from: jsonData)
-        
-        var message = ""
-        
-        if !result.success {
-            message += "\n\(result.message)"
-            
-            
-            let alert = UIAlertController(title: "JIT Error", message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            
-           Task { @MainActor in
-                viewController.present(alert, animated: true)
-            }
-        } else {
-            // print("Hopefully JIT is enabled now...")
-            Ryujinx.shared.checkForJIT()
-        }
-        
-    } catch {
-        // print(String(data: jsonData, encoding: .utf8))
-        let alert = UIAlertController(title: "Decoding Error", message: error.localizedDescription, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        
-       Task { @MainActor in
-            viewController.present(alert, animated: true)
         }
     }
 }

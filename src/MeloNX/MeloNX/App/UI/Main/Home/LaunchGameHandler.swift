@@ -66,27 +66,37 @@ class LaunchGameHandler: ObservableObject {
     
     
     
+    /// MeloNX's own internal JIT path (JITStreamerEB, via the existing
+    /// LocalDevVPN tunnel) is tried first, unconditionally — it needs no
+    /// app installed on-device beyond that VPN, so it's never a
+    /// requirement to have StikDebug/StikJIT/TrollStore around.
+    /// TrollStore/StikDebug/Built-in StikJIT only run as fallbacks, and
+    /// only for whichever one the user has actually toggled on — this
+    /// doesn't change their existing behavior, it only runs after the
+    /// internal attempt has had a real chance to succeed or fail.
     func enableJIT() {
         ryujinx.checkForJIT()
+        print("[JIT] activation requested")
         print("Has TXM? \(ProcessInfo.processInfo.hasTXM)")
-        
-        if !ryujinx.jitenabled {
-            if nativeSettings.useTrollStore.value {
-                gametorunDate = "\(Date().timeIntervalSince1970)"
-                gametorun = currentGame?.titleId ?? ""
+
+        guard !ryujinx.jitenabled else { return }
+
+        gametorunDate = "\(Date().timeIntervalSince1970)"
+        gametorun = currentGame?.titleId ?? ""
+
+        Task { @MainActor in
+            let acquired = await JITStreamerEB.attach()
+
+            guard !acquired else { return }
+
+            print("[JIT] fallback selected")
+
+            if self.nativeSettings.useTrollStore.value {
                 askForJIT()
-            } else if nativeSettings.stikJIT.value {
-                gametorunDate = "\(Date().timeIntervalSince1970)"
-                gametorun = currentGame?.titleId ?? ""
+            } else if self.nativeSettings.stikJIT.value {
                 enableJITStik()
-            } else if nativeSettings.builtInStikJIT.value {
-                gametorunDate = "\(Date().timeIntervalSince1970)"
-                gametorun = currentGame?.titleId ?? ""
-                Task { @MainActor in
-                    MeloNXBuiltInJIT.enableCurrentProcess()
-                }
-            } else {
-                // nothing
+            } else if self.nativeSettings.builtInStikJIT.value {
+                MeloNXBuiltInJIT.enableCurrentProcess()
             }
         }
     }
