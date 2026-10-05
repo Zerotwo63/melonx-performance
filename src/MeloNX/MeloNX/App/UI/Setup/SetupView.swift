@@ -403,24 +403,35 @@ struct SetupView: View {
                 showAlert = true
                 return
             }
+
+            let fileManager = FileManager.default
+            let systemDirectory = URL.documentsDirectory.appendingPathComponent("system")
+            try fileManager.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
             
             for fileURL in selectedFiles {
-                guard fileURL.startAccessingSecurityScopedResource() else {
-                    alertMessage = "Permission denied to access file"
-                    showAlert = true
-                    return
-                }
-                
+                // A document picker URL can already be directly readable (for
+                // example when the picker gives us a copied/local URL). In that
+                // case startAccessingSecurityScopedResource() legitimately
+                // returns false, so it must not be treated as permission denied.
+                let accessing = fileURL.startAccessingSecurityScopedResource()
                 defer {
-                    fileURL.stopAccessingSecurityScopedResource()
+                    if accessing {
+                        fileURL.stopAccessingSecurityScopedResource()
+                    }
                 }
-                
-                let destinationURL = URL.documentsDirectory.appendingPathComponent("system").appendingPathComponent(fileURL.lastPathComponent)
-                
-                try FileManager.default.copyItem(at: fileURL, to: destinationURL)
+
+                let destinationURL = systemDirectory.appendingPathComponent(fileURL.lastPathComponent)
+                let data = try Data(contentsOf: fileURL)
+                try data.write(to: destinationURL, options: .atomic)
             }
             
             keysImported = Ryujinx.shared.checkIfKeysImported()
+            guard keysImported else {
+                alertMessage = "Keys were copied, but prod.keys was not found. Select the correct key files and try again."
+                showAlert = true
+                return
+            }
+
             alertMessage = "Keys imported successfully"
             showAlert = true
             
@@ -439,29 +450,32 @@ struct SetupView: View {
                 showAlert = true
                 return
             }
-            
-            guard fileURL.startAccessingSecurityScopedResource() else {
-                alertMessage = "Permission denied to access file"
-                showAlert = true
-                return
-            }
-            
+
+            // Security-scoped access is optional: copied/local picker URLs are
+            // readable even when startAccessingSecurityScopedResource() is false.
+            let accessing = fileURL.startAccessingSecurityScopedResource()
             defer {
-                fileURL.stopAccessingSecurityScopedResource()
+                if accessing {
+                    fileURL.stopAccessingSecurityScopedResource()
+                }
             }
-            
             
             let (string, isErr) = RyujinxBridge.installFirmware(at: fileURL.path)
             
             if isErr {
-                alertMessage = string
+                alertMessage = string.isEmpty ? "Firmware installation failed" : string
                 showAlert = true
-            } else {
-                Ryujinx.shared.firmwareversion = string
+                return
             }
-                
-            firmImported = (Ryujinx.shared.firmwareversion == "" ? "0" : Ryujinx.shared.firmwareversion) != "0"
-            alertMessage = "Firmware installed successfully"
+
+            Ryujinx.shared.firmwareversion = string
+            firmImported = (string.isEmpty ? "0" : string) != "0"
+
+            if firmImported {
+                alertMessage = "Firmware installed successfully"
+            } else {
+                alertMessage = "Firmware installation finished, but MeloNX could not detect an installed firmware version."
+            }
             showAlert = true
             
         } catch {
