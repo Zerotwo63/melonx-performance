@@ -81,9 +81,16 @@ class LaunchGameHandler: ObservableObject {
     /// internal attempt has had a real chance to succeed or fail.
     func enableJIT() {
         ryujinx.checkForJIT()
-        JITCoordinator.shared.resetAttempts()
-        JITCoordinator.shared.logDiag("[JIT] acquisition started")
+        JITCoordinator.shared.beginAcquisitionCycle()
+
+        JITCoordinator.shared.logDiag("[JIT] checking already-acquired state")
+        let alreadyAvailable = isJITEnabled()
+        JITCoordinator.shared.logDiag("[JIT] jitAlreadyAvailable = \(alreadyAvailable)")
+
+        let pretest = JITDiagnostics.probeExecutableMemory()
+        JITCoordinator.shared.logDiag("[JIT] executable-memory pretest = \(pretest.overallSuccess)")
         JITCoordinator.shared.logDiag("[JIT] enabled methods = \(JITDiagnostics.enabledMethodNames().joined(separator: ", "))")
+
         print("[JIT] activation requested")
         print("[JIT] request started")
         print("[JIT] current state = \(JITCoordinator.shared.state)")
@@ -95,76 +102,115 @@ class LaunchGameHandler: ObservableObject {
         gametorun = currentGame?.titleId ?? ""
 
         Task { @MainActor in
-            let jsebAttempt = JITCoordinator.shared.beginAttempt("JITStreamerEB")
-            let acquired = await JITStreamerEB.attach()
-            JITCoordinator.shared.finishAttempt(
-                jsebAttempt,
-                result: acquired ? "success" : "failed",
-                error: acquired ? nil : "internal JIT server unreachable or attach request failed"
-            )
+            let jsebAttempt = JITCoordinator.shared.beginAttempt("JITStreamerEB", detected: true, enabled: true)
+            JITCoordinator.shared.logDiag("[JIT] starting JITStreamerEB")
 
-            guard !acquired else { return }
+            let acquired = await JITStreamerEB.attach()
+            JITCoordinator.shared.logDiag("[JIT] JITStreamerEB returned \(acquired)")
+
+            JITCoordinator.shared.logDiag("[JIT] verifying executable memory")
+            let jsebProbe = JITDiagnostics.probeExecutableMemory()
+            JITCoordinator.shared.logDiag("[JIT] verification result = \(jsebProbe.overallSuccess)")
+            JITCoordinator.shared.logDiag("[JIT] errno = \(jsebProbe.errnoValue) (\(jsebProbe.errorDescription.isEmpty ? "none" : jsebProbe.errorDescription))")
+
+            JITCoordinator.shared.updateAttempt(jsebAttempt) { attempt in
+                attempt.attempted = true
+                attempt.result = acquired ? "success" : "failed"
+                attempt.error = acquired ? nil : "internal JIT server unreachable or attach request failed"
+                attempt.errnoValue = jsebProbe.errnoValue
+                attempt.connectionStatus = acquired ? "reachable" : "unreachable"
+            }
+            JITCoordinator.shared.finishAttempt(jsebAttempt)
+
+            guard !acquired else {
+                JITCoordinator.shared.logDiag("[JIT] final result = SUCCESS")
+                return
+            }
 
             print("[JIT] fallback selected")
 
             if self.nativeSettings.useTrollStore.value {
-                let attempt = JITCoordinator.shared.beginAttempt("TrollStore")
+                let attempt = JITCoordinator.shared.beginAttempt("TrollStore", detected: true, enabled: true)
+                JITCoordinator.shared.logDiag("[JIT] starting TrollStore")
                 askForJIT()
                 // TrollStore hands off to the OS/another process - MeloNX has
                 // no synchronous result here. JITCoordinator's own poll is
                 // the only thing allowed to decide acquired/failed.
-                JITCoordinator.shared.finishAttempt(attempt, result: "started (external, result observed via JITCoordinator's poll)")
+                JITCoordinator.shared.updateAttempt(attempt) { attempt in
+                    attempt.attempted = true
+                    attempt.result = "started (external, result observed via JITCoordinator's poll)"
+                    attempt.connectionStatus = "unknown (external app)"
+                }
+                JITCoordinator.shared.finishAttempt(attempt)
             } else if self.nativeSettings.stikJIT.value {
-                let attempt = JITCoordinator.shared.beginAttempt("StikDebug (external app)")
+                let tool = detectStikTool()
+                let detected = tool != .notFound
+                JITCoordinator.shared.logDiag("[JIT] pairing available = unknown (external app manages its own pairing)")
+                JITCoordinator.shared.logDiag("[JIT] connection = \(detected ? "app reachable" : "not reachable - no URL scheme handler found")")
+
+                let attempt = JITCoordinator.shared.beginAttempt("StikJIT", detected: detected, enabled: true)
+                JITCoordinator.shared.logDiag("[JIT] attempt starting StikJIT")
                 enableJITStik()
-                JITCoordinator.shared.finishAttempt(attempt, result: "started (external, result observed via JITCoordinator's poll)")
+                JITCoordinator.shared.updateAttempt(attempt) { attempt in
+                    attempt.attempted = true
+                    attempt.result = detected ? "started (external, result observed via JITCoordinator's poll)" : "failed"
+                    attempt.error = detected ? nil : "no StikDebug/StikJIT URL scheme handler found on this device"
+                    attempt.pairingStatus = "unknown (external app manages its own pairing)"
+                    attempt.connectionStatus = detected ? "app reachable" : "not reachable"
+                }
+                JITCoordinator.shared.finishAttempt(attempt)
             } else if BuiltInStikJITAvailability.isAvailable {
                 // If the embedded helper is usable, prefer it automatically.
                 // Requiring the user to discover and toggle it first made the
                 // "no third app" path effectively unreachable.
                 self.nativeSettings.builtInStikJIT.value = true
-                print("[JIT] built-in JIT enabled setting = true")
-                print("[JIT] built-in activation started")
+                let pairingAvailable = BuiltInStikJITAvailability.hasImportedPairingFile
+                JITCoordinator.shared.logDiag("[JIT] pairing available = \(pairingAvailable)")
 
-                let attempt = JITCoordinator.shared.beginAttempt("Built-in StikJIT")
+                let attempt = JITCoordinator.shared.beginAttempt("builtInStikJIT", detected: true, enabled: true)
+                JITCoordinator.shared.logDiag("[JIT] starting builtInStikJIT")
+
                 let builtInAcquired = await MeloNXBuiltInJIT.enableCurrentProcess()
-                print("[JIT] enableCurrentProcess returned = \(builtInAcquired)")
+                JITCoordinator.shared.logDiag("[JIT] builtInStikJIT returned \(builtInAcquired)")
 
-                print("[JIT] verification started")
+                JITCoordinator.shared.logDiag("[JIT] verifying executable memory")
                 let verified = isJITEnabled()
-                print("[JIT] verification result = \(verified)")
+                let probe = JITDiagnostics.probeExecutableMemory()
+                JITCoordinator.shared.logDiag("[JIT] verification result = \(verified)")
+                JITCoordinator.shared.logDiag("[JIT] errno = \(probe.errnoValue) (\(probe.errorDescription.isEmpty ? "none" : probe.errorDescription))")
 
-                JITCoordinator.shared.finishAttempt(
-                    attempt,
-                    result: verified ? "success" : "failed",
-                    error: verified ? nil : (builtInAcquired
+                JITCoordinator.shared.updateAttempt(attempt) { attempt in
+                    attempt.attempted = true
+                    attempt.result = verified ? "success" : "failed"
+                    attempt.error = verified ? nil : (builtInAcquired
                         ? "enableCurrentProcess reported success but isJITEnabled() is still false"
                         : "enableCurrentProcess did not grant JIT")
-                )
+                    attempt.pairingStatus = "\(pairingAvailable)"
+                    attempt.errnoValue = probe.errnoValue
+                }
+                JITCoordinator.shared.finishAttempt(attempt)
 
                 if !verified {
                     print("[JIT] failed reason = built-in activation did not grant JIT on this process")
                 }
             } else {
+                let reason = BuiltInStikJITAvailability.unavailableReason().map(JITDiagnostics.reasonText(for:))
+                    ?? "the built-in JIT helper could not be started"
+
+                let attempt = JITCoordinator.shared.beginAttempt("builtInStikJIT", detected: false, enabled: false)
+                JITCoordinator.shared.logDiag("[JIT] reasonUnavailable = \(reason)")
+                JITCoordinator.shared.updateAttempt(attempt) { attempt in
+                    attempt.attempted = false
+                    attempt.result = "not attempted"
+                    attempt.error = reason
+                    attempt.pairingStatus = "\(BuiltInStikJITAvailability.hasImportedPairingFile)"
+                }
+                JITCoordinator.shared.finishAttempt(attempt)
+
                 print("[JIT] no fallback available")
-                print("[JIT] built-in JIT enabled setting = false")
-                JITCoordinator.shared.recordFailure("no JIT method is available: the internal JITStreamerEB path failed and no fallback is enabled/available")
+                JITCoordinator.shared.recordFailure("no JIT method is available: the internal JITStreamerEB path failed and no fallback is enabled/available (\(reason))")
 
                 if self.currentGame != nil {
-                    let reason: String
-                    switch BuiltInStikJITAvailability.unavailableReason() {
-                    case .missingGetTaskAllow:
-                        reason = "this AltStore signature does not include get-task-allow"
-                    case .runningInLiveContainer:
-                        reason = "MeloNX is running inside LiveContainer"
-                    case .noPairingFileImported:
-                        reason = "no pairing file has been imported for the built-in JIT helper"
-                    case .helperMissing:
-                        reason = "the MeloNX JIT helper extension is missing from this installation"
-                    case .none:
-                        reason = "the built-in JIT helper could not be started"
-                    }
-
                     presentAlert(
                         title: "JIT Not Acquired",
                         message: "Your Switch keys and firmware are already installed. They do not enable JIT. The internal JitStreamer server was not reachable, and the built-in fallback is unavailable because \(reason)."

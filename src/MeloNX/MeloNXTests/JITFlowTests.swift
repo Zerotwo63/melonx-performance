@@ -201,11 +201,18 @@ struct JITFlowTests {
     @Test func beginAndFinishAttemptRecordsSuccess() {
         JITCoordinator.shared.resetAttempts()
 
-        let id = JITCoordinator.shared.beginAttempt("TestMethod")
-        JITCoordinator.shared.finishAttempt(id, result: "success")
+        let id = JITCoordinator.shared.beginAttempt("TestMethod", detected: true, enabled: true)
+        JITCoordinator.shared.updateAttempt(id) { attempt in
+            attempt.attempted = true
+            attempt.result = "success"
+        }
+        JITCoordinator.shared.finishAttempt(id)
 
         let attempt = JITCoordinator.shared.methodAttempts.first { $0.id == id }
         #expect(attempt?.name == "TestMethod")
+        #expect(attempt?.detected == true)
+        #expect(attempt?.enabled == true)
+        #expect(attempt?.attempted == true)
         #expect(attempt?.result == "success")
         #expect(attempt?.error == nil)
         #expect((attempt?.elapsed ?? -1) >= 0)
@@ -214,17 +221,27 @@ struct JITFlowTests {
     @Test func finishAttemptRecordsError() {
         JITCoordinator.shared.resetAttempts()
 
-        let id = JITCoordinator.shared.beginAttempt("TestMethod")
-        JITCoordinator.shared.finishAttempt(id, result: "failed", error: "boom")
+        let id = JITCoordinator.shared.beginAttempt("TestMethod", detected: true, enabled: true)
+        JITCoordinator.shared.updateAttempt(id) { attempt in
+            attempt.result = "failed"
+            attempt.error = "boom"
+            attempt.errnoValue = 13
+        }
+        JITCoordinator.shared.finishAttempt(id)
 
         let attempt = JITCoordinator.shared.methodAttempts.first { $0.id == id }
         #expect(attempt?.result == "failed")
         #expect(attempt?.error == "boom")
+        #expect(attempt?.errnoValue == 13)
     }
 
     @Test func resetAttemptsClearsHistoryAndFailureReason() {
-        let id = JITCoordinator.shared.beginAttempt("TestMethod")
-        JITCoordinator.shared.finishAttempt(id, result: "failed", error: "boom")
+        let id = JITCoordinator.shared.beginAttempt("TestMethod", detected: true, enabled: true)
+        JITCoordinator.shared.updateAttempt(id) { attempt in
+            attempt.result = "failed"
+            attempt.error = "boom"
+        }
+        JITCoordinator.shared.finishAttempt(id)
         JITCoordinator.shared.recordFailure("overall failure")
 
         #expect(!JITCoordinator.shared.methodAttempts.isEmpty)
@@ -236,6 +253,18 @@ struct JITFlowTests {
         #expect(JITCoordinator.shared.lastFailureReason == nil)
     }
 
+    @Test func beginRetryIncrementsCountWithoutClearingLog() {
+        JITCoordinator.shared.resetAttempts()
+        let before = JITCoordinator.shared.retryCount
+        let logCountBefore = JITCoordinator.shared.diagnosticsLog.count
+
+        JITCoordinator.shared.beginRetry()
+
+        #expect(JITCoordinator.shared.retryCount == before + 1)
+        #expect(JITCoordinator.shared.diagnosticsLog.count > logCountBefore)
+        #expect(JITCoordinator.shared.diagnosticsLog.last?.contains("JIT RETRY") == true)
+    }
+
     /// JITStreamerEB is attempted unconditionally by LaunchGameHandler,
     /// regardless of any Settings toggle — this must always be listed,
     /// even with every fallback toggle off.
@@ -244,11 +273,27 @@ struct JITFlowTests {
         #expect(names.contains { $0.contains("JITStreamerEB") })
     }
 
+    @Test func methodCapabilitiesAlwaysListsAllFourMethods() {
+        let capabilities = JITDiagnostics.methodCapabilities()
+        #expect(capabilities.count == 4)
+        #expect(capabilities.contains { $0.method.contains("JITStreamerEB") })
+        #expect(capabilities.contains { $0.method.contains("TrollStore") })
+        #expect(capabilities.contains { $0.method.contains("StikJIT") })
+        #expect(capabilities.contains { $0.method.contains("Built-in StikJIT") })
+    }
+
+    @Test func probeExecutableMemoryNeverCrashesAndReportsSomething() {
+        let probe = JITDiagnostics.probeExecutableMemory()
+        #expect(probe.mmapSucceeded || !probe.errorDescription.isEmpty)
+    }
+
     @Test func diagnosticsReportIsNeverEmpty() {
         let report = JITDiagnostics.buildReport()
         #expect(report.contains("[JIT DIAGNOSTICS]"))
-        #expect(report.contains("Entitlements:"))
-        #expect(report.contains("Runtime:"))
+        #expect(report.contains("ENTITLEMENTS:"))
+        #expect(report.contains("CURRENT PROCESS:"))
+        #expect(report.contains("METHOD DETECTION:"))
+        #expect(report.contains("ATTEMPT ORDER:"))
         #expect(report.contains("FINAL:"))
     }
 }

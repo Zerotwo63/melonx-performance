@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import UIKit
 
 struct JITPopover: View {
     var onJITEnabled: () -> Void
@@ -16,8 +15,7 @@ struct JITPopover: View {
     @State private var isJIT: Bool = false
     @State private var pulseAnimation: Bool = false
     @State private var showFailedAlert: Bool = false
-    @State private var showDiagnostics: Bool = false
-    @State private var diagnosticsReport: String = ""
+    @State private var showDiagnosticsSheet: Bool = false
     
     var body: some View {
         VStack(spacing: 20) {
@@ -92,27 +90,17 @@ struct JITPopover: View {
             Button("Retry") {
                 showFailedAlert = false
                 JITCoordinator.shared.cancel()
+                JITCoordinator.shared.beginRetry()
                 startWaiting()
             }
-            Button("Copy JIT Diagnostics") {
-                // Build exactly once, persist it in SwiftUI state, and also
-                // put the same bytes on the pasteboard. The previous version
-                // only wrote to UIPasteboard from the alert action; on the
-                // physical iPhone that action dismissed the alert but left an
-                // empty pasteboard, making the entire diagnostic path useless.
-                //
-                // Keeping a copy in-app means the report remains available
-                // even if iOS/sideloading interferes with the pasteboard.
-                let report = JITDiagnostics.buildReport()
-                diagnosticsReport = report
-                UIPasteboard.general.string = report
-                JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
-
-                // Present after the alert has finished dismissing. Trying to
-                // present another modal in the same alert transaction can be
-                // dropped by SwiftUI/UIKit on-device.
+            Button("View JIT Diagnostics") {
+                // Present after the alert has finished dismissing - trying
+                // to present another modal synchronously during an alert's
+                // own dismiss transition can be silently dropped by
+                // SwiftUI/UIKit on a real device (confirmed by on-device
+                // testing of an earlier version of this exact button).
                 DispatchQueue.main.async {
-                    showDiagnostics = true
+                    showDiagnosticsSheet = true
                 }
             }
             Button("Cancel", role: .cancel) {
@@ -121,37 +109,13 @@ struct JITPopover: View {
         } message: {
             Text("MeloNX could not acquire JIT with the methods currently enabled in Settings.")
         }
-        .sheet(isPresented: $showDiagnostics) {
-            VStack(spacing: 0) {
-                HStack {
-                    Button("Done") {
-                        showDiagnostics = false
-                    }
-
-                    Spacer()
-
-                    Text("JIT Diagnostics")
-                        .font(.headline)
-
-                    Spacer()
-
-                    Button("Copy") {
-                        UIPasteboard.general.string = diagnosticsReport
-                        JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
-                    }
-                }
-                .padding()
-
-                Divider()
-
-                ScrollView {
-                    Text(diagnosticsReport.isEmpty ? "[JIT DIAGNOSTICS]\nreport generation returned an empty string" : diagnosticsReport)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                }
-            }
+        // A SwiftUI .alert dismisses the instant any button is tapped, with
+        // nowhere to actually read a result - that's why a prior "Copy JIT
+        // Diagnostics" alert button looked like it did nothing. This sheet
+        // is the real diagnostics surface: full selectable text, not
+        // dependent on the clipboard working.
+        .sheet(isPresented: $showDiagnosticsSheet) {
+            JITDiagnosticsView()
         }
         .onAppear {
             pulseAnimation = true

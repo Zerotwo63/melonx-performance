@@ -929,6 +929,114 @@ capacidad runtime (`MAP_JIT`, `pthread_jit_write_protect`) se comporta
 distinto a lo esperado en este hardware/firma específicos — todo eso
 requiere el reporte copiado desde el iPhone real.
 
+## El botón "Copy JIT Diagnostics" no funcionaba: un Alert de SwiftUI se descarta solo
+
+El usuario probó el IPA anterior: al presionar "Copy JIT Diagnostics" en
+el alert "JIT Not Acquired", el alert se cerraba, no aparecía ningún
+diagnóstico, y el portapapeles no tenía nada útil. Causa de diseño (no un
+bug de lógica): un `.alert(...)` de SwiftUI se descarta automáticamente
+en cuanto se toca CUALQUIER botón — no hay forma de mantenerlo abierto ni
+de mostrar confirmación dentro de él. Copiar algo invisible, sin
+feedback, no es verificable.
+
+**Solución:** reemplazar el botón "Copy JIT Diagnostics" por **"View JIT
+Diagnostics"**, que presenta un `.sheet` real (`JITDiagnosticsView.swift`,
+nuevo) con el reporte completo como texto seleccionable
+(`.textSelection(.enabled)`), independiente de que el portapapeles
+funcione. Incluye botones Copy/Share/Close reales, "Copied" se muestra
+DENTRO de la misma pantalla sin cerrarla, y el reporte se guarda también
+en `Documents/jit-diagnostics.txt` para no perder los datos si el
+clipboard falla por cualquier razón.
+
+**Investigación de código completa** (pedida explícitamente antes de
+cambiar comportamiento): se confirmaron 4 métodos de JIT reales en
+MeloNX — `JITStreamerEB` (interno, siempre se intenta primero, sin
+depender de ningún toggle), TrollStore (`askForJIT()`, URL scheme),
+StikDebug/StikJIT externo (`enableJITStik()`, detectado vía
+`detectStikTool()`/`UIApplication.canOpenURL`, NO vía la antigua API
+privada de SpringBoardServices), y Built-in StikJIT
+(`MeloNXBuiltInJIT.enableCurrentProcess()`, vía extensión embebida +
+pairing file). El orden de ejecución es un `if/else if` fijo en
+`LaunchGameHandler.enableJIT()`: JITStreamerEB → TrollStore (si su toggle
+está activo) → StikDebug/StikJIT (si su toggle está activo) → Built-in
+StikJIT (si `BuiltInStikJITAvailability.isAvailable`). También se
+confirmó que `NativeSettingsManager.builtInStikJIT`/`.stikJIT` usados
+como propiedad (`.value`) en `LaunchGameHandler` y como función
+(`builtInStikJIT(false)`) en `SettingsView` son el MISMO `Setting<Bool>`
+subyacente (mismo nombre, mismo `getOrCreateSetting` cacheado) — dos
+sintaxis válidas de `@dynamicMemberLookup`, no una discrepancia.
+
+**Instrumentación agregada:**
+- `JITMethodAttempt` (en `JITCoordinator.swift`) ahora lleva
+  `detected`/`enabled`/`attempted`/`startedAt`/`endedAt`/`result`/`error`/
+  `underlyingError`/`errnoValue`/`timedOut`/`pairingStatus`/
+  `connectionStatus` — cada campo que el usuario pidió ver por método,
+  no un resumen de conveniencia. `updateAttempt(_:_:)` permite que cada
+  rama de `enableJIT()` llene exactamente los campos que tienen sentido
+  para ese método (los externos no pueden conocer su propio resultado
+  síncronamente, así que se marcan `"started (external, result observed
+  via JITCoordinator's poll)"` en vez de fabricar un booleano).
+- `JITCoordinator.beginRetry()`: incrementa un contador real y agrega un
+  separador `===== JIT RETRY #N =====` al log — el log nunca se borra
+  entre reintentos (solo `methodAttempts`/`lastFailureReason`, el estado
+  transitorio), así que un reintento se puede comparar contra el
+  anterior en el mismo transcript.
+- `JITDiagnostics.probeExecutableMemory()`: mmap RW real → escribe 2
+  instrucciones ARM64 mínimas y seguras (`mov w0,#42; ret`, nunca
+  ejecutadas) → `mprotect` a RX, capturando `errno`/`strerror` reales en
+  cada paso. Se llama DESPUÉS de cada método que dice haber adquirido
+  JIT (verificación real, no solo confiar en que la función devolvió
+  `true`), y una vez más como "pretest" antes de intentar nada.
+- `JITDiagnostics.buildReport()` reestructurado a la plantilla exacta
+  pedida: timestamp/IOS/ENTITLEMENTS/CURRENT PROCESS/SETTINGS/METHOD
+  DETECTION (survey de los 4 métodos, disponibles o no, independiente de
+  si se intentaron)/ATTEMPT ORDER/bloques `[JIT METHOD]` por intento
+  real/COORDINATOR/FINAL/LOG completo.
+
+**Qué sigue sin poder verificarse aquí**: que el sheet realmente se vea y
+el texto sea seleccionable en un dispositivo real (CI solo confirma que
+compila), y — igual que antes — la razón real de
+`BuiltInStikJITAvailability.unavailableReason()` y si `JITStreamerEB`
+alcanza el túnel LocalDevVPN en este hardware específico.
+
+## Reconciliado con 2 commits paralelos: el deployment target real es iOS 15, no 18.1
+
+Al pushear el commit del sheet de diagnóstico, el remoto ya tenía 2
+commits nuevos (misma cuenta) atacando el mismo problema en paralelo:
+`63b82ca7c` (agregaba un sheet usando `NavigationStack`/`ShareLink`/
+`.presentationDetents`) y `73480b05d` (lo corrige quitando esas tres
+APIs). El primero **falló en CI de verdad**:
+
+```
+error: 'NavigationStack' is only available in iOS 16.0 or newer
+error: 'ShareLink' is only available in iOS 16.0 or newer
+error: 'init(item:subject:message:label:)' is only available in iOS 16.0 or newer
+error: 'presentationDetents' is only available in iOS 16.0 or newer
+```
+
+Esto confirma, con un error de compilador real, algo que un comentario
+de una sesión anterior en este mismo repo había asumido incorrectamente
+("MeloNX's own deployment target is already 18.1" — en
+`BuiltInStikJITAvailability.swift`): el `IPHONEOS_DEPLOYMENT_TARGET` real
+del target principal `MeloNX` es **15.0** (confirmado en
+`project.pbxproj`; otros targets/configs del mismo proyecto usan 17.4 o
+18.1, pero no el que efectivamente compila esta IPA).
+
+Mi propio `JITDiagnosticsView.swift` (en el commit que pusheé en
+paralelo) también usaba `ShareLink` — habría fallado exactamente igual.
+Al reconciliar por rebase, en vez de solo quitar `ShareLink` (como hizo
+el remoto), se encontró que el proyecto ya tiene su propio wrapper para
+esto: `iOSNav` (`Ryujinx.swift`), que elige `NavigationStack` real en
+iOS 16+ o `NavigationStackBackport.NavigationStack` (paquete SPM ya
+vendoreado) en iOS 15 — el mismo patrón que `SetupView` ya usa. Se
+reemplazó `NavigationView` por `iOSNav` y se agregó un
+`UIActivityViewController` envuelto en `UIViewControllerRepresentable`
+para compartir (Share real, sin necesitar iOS 16). Se adoptó también el
+`DispatchQueue.main.async` del remoto antes de presentar el sheet desde
+el botón del alert — presentar un modal síncronamente durante la
+transición de cierre de otro modal puede perderse en un dispositivo
+real.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -950,3 +1058,6 @@ requiere el reporte copiado desde el iPhone real.
 | `fix(setup): add on-device diagnostics panel, Bug 1 still not fixed` | `f850cddcf` | `SetupView.swift` | **`180a6a684` no resolvió Bug 1 en el iPhone real** del usuario (ver sección arriba) — se queda en Welcome/Setup tras importar keys+firmware, solo avanza con Welcome→Skip manual. En vez de adivinar de nuevo, se agrega un panel de diagnóstico visible en la propia pantalla de Setup (sin Xcode/Mac): snapshot real de filesystem/core para keys y firmware (independiente del `@State` cacheado), estado de `OnboardingGate`, log visible con las cadenas `[KEYS]`/`[FIRMWARE]`/`[SETUP]` pedidas, botón "Reevaluate Now" (llama la misma función que debería dispararse solo) y "Copy Diagnostics" (copia todo al clipboard). No se afirma que Bug 1 esté resuelto; esto existe para que la siguiente prueba real aísle la causa entre: import que no termina, validador que devuelve false, instancia equivocada, SwiftUI que no refresca, otra vista revirtiendo la transición, validación prematura, o ruta equivocada. JIT (Bug 2) no se toca salvo preservar sus logs existentes |
 | `fix(firmware): make native firmware install actually block until done` | `3a6a43486` | `Program.cs`, `SetupView.swift` | Causa exacta de Bug 1 (ver sección arriba): `Program.InstallFirmware` lanzaba la instalación real en `Task.Run(...)` y retornaba de inmediato la versión del paquete de *origen* (`VerifyFirmwarePackage`, que nunca toca `registered/`); `[FIRMWARE] real validation = true` estaba validando la fuente, no el destino. Se quita el `Task.Run`, se llama la instalación síncrona directamente y se verifica contra `GetCurrentFirmwareVersion()` (destino real) antes de retornar. Rutas confirmadas por lectura de código: SOURCE = URL del picker, TEMP = `Documents/bis/system/temp` (se borra tras moverse), DESTINATION = `Documents/bis/system/Contents/registered` — coincide con la ruta que ya usaba el diagnóstico, sin discrepancia de rutas. En Swift, `handleFirmwareImport` pasa a `Task.detached` (patrón ya usado en `Runner.swift`) para no congelar el hilo principal ahora que la llamada nativa bloquea de verdad; sin sleep/asyncAfter, espera el resultado real. Logs separados: picker vs installation vs final validation. Nuevo: sección "candidate paths" en el panel con conteo de archivos por ruta candidata |
 | `feat(jit): add in-app JIT diagnostics report and per-method attempt tracking` | `ed3874405` | `JITDiagnostics.swift` (nuevo), `JITCoordinator.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | Bug 1 confirmado resuelto en iPhone real; foco exclusivo en Bug 2 (JIT) por instrucción explícita — `SetupView.swift`/`OnboardingGate.swift`/`Program.cs` no se tocan en este commit. `JITCoordinator` gana un historial real por intento (`methodAttempts`) y un log visible en pantalla (`logDiag`, mismo patrón que `SetupView`); `LaunchGameHandler.enableJIT()` registra cada método que intenta (JITStreamerEB/TrollStore/StikDebug/Built-in StikJIT), marcando los externos como "started (external)" en vez de fabricar un resultado que MeloNX no puede conocer síncronamente. `JITDiagnostics.buildReport()` arma el reporte completo pedido (App/Entitlements/Settings/Runtime/Coordinator/METHOD N/FINAL) con pruebas reales de capacidad (`allocateTest`, mprotect puro, `MAP_JIT`, `pthread_jit_write_protect_np`, `debuggerAttached`) — `increased-memory-limit` se reporta como un entitlement más, nunca como señal de que JIT esté disponible. Botón "Copy JIT Diagnostics" en la alerta de `JITPopover`. Revisado el gating pedido (`hasJITEntitlement`/`get-task-allow`/`builtInStikJIT`/`shouldCheckJIT`/`shouldShowPopover`/`shouldLaunchGame`): `hasJITEntitlement` ya es código muerto desde la reconciliación anterior; hipótesis más probable sin confirmar aún es `BuiltInStikJITAvailability.unavailableReason() == .noPairingFileImported` (el usuario nunca ha importado un pairing file) — el reporte de diagnóstico existe para confirmarlo con datos reales, no con esta inferencia |
+| `fix(jit): show diagnostics in-app when copy is empty` | `63b82ca7c` | `JITPopover.swift` | Primer intento paralelo de arreglar el mismo problema (botón de copia sin feedback) — agrega un sheet con `NavigationStack`/`ShareLink`/`.presentationDetents`. **CI falló de verdad**: las 3 APIs requieren iOS 16+, y el deployment target real del target `MeloNX` es 15.0 |
+| `fix(jit): keep diagnostics sheet compatible with deployment target` | `73480b05d` | `JITPopover.swift` | Corrige el fallo anterior quitando `NavigationStack`/`ShareLink`/`.presentationDetents`, reemplazando por un `VStack` simple con botones manuales. CI compiló en verde. Reconciliado con el commit siguiente (que usa `iOSNav`, el wrapper ya existente en el proyecto para este caso exacto, en vez de quitar la navegación por completo) |
+| `feat(jit): replace Copy-to-clipboard alert button with a real diagnostics sheet` | `ee42f514f` | `JITDiagnosticsView.swift` (nuevo), `JITCoordinator.swift`, `JITDiagnostics.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | El botón "Copy JIT Diagnostics" del commit anterior no mostraba nada útil — un `.alert` de SwiftUI se descarta en cuanto se toca cualquier botón, sin feedback posible. Se reemplaza por "View JIT Diagnostics", que presenta un `.sheet` real con el reporte completo como texto seleccionable, Copy/Share/Close reales, "Copied" visible sin cerrar la pantalla, y respaldo en `Documents/jit-diagnostics.txt`. `JITMethodAttempt` ahora lleva detected/enabled/attempted/startTime/endTime/result/error/underlyingError/errno/timeout/pairingStatus/connectionStatus por método; `probeExecutableMemory()` hace mmap+mprotect reales con errno capturado, llamado tras cada método que dice haber adquirido JIT (verificación real, no confiar en el booleano). `beginRetry()` agrega un separador `===== JIT RETRY #N =====` al log sin borrarlo. Investigación de código confirmó 4 métodos reales (JITStreamerEB/TrollStore/StikDebug externo/Built-in StikJIT) y su orden fijo de ejecución; `builtInStikJIT`/`.stikJIT` accedidos como propiedad vs función en distintos archivos son el mismo `Setting<Bool>` subyacente, no una discrepancia |

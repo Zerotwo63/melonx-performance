@@ -15,16 +15,32 @@ import Foundation
 ///   which checked isJITEnabled() immediately before ever waiting —
 ///   waitForJIT() does the same immediate check below so migrating that
 ///   call site doesn't add a spurious 0.5s delay when JIT is already on.
+
 /// One attempt at one JIT method, as seen by LaunchGameHandler.enableJIT().
-/// Exists so "Copy JIT Diagnostics" can show a real per-method history
-/// instead of just the final state.
+/// Exists so JITDiagnosticsView can show a real per-method history instead
+/// of just the final state - every field here is something the user
+/// explicitly asked to see broken out per method, not a convenience
+/// summary.
 struct JITMethodAttempt: Identifiable {
     let id = UUID()
     let name: String
+    var detected: Bool
+    var enabled: Bool
+    var attempted: Bool = false
     let startedAt: Date
+    var endedAt: Date?
     var result: String = "pending"
     var error: String?
-    var elapsed: TimeInterval?
+    var underlyingError: String?
+    var errnoValue: Int32?
+    var timedOut: Bool = false
+    var pairingStatus: String?
+    var connectionStatus: String?
+
+    var elapsed: TimeInterval? {
+        guard let endedAt else { return nil }
+        return endedAt.timeIntervalSince(startedAt)
+    }
 }
 
 final class JITCoordinator: ObservableObject {
@@ -41,6 +57,7 @@ final class JITCoordinator: ObservableObject {
     @Published private(set) var diagnosticsLog: [String] = []
     @Published private(set) var methodAttempts: [JITMethodAttempt] = []
     @Published private(set) var lastFailureReason: String?
+    @Published private(set) var retryCount: Int = 0
 
     private var pollTimer: Timer?
     private var pendingCompletions: [(Bool) -> Void] = []
@@ -60,39 +77,58 @@ final class JITCoordinator: ObservableObject {
         }
     }
 
+    /// Clears transitory per-cycle state (the attempt history and last
+    /// failure reason) but never touches diagnosticsLog - the log must
+    /// accumulate across an entire session, including retries.
     func resetAttempts() {
         methodAttempts.removeAll()
         lastFailureReason = nil
     }
 
+    func beginAcquisitionCycle() {
+        resetAttempts()
+        logDiag("[JIT] coordinator started")
+    }
+
+    /// Retry keeps the prior log intact and marks a clear boundary in it,
+    /// rather than starting over - the whole point is comparing attempt #1
+    /// against #2 in one continuous transcript.
+    func beginRetry() {
+        retryCount += 1
+        logDiag("")
+        logDiag("===== JIT RETRY #\(retryCount) =====")
+    }
+
     @discardableResult
-    func beginAttempt(_ name: String) -> UUID {
-        let attempt = JITMethodAttempt(name: name, startedAt: Date())
+    func beginAttempt(_ name: String, detected: Bool, enabled: Bool) -> UUID {
+        let attempt = JITMethodAttempt(name: name, detected: detected, enabled: enabled, startedAt: Date())
         methodAttempts.append(attempt)
-        logDiag("[JIT] attempting \(name)")
+        logDiag("[JIT] method discovered: \(name)")
+        logDiag("[JIT] enabled = \(enabled)")
         return attempt.id
     }
 
-    /// `result` is free-form on purpose: TrollStore/StikDebug hand off to an
-    /// external app and MeloNX never learns their outcome synchronously —
-    /// callers for those pass something like "started (external)" instead
-    /// of a true/false this function would have to fabricate.
-    func finishAttempt(_ id: UUID, result: String, error: String? = nil) {
+    func updateAttempt(_ id: UUID, _ mutate: (inout JITMethodAttempt) -> Void) {
         guard let index = methodAttempts.firstIndex(where: { $0.id == id }) else { return }
-        let elapsed = Date().timeIntervalSince(methodAttempts[index].startedAt)
-        methodAttempts[index].result = result
-        methodAttempts[index].error = error
-        methodAttempts[index].elapsed = elapsed
+        mutate(&methodAttempts[index])
+    }
 
-        if let error {
-            logDiag("[JIT] \(methodAttempts[index].name) failed: \(error)")
+    func finishAttempt(_ id: UUID) {
+        updateAttempt(id) { attempt in
+            attempt.endedAt = Date()
+        }
+        guard let attempt = methodAttempts.first(where: { $0.id == id }) else { return }
+        if let error = attempt.error {
+            logDiag("[JIT] \(attempt.name) failed: \(error)")
         } else {
-            logDiag("[JIT] \(methodAttempts[index].name) \(result)")
+            logDiag("[JIT] \(attempt.name) \(attempt.result)")
         }
     }
 
     func recordFailure(_ reason: String) {
         lastFailureReason = reason
+        logDiag("[JIT] final result = FAILED")
+        logDiag("[JIT] failure reason = \(reason)")
         logDiag("[JIT] acquisition failed")
     }
 
