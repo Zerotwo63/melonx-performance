@@ -90,6 +90,8 @@ struct SetupView: View {
             
             let firmware = Ryujinx.shared.fetchFirmwareVersion()
             firmImported = (firmware == "" ? "0" : firmware) != "0"
+
+            finishSetupIfReady()
         }
     }
     
@@ -432,8 +434,12 @@ struct SetupView: View {
                 return
             }
 
-            alertMessage = "Keys imported successfully"
-            showAlert = true
+            if firmImported {
+                finishSetupIfReady()
+            } else {
+                alertMessage = "Keys imported successfully. Next, install the firmware. JIT is a separate requirement and is not enabled by Switch keys."
+                showAlert = true
+            }
             
         } catch {
             alertMessage = "Error importing keys: \(error.localizedDescription)"
@@ -472,15 +478,27 @@ struct SetupView: View {
             firmImported = (string.isEmpty ? "0" : string) != "0"
 
             if firmImported {
-                alertMessage = "Firmware installed successfully"
+                finishSetupIfReady()
             } else {
                 alertMessage = "Firmware installation finished, but MeloNX could not detect an installed firmware version."
+                showAlert = true
             }
-            showAlert = true
             
         } catch {
             alertMessage = "Error importing firmware: \(error.localizedDescription)"
             showAlert = true
+        }
+    }
+    
+    private func finishSetupIfReady() {
+        guard keysImported && firmImported else { return }
+
+        // Persist completion immediately and leave the setup screen without
+        // requiring a second tap on Welcome/Finish Setup.
+        skippedSetup = false
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            isInSetup = false
         }
     }
     
