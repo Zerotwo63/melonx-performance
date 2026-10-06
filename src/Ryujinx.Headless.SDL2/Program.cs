@@ -595,15 +595,35 @@ namespace Ryujinx.Headless.SDL2
                 throw new InvalidOperationException("_contentManager is not initialized.");
             }
 
-            SystemVersion systemVersion = _contentManager.VerifyFirmwarePackage(filePath);
-            if (systemVersion is null)
+            // VerifyFirmwarePackage only reads the SOURCE package's own NCA
+            // headers - it never touches the registered/ destination, so its
+            // version string is not proof anything was actually installed.
+            SystemVersion sourceVersion = _contentManager.VerifyFirmwarePackage(filePath);
+            if (sourceVersion is null)
             {
                 throw new InvalidOperationException("The provided file is not a valid firmware package.");
             }
 
-            Task.Run(() => _contentManager.InstallFirmware(filePath));
+            // This used to be `Task.Run(() => _contentManager.InstallFirmware(filePath));`
+            // with the source package's version returned immediately after -
+            // the real extraction/copy into registered/ was still running in
+            // the background with no completion signal and no exception
+            // ever reaching the caller. InstallFirmware is already a
+            // synchronous, blocking call; calling it directly here means
+            // this native function - the caller's only completion signal -
+            // does not return until the real work is actually done.
+            _contentManager.InstallFirmware(filePath);
 
-            return systemVersion.VersionString;
+            // Verify against the same source GetInstalledFirmwareVersion()
+            // reads, so a caller gets the real installed state back, not
+            // the source package's declared version.
+            SystemVersion installedVersion = _contentManager.GetCurrentFirmwareVersion();
+            if (installedVersion is null)
+            {
+                throw new InvalidOperationException("Firmware installation finished, but the installed version could not be verified in registered/.");
+            }
+
+            return installedVersion.VersionString;
         }
 
 

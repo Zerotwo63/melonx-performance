@@ -770,6 +770,95 @@ que la próxima prueba real en dispositivo identifique cuál de A–G es la
 causa; no se afirma que Bug 1 esté resuelto. Bug 2 (JIT) no se toca en
 este commit salvo preservar los logs `[JIT] ...` ya existentes.
 
+## Causa exacta de Bug 1 encontrada: `Task.Run` fire-and-forget en el instalador nativo de firmware
+
+El panel de diagnóstico cumplió su propósito: la prueba real mostró
+`contentFound=false`/`realValidation=false` tras importar firmware, incluso
+con **Reevaluate Now**, descartando SwiftUI/`OnboardingGate`/navegación
+como causa. La contradicción señalada por el usuario (`[FIRMWARE] real
+validation = true` justo después del import, pero `false` minutos
+después) llevó directo a la causa real, en `Program.cs`
+(`Ryujinx.Headless.SDL2`), no en Swift:
+
+```csharp
+public static string InstallFirmware(string filePath)
+{
+    ...
+    SystemVersion systemVersion = _contentManager.VerifyFirmwarePackage(filePath);
+    ...
+    Task.Run(() => _contentManager.InstallFirmware(filePath));   // fire-and-forget
+    return systemVersion.VersionString;                          // devuelve YA
+}
+```
+
+- **`VerifyFirmwarePackage(filePath)`** (`ContentManager.cs:585`) solo lee
+  el ZIP/XCI **de origen** — descifra sus cabeceras NCA en memoria y
+  devuelve la versión que ese paquete *declara* tener. Nunca toca
+  `registered/`. Esto es lo que `[FIRMWARE] real validation = true`
+  realmente validaba: la fuente, no la instalación — el log tenía razón
+  el usuario, el nombre era engañoso.
+- **`_contentManager.InstallFirmware(filePath)`** (`ContentManager.cs:429`)
+  es la instalación real: extrae a un directorio `temp`, y
+  `FinishInstallation` lo mueve a `registered` (`ContentManager.cs:478`).
+  Es completamente síncrona — pero se lanzaba en `Task.Run` sin esperarla
+  y sin propagar ninguna excepción si fallaba.
+- El `return systemVersion.VersionString` ocurría **inmediatamente**, a
+  veces segundos o minutos antes de que la copia real terminara (o
+  fallara en silencio). Swift recibía esa versión de origen, la guardaba
+  como si fuera el estado instalado, y mostraba verde — hasta que
+  `fetchFirmwareVersion()` (que sí lee `registered/` de verdad, vía
+  `GetCurrentFirmwareVersion()`, `ContentManager.cs:933`) confirmaba que
+  ahí no había nada.
+
+**Rutas (verificadas por lectura de código, no asumidas):**
+`ContentPath.TryGetRealPath("@SystemContent")` →
+`Path.Combine(AppDataManager.BaseDirPath, "bis/system", "Contents")`
+(`ContentPath.cs:33`, `VirtualFileSystem.cs:31`); `BaseDirPath` en iOS es
+exactamente `Documents` (`AppDataManager.Initialize` recibe
+`Environment.SpecialFolder.MyDocuments` desde `Program.cs:482`, y la rama
+`IsIOS()` de `AppDataManager.cs` no le agrega ningún subdirectorio). SOURCE
+= la URL que entrega el `UIDocumentPickerViewController` (zip/carpeta
+elegida por el usuario). TEMP = `Documents/bis/system/temp` (se borra tras
+`FinishInstallation`, por eso nunca es observable desde Swift).
+DESTINATION = `Documents/bis/system/Contents/registered` — coincide
+exactamente con la ruta que ya usaba el panel de diagnóstico; **no había
+discrepancia de rutas** (hipótesis G descartada).
+
+**Corrección aplicada:**
+- `Program.cs`: `InstallFirmware(string)` ya no lanza `Task.Run` — llama a
+  `_contentManager.InstallFirmware(filePath)` directamente (ya es síncrona)
+  y luego verifica contra `GetCurrentFirmwareVersion()` (el mismo método
+  que el resto de la app ya usaba para validar), devolviendo la versión
+  **instalada real**, no la de origen. Si la instalación falla,
+  la excepción ahora se propaga hasta `InstallFirmwareNative`'s catch
+  existente (sin cambios ahí), que ya la convertía en texto de error — el
+  camino de error de Swift no necesitó cambios.
+- `SetupView.handleFirmwareImport`: dado que la llamada nativa ahora
+  bloquea hasta terminar de verdad, se mueve a `Task.detached` (patrón ya
+  usado en `Runner.swift`) para no congelar el hilo principal durante la
+  extracción — sin `sleep`/`asyncAfter`, el llamador realmente espera
+  (`await`) el resultado real antes de tocar cualquier `@State`. El acceso
+  security-scoped al archivo origen se extiende correctamente hasta que
+  la instalación en background termina, en vez de liberarse al salir de
+  la función síncrona (bug nuevo que habría introducido este cambio si no
+  se corregía).
+- Logs separados correctamente: `[FIRMWARE] picker completed` (solo el
+  picker) vs `[FIRMWARE] installation started/completed` (la instalación
+  real) vs `[FIRMWARE] final validation` (consulta fresca a
+  `fetchFirmwareVersion()` tras terminar) — ya no se conflacionan.
+- Panel de diagnóstico: nueva sección "candidate paths" con conteo de
+  archivos en la ruta canónica y en una alternativa plausible, para que
+  la próxima prueba real pueda confirmar sin ambigüedad cuál ruta termina
+  con contenido.
+
+**Qué sigue sin poder verificarse aquí**: que la extracción realmente
+complete con éxito en el dispositivo del usuario (CI no tiene un paquete
+de firmware real que extraer) y que el `Task.detached` no introduzca
+ningún problema de Sendable/concurrencia bajo el modo de compilación real
+de Xcode (este repo usa Swift 5.0 sin concurrencia estricta, y
+`Task.detached` ya tiene precedente en `Runner.swift`, pero solo CI puede
+confirmarlo).
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -789,3 +878,4 @@ este commit salvo preservar los logs `[JIT] ...` ya existentes.
 | `feat(jit): activate JitStreamerEB as the internal JIT path, StikDebug as fallback-only` | `89f6c1a3a` | `JitStreamerEB/EnableJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift` (logs), `MeloNXTests/JITFlowTests.swift` (nuevo) | Causa real (ver sección arriba): el archivo cliente de `jkcoxson/JitStreamer-EB` existía con cero llamadores; StikDebug no era "requisito" por falta de mecanismo interno, sino porque el mecanismo interno nunca se conectó. `JITStreamerEB.attach()` migrado a `async`/`await` y conectado como primer intento, incondicional, en `enableJIT()`; TrollStore/StikDebug/Built-in StikJIT quedan como fallback explícito solo si `attach()` falla. `JITCoordinator` no necesitó cambios de lógica, solo los `print("[JIT] ...")` pedidos. **CI (run 37378791033) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID verificado sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`). De los 6 logs pedidos, 3 (`activation requested`/`internal method selected`/`fallback selected`, todos >15 bytes) se confirmaron presentes en el binario por búsqueda directa de bytes; los otros 3 (`waiting`/`acquired`/`timed out`, los tres ≤15 bytes) no aparecieron así — consistente con la small-string optimization de Swift (strings ≤15 UTF-8 bytes se guardan inline, no como constante de texto clásica), no con que el código se haya eliminado: están en el `HEAD` compilado real, verificados por lectura de fuente, pero esa presencia específica solo se confirma en línea viendo el log de consola en un dispositivo real |
 | `fix(onboarding+jit): auto-advance setup and make Built-in StikJIT actually verifiable` | `180a6a684` | `OnboardingGate.swift` (nuevo), `SetupView.swift`, `MeloNXBuiltInJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift`, `JITPopover.swift`, `MeloNXTests/OnboardingGateTests.swift` (nuevo), `MeloNXTests/JITFlowTests.swift` | Bug 1 y Bug 2 reportados tras prueba real en dispositivo (ver secciones arriba). Bug 1: nada reevaluaba `keysImported && firmImported` para avanzar — solo un botón manual o el atajo de Skip; se agrega `OnboardingGate` + `finishSetupIfReady()` que avanza sola tras cada import y en `onAppear`. Bug 2: `enableCurrentProcess()` no esperaba ningún resultado y nunca llamaba `.prepare` (sin DDI cacheado, `.enable` no tiene nada con qué trabajar); además `JITPopover` sondeaba sin límite y sin reacción al fallo, por lo que "stuck forever" estaba garantizado por diseño incluso si todo lo demás fallara rápido. Se corrigen los tres puntos; no se simula `.acquired` en ningún punto. **Reconciliado por rebase** con 5 commits paralelos ya presentes en el remoto (`a48ad6dc5`..`52dcc9b4c`, mismo autor) que atacaban los mismos bugs desde otro ángulo — incluyendo un hallazgo real que esta sesión no había visto: `shouldLaunchGame`/`shouldShowPopover`/`shouldCheckJIT` estaban también condicionados a `hasJITEntitlement`, que un build firmado por AltStore gratis no tiene, lo que podía impedir que `JITPopover` se mostrara. La rama final conserva ambos aportes: su manejo robusto de `startAccessingSecurityScopedResource()`, su auto-activación del toggle `builtInStikJIT` y su alerta con motivo real, más el `async`/`.prepare`-primero de esta sesión y los logs `[SETUP]`/`[JIT]` pedidos. **CI (run 37409105830) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.2 MB); bundle ID sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`); todas las cadenas `[SETUP] ...`/`[JIT] ...` de más de 15 bytes verificadas presentes en el binario por búsqueda directa |
 | `fix(setup): add on-device diagnostics panel, Bug 1 still not fixed` | `f850cddcf` | `SetupView.swift` | **`180a6a684` no resolvió Bug 1 en el iPhone real** del usuario (ver sección arriba) — se queda en Welcome/Setup tras importar keys+firmware, solo avanza con Welcome→Skip manual. En vez de adivinar de nuevo, se agrega un panel de diagnóstico visible en la propia pantalla de Setup (sin Xcode/Mac): snapshot real de filesystem/core para keys y firmware (independiente del `@State` cacheado), estado de `OnboardingGate`, log visible con las cadenas `[KEYS]`/`[FIRMWARE]`/`[SETUP]` pedidas, botón "Reevaluate Now" (llama la misma función que debería dispararse solo) y "Copy Diagnostics" (copia todo al clipboard). No se afirma que Bug 1 esté resuelto; esto existe para que la siguiente prueba real aísle la causa entre: import que no termina, validador que devuelve false, instancia equivocada, SwiftUI que no refresca, otra vista revirtiendo la transición, validación prematura, o ruta equivocada. JIT (Bug 2) no se toca salvo preservar sus logs existentes |
+| `fix(firmware): make native firmware install actually block until done` | *(pendiente de build)* | `Program.cs`, `SetupView.swift` | Causa exacta de Bug 1 (ver sección arriba): `Program.InstallFirmware` lanzaba la instalación real en `Task.Run(...)` y retornaba de inmediato la versión del paquete de *origen* (`VerifyFirmwarePackage`, que nunca toca `registered/`); `[FIRMWARE] real validation = true` estaba validando la fuente, no el destino. Se quita el `Task.Run`, se llama la instalación síncrona directamente y se verifica contra `GetCurrentFirmwareVersion()` (destino real) antes de retornar. Rutas confirmadas por lectura de código: SOURCE = URL del picker, TEMP = `Documents/bis/system/temp` (se borra tras moverse), DESTINATION = `Documents/bis/system/Contents/registered` — coincide con la ruta que ya usaba el diagnóstico, sin discrepancia de rutas. En Swift, `handleFirmwareImport` pasa a `Task.detached` (patrón ya usado en `Runner.swift`) para no congelar el hilo principal ahora que la llamada nativa bloquea de verdad; sin sleep/asyncAfter, espera el resultado real. Logs separados: picker vs installation vs final validation. Nuevo: sección "candidate paths" en el panel con conteo de archivos por ruta candidata |

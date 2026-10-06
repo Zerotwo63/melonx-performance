@@ -181,22 +181,48 @@ struct SetupView: View {
         return KeysSnapshot(found: found, path: path.path, realValidation: Ryujinx.shared.checkIfKeysImported())
     }
 
-    /// Two independent signals on purpose: `contentFound` reads the actual
-    /// registered-content directory on disk (Ryujinx.removeFirmware's own
-    /// path), while `realValidation` goes through the same native bridge
-    /// call the rest of the app trusts. If a user's device shows
-    /// contentFound=true but realValidation=false, the native firmware
-    /// version cache/bridge is the real bug, not SwiftUI.
-    private func firmwareSnapshot() -> FirmwareSnapshot {
-        let path = URL.documentsDirectory
+    /// The real destination ContentManager.InstallFirmware writes to —
+    /// traced through ContentPath.TryGetRealPath(SystemContent) + "registered"
+    /// in Ryujinx.HLE/FileSystem/ContentPath.cs, with AppDataManager.BaseDirPath
+    /// confirmed as Documents on iOS (Program.cs's `initialize` export calls
+    /// AppDataManager.Initialize(Environment.SpecialFolder.MyDocuments)).
+    /// Not a guess — read from the actual C# source this native call runs.
+    private func canonicalFirmwareRegisteredPath() -> String {
+        URL.documentsDirectory
             .appendingPathComponent("bis")
             .appendingPathComponent("system")
             .appendingPathComponent("Contents")
             .appendingPathComponent("registered")
-        let contentFound = ((try? FileManager.default.contentsOfDirectory(atPath: path.path)) ?? []).isEmpty == false
+            .path
+    }
+
+    /// The canonical path plus one plausible wrong guess, so a real-device
+    /// test can rule out a path mismatch directly instead of trusting this
+    /// session's source trace alone.
+    private func candidateFirmwarePaths() -> [String] {
+        [
+            canonicalFirmwareRegisteredPath(),
+            URL.documentsDirectory.appendingPathComponent("system").appendingPathComponent("Contents").appendingPathComponent("registered").path,
+        ]
+    }
+
+    private func directoryStats(atPath path: String) -> (exists: Bool, count: Int) {
+        let exists = FileManager.default.fileExists(atPath: path)
+        let count = (try? FileManager.default.contentsOfDirectory(atPath: path))?.count ?? 0
+        return (exists, count)
+    }
+
+    /// Two independent signals on purpose: `contentFound` reads the actual
+    /// registered-content directory on disk, while `realValidation` goes
+    /// through the same native bridge call the rest of the app trusts. If a
+    /// user's device shows contentFound=true but realValidation=false, the
+    /// native firmware version cache/bridge is the real bug, not SwiftUI.
+    private func firmwareSnapshot() -> FirmwareSnapshot {
+        let path = canonicalFirmwareRegisteredPath()
+        let contentFound = ((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []).isEmpty == false
         let version = Ryujinx.shared.fetchFirmwareVersion()
         let realValidation = (version.isEmpty ? "0" : version) != "0"
-        return FirmwareSnapshot(contentFound: contentFound, path: path.path, detectedVersion: version, realValidation: realValidation)
+        return FirmwareSnapshot(contentFound: contentFound, path: path, detectedVersion: version, realValidation: realValidation)
     }
 
     private func copyDiagnosticsToClipboard() {
@@ -223,6 +249,7 @@ struct SetupView: View {
             Text("Diagnostics").font(.headline)
             diagnosticsKeysSection()
             diagnosticsFirmwareSection()
+            diagnosticsCandidatePathsSection()
             diagnosticsSetupSection()
             diagnosticsActionButtons()
             diagnosticsLogSection()
@@ -253,6 +280,19 @@ struct SetupView: View {
             diagRow("path", firmware.path)
             diagRow("detected version", firmware.detectedVersion.isEmpty ? "(none)" : firmware.detectedVersion)
             diagRow("real validation", "\(firmware.realValidation)")
+        }
+    }
+
+    // Candidate-path sanity check (step 7 of the on-device diagnosis
+    // request): path + exists + file count only, no full listings.
+    @ViewBuilder
+    private func diagnosticsCandidatePathsSection() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CANDIDATE PATHS").font(.caption).bold().foregroundColor(.secondary)
+            ForEach(candidateFirmwarePaths(), id: \.self) { path in
+                let stats = directoryStats(atPath: path)
+                diagRow(path, "exists=\(stats.exists) files=\(stats.count)")
+            }
         }
     }
 
@@ -681,49 +721,93 @@ struct SetupView: View {
         }
     }
 
+    // Root cause (confirmed by reading Ryujinx.Headless.SDL2/Program.cs,
+    // not assumed): the native install call used to be
+    // `Task.Run(() => _contentManager.InstallFirmware(filePath))` followed
+    // immediately by `return systemVersion.VersionString` — the SOURCE
+    // package's declared version, read by VerifyFirmwarePackage, which only
+    // ever inspects the picked file/zip and never touches the destination.
+    // That return happened long before the real extraction+copy into
+    // registered/ was anywhere close to done, so "picker completion" and
+    // "installation completion" were being treated as the same event when
+    // they are not. Fixed on the C# side: InstallFirmware now blocks until
+    // the real copy finishes and returns the destination's own verified
+    // version (GetCurrentFirmwareVersion()) instead of the source's.
+    //
+    // That still leaves a real call that blocks for as long as extracting
+    // a firmware package takes - calling it on the main thread here would
+    // freeze the UI. Task.detached runs it off the main thread and this
+    // function genuinely awaits its real result (no sleep, no asyncAfter,
+    // no polling) before touching any @State.
     private func handleFirmwareImport(result: Result<[URL], Error>) {
-        diagLog("[FIRMWARE] importer completion")
+        diagLog("[FIRMWARE] picker completed")
         do {
             let selectedFiles = try result.get()
 
             guard let fileURL = selectedFiles.first else {
                 alertMessage = "No file selected"
                 showAlert = true
-                diagLog("[FIRMWARE] real validation = false (no file selected)")
+                diagLog("[FIRMWARE] picker completed = false (no file selected)")
                 return
             }
 
             // Security-scoped access is optional: copied/local picker URLs are
-            // readable even when startAccessingSecurityScopedResource() is false.
+            // readable even when startAccessingSecurityScopedResource() is
+            // false. Must stay alive for the entire install, not just this
+            // synchronous function body - released only after the
+            // background Task actually finishes reading the source file.
             let accessing = fileURL.startAccessingSecurityScopedResource()
-            defer {
+            let sourcePath = fileURL.path
+            diagLog("[FIRMWARE] source path = \(sourcePath)")
+
+            let destinationPath = canonicalFirmwareRegisteredPath()
+            let before = directoryStats(atPath: destinationPath)
+            diagLog("[FIRMWARE] destination directory = \(destinationPath)")
+            diagLog("[FIRMWARE] destination exists before = \(before.exists)")
+            diagLog("[FIRMWARE] destination file count before = \(before.count)")
+
+            diagLog("[FIRMWARE] installation started")
+
+            Task.detached {
+                let (string, isErr) = RyujinxBridge.installFirmware(at: sourcePath)
+
                 if accessing {
                     fileURL.stopAccessingSecurityScopedResource()
                 }
+
+                await MainActor.run {
+                    diagLog("[FIRMWARE] installation completed = \(!isErr)")
+
+                    let after = self.directoryStats(atPath: destinationPath)
+                    diagLog("[FIRMWARE] destination exists after = \(after.exists)")
+                    diagLog("[FIRMWARE] destination file count after = \(after.count)")
+                    let firstFiles = (try? FileManager.default.contentsOfDirectory(atPath: destinationPath))?.prefix(5) ?? []
+                    diagLog("[FIRMWARE] first destination files = \(Array(firstFiles))")
+
+                    if isErr {
+                        diagLog("[FIRMWARE] final validation = false (install error: \(string))")
+                        self.alertMessage = string.isEmpty ? "Firmware installation failed" : string
+                        self.showAlert = true
+                        return
+                    }
+
+                    Ryujinx.shared.firmwareversion = string
+
+                    let finalVersion = Ryujinx.shared.fetchFirmwareVersion()
+                    let finalValidation = (finalVersion.isEmpty ? "0" : finalVersion) != "0"
+                    diagLog("[FIRMWARE] final validation = \(finalValidation)")
+
+                    self.refreshAndEvaluate(trigger: "firmwareImportHandler")
+
+                    self.alertMessage = self.firmImported
+                        ? "Firmware installed successfully"
+                        : "Firmware installation finished, but MeloNX could not detect an installed firmware version."
+                    self.showAlert = true
+                }
             }
-
-            let (string, isErr) = RyujinxBridge.installFirmware(at: fileURL.path)
-
-            if isErr {
-                diagLog("[FIRMWARE] real validation = false (install error: \(string))")
-                alertMessage = string.isEmpty ? "Firmware installation failed" : string
-                showAlert = true
-                return
-            }
-
-            Ryujinx.shared.firmwareversion = string
-            let realValidation = (string.isEmpty ? "0" : string) != "0"
-            diagLog("[FIRMWARE] real validation = \(realValidation)")
-
-            refreshAndEvaluate(trigger: "firmwareImportHandler")
-
-            alertMessage = firmImported
-                ? "Firmware installed successfully"
-                : "Firmware installation finished, but MeloNX could not detect an installed firmware version."
-            showAlert = true
 
         } catch {
-            diagLog("[FIRMWARE] real validation = false (exception: \(error.localizedDescription))")
+            diagLog("[FIRMWARE] picker completed = false (exception: \(error.localizedDescription))")
             alertMessage = "Error importing firmware: \(error.localizedDescription)"
             showAlert = true
         }
