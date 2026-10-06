@@ -14,7 +14,12 @@ using Ryujinx.Common;
 // ARMeilleure.csproj), so BootEventBridge.Report can be used directly here
 // (unlike Ryujinx.Graphics.Vulkan/Window.cs, which predates this bridge being
 // wired up to this project and used a plain Console.WriteLine fallback).
-using Ryujinx.Common.Logging;
+// A plain `using Ryujinx.Common.Logging;` would make `Logger` ambiguous with
+// this file's own `ARMeilleure.Diagnostics.Logger` (both namespaces are in
+// scope and both declare a type named Logger) - this type-only alias avoids
+// that collision without touching any of the file's many pre-existing
+// unqualified `Logger.XXX` calls.
+using BootEventBridge = Ryujinx.Common.Logging.BootEventBridge;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -104,11 +109,11 @@ namespace ARMeilleure.Translation
 
         public void Execute(State.ExecutionContext context, ulong address)
         {
-            int threadCount = Interlocked.Increment(ref _threadCount);
+            int executeThreadCount = Interlocked.Increment(ref _threadCount);
 
-            BootEventBridge.Report("ARMeilleure.Translator.Execute entered", $"threadCount={threadCount}");
+            BootEventBridge.Report("ARMeilleure.Translator.Execute entered", $"threadCount={executeThreadCount}");
 
-            if (threadCount == 1)
+            if (executeThreadCount == 1)
             {
                 if (_ptc.State == PtcState.Enabled)
                 {
