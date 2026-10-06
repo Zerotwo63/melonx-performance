@@ -161,6 +161,7 @@ namespace Ryujinx.Graphics.Vulkan
                 SwizzleComponent.Alpha);
 
             _gd.SwapchainApi.CreateSwapchain(_device, in swapchainCreateInfo, null, out _swapchain).ThrowOnError();
+            Console.WriteLine("[BOOT] swapchain created");
 
             _gd.SwapchainApi.GetSwapchainImages(_device, _swapchain, &imageCount, null);
 

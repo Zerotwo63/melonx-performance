@@ -1789,8 +1789,11 @@ namespace Ryujinx.Headless.SDL2
 
             DisplaySleep.Prevent();
 
+            Console.WriteLine("[BOOT] window initialize begin");
             _window.Initialize(_emulationContext, _inputConfiguration, _enableKeyboard, _enableMouse);
+            Console.WriteLine("[BOOT] window initialized");
 
+            Console.WriteLine("[BOOT] window execute begin");
             _window.Execute();
 
             _emulationContext.Dispose();
@@ -1809,6 +1812,7 @@ namespace Ryujinx.Headless.SDL2
 
             Logger.RestartTime();
 
+            Console.WriteLine("[BOOT] GPU initialization begin");
             WindowBase window = CreateWindow(options);
 
             if (window is MoltenVKWindow mvulkanWindow) {
@@ -1816,6 +1820,7 @@ namespace Ryujinx.Headless.SDL2
             }
 
             IRenderer renderer = CreateRenderer(options, window);
+            Console.WriteLine("[BOOT] renderer created");
 
             _window = window;
 
@@ -1830,9 +1835,12 @@ namespace Ryujinx.Headless.SDL2
             renderer.Window?.SetColorSpacePassthrough(true);
 
 
+            Console.WriteLine("[BOOT] HLE initialization begin");
             _emulationContext = InitializeEmulationContext(window, renderer, options);
+            Console.WriteLine("[BOOT] HLE initialized");
 
             SystemVersion firmwareVersion = _contentManager.GetCurrentFirmwareVersion();
+            Console.WriteLine("[BOOT] firmware initialized");
 
             Logger.Notice.Print(LogClass.Application, $"Using Firmware Version: {firmwareVersion?.VersionString}");
 
@@ -1956,6 +1964,16 @@ namespace Ryujinx.Headless.SDL2
 
                 return false;
             }
+
+            // All Load*() branches above either `return false` on failure or
+            // fall through here on success - reaching this point means the
+            // executable is open and Horizon's kernel scheduler has already
+            // created/scheduled the guest's main thread as part of that load
+            // call. There is no separate, later "start the guest" call in
+            // this file to instrument instead.
+            Console.WriteLine("[BOOT] game file opened");
+            Console.WriteLine("[BOOT] executable loaded");
+            Console.WriteLine("[BOOT] guest execution begin");
 
             SetupProgressHandler();
             ExecutionEntrypoint();

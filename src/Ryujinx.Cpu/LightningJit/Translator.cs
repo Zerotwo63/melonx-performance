@@ -126,11 +126,20 @@ namespace Ryujinx.Cpu.LightningJit
 
         }
 
+        // NOTE (instrumentation only, logic unchanged): this returns true
+        // whenever DUAL_MAPPED_JIT != "1" too, since the whole dual-mapped
+        // setup is simply skipped in that case - a `true` here does NOT by
+        // itself prove dual-mapped JIT is active, only that this function
+        // didn't hit a construction exception. Real readiness still has to
+        // come from isJITEnabled() on the Swift side.
         public static bool InitializeDualMapped() {
+            Console.WriteLine("[BOOT] initialize_dualmapped entered");
             if (IsNoWxPlatform)
-            {   
+            {
                 string dualMapped = Environment.GetEnvironmentVariable("DUAL_MAPPED_JIT");
-                if (dualMapped == "1") //(OperatingSystem.IsIOSVersionAtLeast(19) || OperatingSystem.IsIOSVersionAtLeast(26))
+                bool dualMappedEnabled = dualMapped == "1";
+                Console.WriteLine($"[BOOT] DUAL_MAPPED_JIT enabled = {dualMappedEnabled}");
+                if (dualMappedEnabled) //(OperatingSystem.IsIOSVersionAtLeast(19) || OperatingSystem.IsIOSVersionAtLeast(26))
                 {
                     Console.WriteLine($"Dual Mapped JIT enabled.");
                     try {
@@ -138,7 +147,8 @@ namespace Ryujinx.Cpu.LightningJit
                             originalDualMappedCache = new(new JitMemoryAllocator(), CreateStackWalker());
                             Functions = new TranslatorCache<TranslatedFunction>();
                         }
-                    } catch {
+                    } catch (Exception ex) {
+                        Console.WriteLine($"[BOOT] initialize_dualmapped returned = false (exception: {ex.Message})");
                         return false;
                     }
 
@@ -147,7 +157,12 @@ namespace Ryujinx.Cpu.LightningJit
                 }
 
             }
+            else
+            {
+                Console.WriteLine("[BOOT] DUAL_MAPPED_JIT enabled = false (not a NoWx platform)");
+            }
 
+            Console.WriteLine("[BOOT] initialize_dualmapped returned = true");
             return true;
         }
 

@@ -61,6 +61,7 @@ final class JITCoordinator: ObservableObject {
 
     private var pollTimer: Timer?
     private var pendingCompletions: [(Bool) -> Void] = []
+    private var primaryCompletion: ((Bool) -> Void)?
 
     private init() {}
 
@@ -125,11 +126,32 @@ final class JITCoordinator: ObservableObject {
         }
     }
 
+    /// First real reason wins - a generic "timed out" from the polling
+    /// loop below must never overwrite a specific reason a caller already
+    /// recorded earlier in the same cycle (e.g. "no pairing file
+    /// imported"). `resetAttempts()`/`beginAcquisitionCycle()` are what
+    /// clear this between cycles.
     func recordFailure(_ reason: String) {
+        guard lastFailureReason == nil else { return }
         lastFailureReason = reason
         logDiag("[JIT] final result = FAILED")
         logDiag("[JIT] failure reason = \(reason)")
         logDiag("[JIT] acquisition failed")
+    }
+
+    /// For a caller that has already determined a definitive, terminal
+    /// failure (e.g. "no fallback available", or a LiveContainer
+    /// verification failure) before maxAttempts would naturally expire -
+    /// stops polling immediately instead of waiting out the rest of a
+    /// 30-second cap for a result that cannot change, and resolves
+    /// whoever is currently waiting with `false` right away.
+    func failImmediately(reason: String) {
+        recordFailure(reason)
+
+        guard let completion = primaryCompletion else { return }
+        stopPolling()
+        state = .timedOut
+        resolve(false, primary: completion)
     }
 
     /// Starts a single poll loop for JIT readiness, or — if one is already
@@ -157,11 +179,13 @@ final class JITCoordinator: ObservableObject {
             return false
         }
 
+        primaryCompletion = completion
         trigger?()
 
         if isJITEnabled() {
             state = .ready
             logDiag("[JIT] acquired")
+            primaryCompletion = nil
             completion(true)
             return true
         }
@@ -205,6 +229,7 @@ final class JITCoordinator: ObservableObject {
     }
 
     private func resolve(_ success: Bool, primary: (Bool) -> Void) {
+        primaryCompletion = nil
         primary(success)
         let queued = pendingCompletions
         pendingCompletions.removeAll()
@@ -224,6 +249,7 @@ final class JITCoordinator: ObservableObject {
     func cancel() {
         guard pendingCompletions.isEmpty else { return }
         stopPolling()
+        primaryCompletion = nil
         state = .idle
     }
 

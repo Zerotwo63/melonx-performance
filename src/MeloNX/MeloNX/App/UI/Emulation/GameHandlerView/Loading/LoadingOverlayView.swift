@@ -11,26 +11,36 @@ struct LoadingOverlayView: View {
     let game: Game?
     let showLogs: Bool
     let startEmulationCallback: () -> Void
-    
+
+    @EnvironmentObject var gameHandler: LaunchGameHandler
+    @EnvironmentObject var ryujinx: Ryujinx
+
     @State private var isLoading = true
     @State private var isAnimating = false
     @State private var isShaderOrPTC = false
     @State private var loadingType = ""
     @State private var currentProgress = 0
     @State private var totalProgress = 1
-    
+    @State private var showWatchdog = false
+    @State private var watchdogTask: Task<Void, Never>?
+
     private let clumpWidth: CGFloat = 100
-    
+
+    /// 15s past "ryujinx.start begin" with no "ran-first-frame" - "Loading"
+    /// must never again be the only thing the user sees, forever, with no
+    /// information about where it actually stopped.
+    private let watchdogTimeout: UInt64 = 15_000_000_000
+
     var body: some View {
         if isLoading {
             ZStack {
                 Color.black.opacity(0.8)
                     .ignoresSafeArea()
-                
+
                 GeometryReader { screenGeometry in
                     ZStack {
                         loadingContent(screenGeometry: screenGeometry)
-                        
+
                         if showLogs {
                             VStack {
                                 LogView(isfps: true)
@@ -40,12 +50,44 @@ struct LoadingOverlayView: View {
                         }
                     }
                 }
+
+                if showWatchdog {
+                    BootWatchdogView(onExit: exitGame)
+                        .allowsHitTesting(true)
+                }
             }
             .transition(.opacity)
             .onAppear {
                 setupLoading()
             }
+            .onDisappear {
+                watchdogTask?.cancel()
+            }
         }
+    }
+
+    private func startWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = Task {
+            try? await Task.sleep(nanoseconds: watchdogTimeout)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if isLoading {
+                    showWatchdog = true
+                }
+            }
+        }
+    }
+
+    /// Minimal, same effect as EmulationView.stop() - duplicated rather
+    /// than reached into from here, since this view has no direct access
+    /// to that one's local state and the recovery action itself is only
+    /// a few lines.
+    private func exitGame() {
+        gameHandler.showApp = true
+        gameHandler.currentGame = nil
+        RyujinxBridge.stopEmulation()
+        try? ryujinx.stop()
     }
     
     private func loadingContent(screenGeometry: GeometryProxy) -> some View {
@@ -125,10 +167,13 @@ struct LoadingOverlayView: View {
         }
         
         startEmulationCallback()
-        
+        startWatchdog()
+
         RegisterCallback("ran-first-frame") { _ in
             print("cool, first frame! :3")
+            BootDiagnostics.shared.log("received ran-first-frame")
             Task { @MainActor in
+                watchdogTask?.cancel()
                 withAnimation(.easeOut(duration: 0.3)) {
                     if let game {
                         Task {
@@ -137,6 +182,7 @@ struct LoadingOverlayView: View {
                     }
                     isLoading = false
                     isAnimating = false
+                    showWatchdog = false
                     Ryujinx.shared.showLoading = false
                 }
             }

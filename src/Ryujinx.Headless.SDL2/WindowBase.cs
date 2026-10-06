@@ -286,7 +286,9 @@ namespace Ryujinx.Headless.SDL2
         {
             InitializeWindowRenderer();
 
+            Console.WriteLine("[BOOT] GPU renderer initialize begin");
             Device.Gpu.Renderer.Initialize(_glLogLevel);
+            Console.WriteLine("[BOOT] GPU renderer initialized");
 
             InitializeRenderer();
 
@@ -297,6 +299,7 @@ namespace Ryujinx.Headless.SDL2
             _gpuDriverName = GetGpuDriverName();
 
             bool firstFrame = true;
+            bool firstSubmit = true;
 
             Device.Gpu.Renderer.RunLoop(() =>
             {
@@ -321,15 +324,28 @@ namespace Ryujinx.Headless.SDL2
                         Device.Statistics.RecordFifoStart();
                         Device.ProcessFrame();
                         Device.Statistics.RecordFifoEnd();
+
+                        if (firstSubmit)
+                        {
+                            firstSubmit = false;
+                            Console.WriteLine("[BOOT] first GPU command submitted");
+                        }
                     }
 
                     while (Device.ConsumeFrameAvailable())
                     {
+                        if (firstFrame)
+                        {
+                            Console.WriteLine("[BOOT] first present requested");
+                        }
+
                         Device.PresentFrame(SwapBuffers);
 
                         if (firstFrame)
                         {
+                            Console.WriteLine("[BOOT] first present completed");
                             firstFrame = false;
+                            Console.WriteLine("[BOOT] emitting ran-first-frame");
                             Program.TriggerCallback("ran-first-frame");
                         }
                     }

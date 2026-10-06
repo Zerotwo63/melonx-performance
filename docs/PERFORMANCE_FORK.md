@@ -1101,6 +1101,113 @@ orden/lógica de los métodos JIT, ni `ptrace`/pairing/timeouts — por
 instrucción explícita, este commit corrige exclusivamente el crash del
 diagnóstico.
 
+## Hollow Knight atascado tras el swapchain: flujo JIT/boot + instrumentación completa
+
+Bug 1 (keys/firmware) y el crash del diagnóstico están resueltos y confirmados en
+dispositivo real (LiveContainer + StikDebug, iOS 27, A19 Pro). Reporte nuevo:
+MeloNX llega a "Loading Hollow Knight", MoltenVK loguea hasta "Created 3
+swapchain images" y ahí se detiene — sin crash, sin más logs, barra de
+progreso en loop infinito sin significado real (confirmado en
+`LoadingProgressBar.swift`: sin PTC/shader cache activo es pura animación,
+no refleja progreso).
+
+**Causa estructural encontrada en el código** (antes de cambiar nada):
+`LaunchGameHandler.startGame()` llamaba `enableJIT()` y continuaba
+inmediatamente a `MetalView.createView()`/`ryujinx.start()` sin esperar su
+resultado asíncrono — Ryujinx podía arrancar con el estado de JIT todavía
+sin resolver. Además, `enableJIT()` intentaba sus métodos internos
+(JITStreamerEB/TrollStore/StikDebug/Built-in StikJIT) incluso corriendo
+dentro de LiveContainer, donde LiveContainer+StikDebug ya completaron ese
+trabajo *antes* de lanzar MeloNX — intentarlo de nuevo es redundante en el
+mejor caso.
+
+**Hallazgo adicional real, verificado leyendo `Ryujinx.Cpu/LightningJit/
+Translator.cs`**: `InitializeDualMapped()` (lo que llama
+`RyujinxBridge.initialize_dualmapped()`) retorna `true` en casi todos los
+casos — incluso si `DUAL_MAPPED_JIT` no es `"1"` (no hace nada y aun así
+retorna `true`), y solo retorna `false` si el constructor de
+`DualMappedNoWxCache`/`JitMemoryAllocator` lanza una excepción. Un `true`
+aquí NO prueba que el JIT dual-mapped funcione realmente en runtime — solo
+que la construcción no lanzó. Por instrucción explícita no se inventó una
+verificación nueva: se sigue usando `isJITEnabled()` tal cual existe
+(ya es la comprobación más rigurosa del proyecto: `checkDebugged() &&
+succeededJIT` en iOS 19+), documentando este punto ciego en vez de
+ocultarlo.
+
+**Cambios Swift:**
+- `RuntimeEnvironment.swift` (nuevo): `RuntimeEnvironment.isLiveContainer`
+  centraliza la detección ya existente (`isInLiveContainer`, poblado en
+  `Bundle.swizzleBundleIdentifier()` vía las APIs reales de LiveContainer
+  — nunca `getenv("LC_HOME_PATH")`, que este proyecto nunca usó).
+- `LaunchGameHandler.swift`: `enableJIT()` ahora revisa
+  `RuntimeEnvironment.isLiveContainer` al inicio — en LiveContainer SOLO
+  verifica (`isJITEnabled()`) y loguea `[LCJIT] ...`, nunca intenta
+  JITStreamerEB/TrollStore/StikDebug/Built-in StikJIT. `startGame()` se
+  divide en `verifyExternalJITAndContinue()` (LiveContainer) /
+  `acquireNativeJITAndContinue()` (nativo, espera el resultado real de
+  `JITCoordinator` en vez de ignorarlo) → única función
+  `startGameAfterJITConfirmed()` que puede tocar MetalView/Ryujinx.
+  `configureEnvironmentVariables()` ahora retorna `Bool`; si
+  `initialize_dualmapped()` devuelve `false`, el arranque se aborta con
+  diagnóstico en vez de continuar en silencio.
+- `JITCoordinator.swift`: `failImmediately(reason:)` cancela el polling
+  de inmediato en un fallo terminal (ya no se esperan los 60 intentos
+  completos); `recordFailure` ahora preserva la primera razón real en
+  vez de dejar que un "timed out" genérico la sobrescriba.
+- `BootDiagnostics.swift` (nuevo): rastreador central con
+  timestamp/elapsed/thread/stage/result por etapa, persistido en
+  `Documents/Diagnostics/boot-last.txt` en cada llamada (sobrevive aunque
+  la UI se bloquee) y reporte completo en
+  `Documents/Diagnostics/boot-report.txt`. Observa `[BOOT] ...` en
+  `LogCapture` para reflejar también las etapas emitidas desde C#
+  (swapchain/first submit/first present/first frame) sin inventar un
+  segundo puente Swift↔C#.
+- `LogCapture.swift`: **bug real encontrado y corregido** — `logs` era un
+  único `AsyncStream` con un solo `continuation`; con más de un
+  consumidor simultáneo (ya existían varias instancias de `LogView`, y
+  ahora también `BootDiagnostics`) cada línea solo llegaba a UNO de
+  ellos, no a todos. Ahora cada acceso a `.logs` entrega un stream
+  independiente alimentado desde el mismo punto de captura — todos los
+  suscriptores ven todas las líneas. También se amplía el filtro de
+  `showFullLogs` para no ocultar `[BOOT]`/`[JIT]`/`[LCJIT]`/errores de
+  Ryujinx sin activar Full Logs.
+- `LoadingOverlayView.swift` + `BootWatchdogView.swift` (nuevo): watchdog
+  de 15s desde "ryujinx.start begin" sin `ran-first-frame" — muestra un
+  panel interactivo (acepta toques con Loading visible debajo) con
+  Environment/JIT verified/Dual mapped JIT/Last stage/Elapsed/Ryujinx
+  started/Swapchain created/First submit/First present/First
+  frame/Last error, y botones Copy/Save/Exit Game reales.
+
+**Cambios C#** (hechos por un fork en paralelo, revisados diff por diff
+antes de integrarlos — solo `Console.WriteLine` aditivo, cero cambios de
+lógica):
+- `Program.cs`: GPU/HLE init begin, renderer created, HLE initialized,
+  firmware initialized, game file opened/executable loaded/guest
+  execution begin (un solo punto real — todas las ramas `Load*()` o
+  `return false` en fallo o caen aquí en éxito; no existe un punto
+  separado de "arranque del guest"), window initialize/execute.
+- `WindowBase.cs`: GPU renderer initialize begin/end, first GPU command
+  submitted (nueva bandera `firstSubmit`), first present
+  requested/completed, emitting ran-first-frame (justo antes del
+  `TriggerCallback` ya existente).
+- `VulkanRenderer.cs` / `Window.cs`: Vulkan instance/device created,
+  swapchain created.
+- `Translator.cs`: `initialize_dualmapped entered/returned`,
+  `DUAL_MAPPED_JIT enabled`, con el hallazgo del `true` casi incondicional
+  documentado en comentario.
+- **No localizado con certeza, reportado en vez de inventado**: un punto
+  de "CPU initialization begin/complete" separado de la inicialización
+  HLE — el `Translator`/`ExecutionContext` real se construye de forma
+  perezosa por hilo dentro del scheduler del kernel de Horizon, sin un
+  único call site síncrono instrumentable en `Program.cs`.
+
+**Qué sigue sin poder verificarse aquí**: que el watchdog realmente
+aparezca y acepte toques en un dispositivo real (CI solo confirma que
+compila), y si Hollow Knight todavía se atasca después de este cambio,
+en qué etapa exacta — eso es precisamente lo que el próximo reporte de
+`Documents/Diagnostics/boot-report.txt` / el panel del watchdog debe
+revelar.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -1126,3 +1233,4 @@ diagnóstico.
 | `fix(jit): keep diagnostics sheet compatible with deployment target` | `73480b05d` | `JITPopover.swift` | Corrige el fallo anterior quitando `NavigationStack`/`ShareLink`/`.presentationDetents`, reemplazando por un `VStack` simple con botones manuales. CI compiló en verde. Reconciliado con el commit siguiente (que usa `iOSNav`, el wrapper ya existente en el proyecto para este caso exacto, en vez de quitar la navegación por completo) |
 | `feat(jit): replace Copy-to-clipboard alert button with a real diagnostics sheet` | `fc15846e8` | `JITDiagnosticsView.swift` (nuevo), `JITCoordinator.swift`, `JITDiagnostics.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | El botón "Copy JIT Diagnostics" del commit anterior no mostraba nada útil — un `.alert` de SwiftUI se descarta en cuanto se toca cualquier botón, sin feedback posible. Se reemplaza por "View JIT Diagnostics", que presenta un `.sheet` real con el reporte completo como texto seleccionable, Copy/Share/Close reales, "Copied" visible sin cerrar la pantalla, y respaldo en `Documents/jit-diagnostics.txt`. `JITMethodAttempt` ahora lleva detected/enabled/attempted/startTime/endTime/result/error/underlyingError/errno/timeout/pairingStatus/connectionStatus por método; `probeExecutableMemory()` hace mmap+mprotect reales con errno capturado, llamado tras cada método que dice haber adquirido JIT (verificación real, no confiar en el booleano). `beginRetry()` agrega un separador `===== JIT RETRY #N =====` al log sin borrarlo. Investigación de código confirmó 4 métodos reales (JITStreamerEB/TrollStore/StikDebug externo/Built-in StikJIT) y su orden fijo de ejecución; `builtInStikJIT`/`.stikJIT` accedidos como propiedad vs función en distintos archivos son el mismo `Setting<Bool>` subyacente, no una discrepancia |
 | `fix(jit): fix dynamic cast crash in JITDiagnostics.buildReport()` | `888933c76` | `JITDiagnostics.swift`, `JITDiagnosticsView.swift` (incluye el `iOSNav` que quedó fuera del commit anterior), `MeloNXTests/JITFlowTests.swift` | Crash report real (`SIGABRT`/`swift_dynamicCastFailure` en `Setting.value.getter`, vía `JITDiagnostics.buildReport()`): accesos `s.stikJIT.value` dentro de interpolación de string no fijan `T = Bool` (sin contexto de tipo), a diferencia de un `if`/asignación `Bool`. `Setting.value`'s `uddefault as! T` fuerza el cast y aborta. Corregido con `boolSetting(_:default:)` vía `NativeSettingsManager.setting(forKey:default:)` (API no ambigua, mismo patrón ya usado en `LaunchGameHandler`), auditando los 6 accesos directos en `methodCapabilities()`/`enabledMethodNames()`/`buildReport()`. Se agrega `rawSettingDescription(_:)` sin casts y breadcrumbs `[JITDIAG] ...` persistidos en `Documents/jit-diagnostics-last-step.txt`. No se tocó `LaunchGameHandler`/`JITCoordinator`/orden de métodos JIT, por instrucción explícita |
+| `feat(boot): LiveContainer-aware JIT flow, full boot instrumentation, watchdog` | *(pendiente de build)* | `RuntimeEnvironment.swift` (nuevo), `BootDiagnostics.swift` (nuevo), `BootWatchdogView.swift` (nuevo), `LaunchGameHandler.swift`, `JITCoordinator.swift`, `LogCapture.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (nuevo), + `Program.cs`/`WindowBase.cs`/`VulkanRenderer.cs`/`Window.cs`/`Translator.cs` (C#, solo logging aditivo) | Causa estructural: `startGame()` no esperaba el resultado async de `enableJIT()`, y `enableJIT()` intentaba sus métodos internos incluso en LiveContainer, donde StikDebug ya hizo ese trabajo antes de lanzar MeloNX. Se divide `startGame()` en verificación LiveContainer vs adquisición nativa → única `startGameAfterJITConfirmed()`. `JITCoordinator.failImmediately()` cancela polling en fallo terminal; `recordFailure` ya no sobrescribe la primera razón real. `BootDiagnostics` rastrea cada etapa con persistencia en disco; `LogCapture` corrige un bug real de múltiples-consumidores-compitiendo-por-el-mismo-stream. Watchdog de 15s muestra panel interactivo con Copy/Save/Exit. Hallazgo documentado (no inventado): `initialize_dualmapped()` retorna `true` casi incondicionalmente — no prueba que el JIT dual-mapped funcione en runtime |
