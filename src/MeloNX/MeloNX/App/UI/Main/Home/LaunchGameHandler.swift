@@ -42,16 +42,18 @@ class LaunchGameHandler: ObservableObject {
     }
     
     var shouldLaunchGame: Bool {
-        isGameReady && hasJITEntitlement
+        // The increased-memory entitlement is useful, but it must not hide the
+        // actual JIT flow or make a free-signed build look completely dead.
+        // Let the emulator attempt to launch once JIT/profile requirements are
+        // satisfied; Settings still reports whether the entitlement is present.
+        isGameReady
     }
     
     var shouldShowEntitlement: Bool {
-        // Surface the signing/provisioning problem immediately. The previous
-        // condition depended on isGameReady, which itself requires JIT. When
-        // both JIT and the memory entitlement were missing, neither the JIT
-        // sheet nor the entitlement alert could appear, so tapping a game
-        // looked like a no-op.
-        currentGame != nil && !hasJITEntitlement
+        // Informational only in this fork. Blocking here prevented the JIT
+        // sheet from ever appearing on AltStore builds that cannot carry the
+        // increased-memory entitlement.
+        false
     }
     
     var shouldShowPopover: Bool {
@@ -59,14 +61,12 @@ class LaunchGameHandler: ObservableObject {
             && ryujinx.jitenabled
             && !profileSelected
             && nativeSettings.showProfileonGame.value
-            && hasJITEntitlement
     }
     
     var shouldCheckJIT: Bool {
         currentGame != nil
             && !ryujinx.jitenabled
             && !(nativeSettings.ignoreJIT.value as Bool)
-            && hasJITEntitlement
     }
     
     
@@ -100,18 +100,33 @@ class LaunchGameHandler: ObservableObject {
                 askForJIT()
             } else if self.nativeSettings.stikJIT.value {
                 enableJITStik()
-            } else if self.nativeSettings.builtInStikJIT.value {
+            } else if BuiltInStikJITAvailability.isAvailable {
+                // If the embedded helper is usable, prefer it automatically.
+                // Requiring the user to discover and toggle it first made the
+                // "no third app" path effectively unreachable.
+                self.nativeSettings.builtInStikJIT.value = true
                 MeloNXBuiltInJIT.enableCurrentProcess()
             } else {
                 print("[JIT] no fallback available")
 
-                // ContentView also probes JIT on app launch while no game is
-                // selected. Avoid showing an error there; only explain the
-                // blocker when the user actually tried to start a game.
                 if self.currentGame != nil {
+                    let reason: String
+                    switch BuiltInStikJITAvailability.unavailableReason() {
+                    case .missingGetTaskAllow:
+                        reason = "this AltStore signature does not include get-task-allow"
+                    case .runningInLiveContainer:
+                        reason = "MeloNX is running inside LiveContainer"
+                    case .noPairingFileImported:
+                        reason = "no pairing file has been imported for the built-in JIT helper"
+                    case .helperMissing:
+                        reason = "the MeloNX JIT helper extension is missing from this installation"
+                    case .none:
+                        reason = "the built-in JIT helper could not be started"
+                    }
+
                     presentAlert(
                         title: "JIT Not Acquired",
-                        message: "MeloNX could not acquire JIT with the internal JitStreamer path, and no fallback JIT method is enabled. Configure a working JIT method before launching the game."
+                        message: "Your Switch keys and firmware are already installed. They do not enable JIT. The internal JitStreamer server was not reachable, and the built-in fallback is unavailable because \(reason)."
                     )
                 }
             }
