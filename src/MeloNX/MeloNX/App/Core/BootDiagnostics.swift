@@ -22,12 +22,12 @@ struct BootStageRecord: Identifiable {
 /// single call, so even a UI that's stuck/unresponsive still leaves a real
 /// trail on disk.
 ///
-/// C#-side breadcrumbs (swapchain/first submit/first present, added as
-/// plain Console.WriteLine/Logger calls around WindowBase.cs's render
-/// loop) are not pushed into this object through a second bridge - they
-/// already flow through the same stdout capture LogCapture already does
-/// for everything else. `observeExternalBootLines()` just mirrors
-/// `[BOOT] ...` lines seen there into this object's structured fields.
+/// C#-side breadcrumbs reach this object two ways: `observeExternalBootLines()`
+/// mirrors `[BOOT] ...` text already flowing through LogCapture's stdout
+/// capture, and `registerManagedBootEventChannel()` listens on a dedicated,
+/// deterministic bridge (Program.cs's ReportBootEvent/ReportBootFailure) for
+/// the critical path - added because whether stdout reaches this process
+/// reliably at all was exactly what needed verifying, not assuming.
 final class BootDiagnostics: ObservableObject {
     static let shared = BootDiagnostics()
 
@@ -45,12 +45,43 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var firstPresent = false
     @Published private(set) var firstFrame = false
 
+    // Watchdog-panel fields: whether the managed (.NET) side and the GPU
+    // render thread have shown ANY sign of life, and the last named stage
+    // each reported - so a timeout can say *where* it's stuck instead of
+    // just "nothing happened".
+    @Published private(set) var managedThreadAlive = false
+    @Published private(set) var renderThreadAlive = false
+    @Published private(set) var lastManagedStage: String?
+    @Published private(set) var lastRendererStage: String?
+    @Published private(set) var lastVulkanResult: String?
+    @Published private(set) var metalViewAlive = false
+    @Published private(set) var surfaceCreated = false
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private let lock = NSLock()
 
     private init() {
         observeExternalBootLines()
+        registerManagedBootEventChannel()
+    }
+
+    /// Deterministic C#->Swift bridge, requested explicitly instead of
+    /// relying only on stdout/LogCapture (unverified until now whether it
+    /// even reaches this process reliably). Reuses the existing, already
+    /// proven RegisterCallbackWithData mechanism under one new identifier,
+    /// "boot-event", fed by Program.cs's ReportBootEvent/ReportBootFailure.
+    /// Payload is plain UTF-8: "name", "name|value", or "FAIL|stage|reason".
+    private func registerManagedBootEventChannel() {
+        RegisterCallbackWithData("boot-event") { [weak self] data in
+            guard let self, let data, let payload = String(data: data, encoding: .utf8) else { return }
+            switch BootEventPayloadParser.parse(payload) {
+            case .stage(let name, let value):
+                self.log(name, result: value)
+            case .failure(let stage, let reason):
+                self.fail(stage: stage, reason: reason)
+            }
+        }
     }
 
     /// Resets transitory per-launch state. Never touches anything else -
@@ -74,6 +105,13 @@ final class BootDiagnostics: ObservableObject {
             self.firstSubmit = false
             self.firstPresent = false
             self.firstFrame = false
+            self.managedThreadAlive = false
+            self.renderThreadAlive = false
+            self.lastManagedStage = nil
+            self.lastRendererStage = nil
+            self.lastVulkanResult = nil
+            self.metalViewAlive = false
+            self.surfaceCreated = false
         }
     }
 
@@ -126,17 +164,62 @@ final class BootDiagnostics: ObservableObject {
             dualMappedJIT = (result == "true")
         case "ryujinx.start begin":
             ryujinxStarted = true
-        case "swapchain created":
-            swapchainCreated = true
-        case "first GPU command submitted":
-            firstSubmit = true
-        case "first present requested", "first present completed":
-            firstPresent = true
-        case "ran-first-frame", "received ran-first-frame", "emitting ran-first-frame":
-            firstFrame = true
+        case "MetalView.createView begin", "MetalView.createView end":
+            metalViewAlive = true
         default:
             break
         }
+
+        // Broader, substring-based classification for the watchdog panel -
+        // deliberately not an exhaustive exact-match list, since the real
+        // managed/renderer stage names are numerous and this only needs to
+        // answer "is each side alive, and what was its last named stage".
+        if stageLooksManaged(stage) {
+            managedThreadAlive = true
+            lastManagedStage = stage
+        }
+
+        if stageLooksRenderer(stage) {
+            lastRendererStage = stage
+        }
+
+        if stage.localizedCaseInsensitiveContains("vulkan"), let result {
+            lastVulkanResult = result
+        }
+
+        if stage == "GPU thread started" || stage.contains("render loop entered") {
+            renderThreadAlive = true
+        }
+
+        if stage.contains("surface creation success") {
+            surfaceCreated = true
+        }
+
+        if stage.contains("swapchain creation success") || stage == "swapchain created" {
+            swapchainCreated = true
+        }
+
+        if stage.contains("first GPU command submitted") || stage.contains("first submit") {
+            firstSubmit = true
+        }
+
+        if stage.contains("first present") {
+            firstPresent = true
+        }
+
+        if stage == "ran-first-frame" || stage.contains("ran-first-frame") || stage.contains("first frame") {
+            firstFrame = true
+        }
+    }
+
+    private func stageLooksManaged(_ stage: String) -> Bool {
+        let markers = ["managed", "Program.Main", "args received", "app data", "configuration", "game load", "BOOT-TEST"]
+        return markers.contains { stage.localizedCaseInsensitiveContains($0) }
+    }
+
+    private func stageLooksRenderer(_ stage: String) -> Bool {
+        let markers = ["renderer", "vulkan", "physical device", "logical device", "surface", "swapchain", "render loop", "command buffer"]
+        return markers.contains { stage.localizedCaseInsensitiveContains($0) }
     }
 
     private func persistLastStep(_ message: String) {
@@ -186,6 +269,14 @@ final class BootDiagnostics: ObservableObject {
         lines.append("firstPresent = \(firstPresent)")
         lines.append("firstFrame = \(firstFrame)")
         lines.append("")
+        lines.append("managedThreadAlive = \(managedThreadAlive)")
+        lines.append("renderThreadAlive = \(renderThreadAlive)")
+        lines.append("lastManagedStage = \(lastManagedStage ?? "none")")
+        lines.append("lastRendererStage = \(lastRendererStage ?? "none")")
+        lines.append("lastVulkanResult = \(lastVulkanResult ?? "none")")
+        lines.append("metalViewAlive = \(metalViewAlive)")
+        lines.append("surfaceCreated = \(surfaceCreated)")
+        lines.append("")
         lines.append("failureStage = \(failureStage ?? "none")")
         lines.append("failureReason = \(failureReason ?? "none")")
         lines.append("")
@@ -204,5 +295,36 @@ final class BootDiagnostics: ObservableObject {
         let url = dir.appendingPathComponent("boot-report.txt")
         try? report.write(to: url, atomically: true, encoding: .utf8)
         return report
+    }
+}
+
+/// Pure parsing for the "boot-event" channel's payload, kept separate from
+/// BootDiagnostics itself so the actual decoding logic is unit-testable
+/// without needing the real native RegisterCallbackWithData bridge (which
+/// has no C# runtime to drive it in a test host).
+enum BootEventPayloadParser {
+    enum ParsedEvent: Equatable {
+        case stage(name: String, value: String?)
+        case failure(stage: String, reason: String)
+    }
+
+    static func parse(_ payload: String) -> ParsedEvent {
+        if payload.hasPrefix("FAIL|") {
+            let rest = payload.dropFirst(5)
+            guard let separator = rest.range(of: "|") else {
+                return .failure(stage: "unknown", reason: String(rest))
+            }
+            let stage = String(rest[rest.startIndex..<separator.lowerBound])
+            let reason = String(rest[separator.upperBound...])
+            return .failure(stage: stage, reason: reason)
+        }
+
+        if let separator = payload.range(of: "|") {
+            let name = String(payload[payload.startIndex..<separator.lowerBound])
+            let value = String(payload[separator.upperBound...])
+            return .stage(name: name, value: value)
+        }
+
+        return .stage(name: payload, value: nil)
     }
 }

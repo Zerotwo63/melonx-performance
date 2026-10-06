@@ -19,6 +19,7 @@ struct BootWatchdogView: View {
     @State private var showSavedConfirmation = false
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 14) {
             Text("GAME BOOT DIAGNOSTICS")
                 .font(.headline)
@@ -40,7 +41,17 @@ struct BootWatchdogView: View {
                 row("First frame", "\(diagnostics.firstFrame)")
             }
 
-            Text("Last error: \(diagnostics.failureReason ?? "none")")
+            VStack(alignment: .leading, spacing: 6) {
+                row("Managed thread alive", "\(diagnostics.managedThreadAlive)")
+                row("Render thread alive", "\(diagnostics.renderThreadAlive)")
+                row("Last managed stage", diagnostics.lastManagedStage ?? "none")
+                row("Last renderer stage", diagnostics.lastRendererStage ?? "none")
+                row("Last Vulkan result", diagnostics.lastVulkanResult ?? "none")
+                row("MetalView alive", "\(diagnostics.metalViewAlive)")
+                row("Surface created", "\(diagnostics.surfaceCreated)")
+            }
+
+            Text("Failure stage: \(diagnostics.failureStage ?? "none")\nLast error: \(diagnostics.failureReason ?? "none")")
                 .font(.footnote)
                 .foregroundColor(diagnostics.failureReason == nil ? .white.opacity(0.6) : .red)
 
@@ -83,6 +94,8 @@ struct BootWatchdogView: View {
         .background(Color.black.opacity(0.92))
         .cornerRadius(16)
         .padding()
+        }
+        .frame(maxHeight: 600)
         .allowsHitTesting(true)
     }
 

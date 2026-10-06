@@ -72,14 +72,23 @@ namespace Ryujinx.Headless.SDL2.Vulkan
                 return (IntPtr)(ulong)_surface.Handle;
             }
 
+            // This is the real surface-creation step for iOS/MoltenVK - the
+            // "surface" Window.cs's CreateSwapchain() consumes was already
+            // created here, via vkCreateMetalSurfaceEXT, before Window.cs
+            // ever runs. nativeMetalLayer is exactly the CAMetalLayer handed
+            // over by MetalView.swift's RyujinxBridge.setNativeWindow() call.
+            Program.ReportBootEvent("surface creation begin");
+
             if (nativeMetalLayer == IntPtr.Zero)
             {
+                Program.ReportBootEvent("surface creation failed", "No CAMetalLayer set (nativeMetalLayer == IntPtr.Zero)");
                 throw new Exception("Cannot create Vulkan surface: No CAMetalLayer set");
             }
 
-            var instance = new Instance((nint)instanceHandle);  
+            var instance = new Instance((nint)instanceHandle);
             if (!_vk.TryGetInstanceExtension(instance, out _metalSurface))
             {
+                Program.ReportBootEvent("surface creation failed", "Failed to get ExtMetalSurface extension");
                 throw new Exception("Failed to get ExtMetalSurface extension");
             }
 
@@ -90,15 +99,19 @@ namespace Ryujinx.Headless.SDL2.Vulkan
                 PLayer = (nint*)nativeMetalLayer
             };
 
-            SurfaceKHR* surfacePtr = stackalloc SurfaceKHR[1];  
+            SurfaceKHR* surfacePtr = stackalloc SurfaceKHR[1];
             Result result = _metalSurface.CreateMetalSurface(instance, &createInfo, null, surfacePtr);
+            Program.ReportBootEvent("vkCreateMetalSurfaceEXT", result.ToString());
             if (result != Result.Success)
             {
+                Program.ReportBootEvent("surface creation failed", $"vkCreateMetalSurfaceEXT = {result}");
                 throw new Exception($"vkCreateMetalSurfaceEXT failed with error code {result}");
             }
 
-            _surface = *surfacePtr; 
+            _surface = *surfacePtr;
             _surfaceCreated = true;
+
+            Program.ReportBootEvent("surface creation success", $"handle={(ulong)_surface.Handle}");
 
             return (IntPtr)(ulong)_surface.Handle;
         }

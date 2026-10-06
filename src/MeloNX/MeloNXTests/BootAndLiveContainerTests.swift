@@ -196,4 +196,77 @@ struct BootAndLiveContainerTests {
         #expect(!receivedByFirst.isEmpty)
         #expect(!receivedBySecond.isEmpty)
     }
+
+    // MARK: - BootEventPayloadParser (the deterministic C#->Swift bridge's decoding)
+
+    @Test func parsesPlainStageWithNoValue() {
+        let parsed = BootEventPayloadParser.parse("managed entry reached")
+        #expect(parsed == .stage(name: "managed entry reached", value: nil))
+    }
+
+    @Test func parsesStageWithValue() {
+        let parsed = BootEventPayloadParser.parse("physical device count|2")
+        #expect(parsed == .stage(name: "physical device count", value: "2"))
+    }
+
+    @Test func parsesFailurePayload() {
+        let parsed = BootEventPayloadParser.parse("FAIL|VulkanRenderer.SetupContext|System.Exception: boom\n   at Foo.Bar()")
+        #expect(parsed == .failure(stage: "VulkanRenderer.SetupContext", reason: "System.Exception: boom\n   at Foo.Bar()"))
+    }
+
+    @Test func parsesFailurePayloadWithNoReasonSeparator() {
+        // Malformed/truncated payload - must not crash, falls back to a
+        // named "unknown" stage rather than losing the data entirely.
+        let parsed = BootEventPayloadParser.parse("FAIL|justastring")
+        #expect(parsed == .failure(stage: "unknown", reason: "justastring"))
+    }
+
+    @Test func stageValueCanItselfContainPipes() {
+        // A reason/value can legitimately contain further "|" (e.g. a
+        // stack trace with multiple frames) - only the FIRST separator
+        // after the stage name must be treated as the boundary.
+        let parsed = BootEventPayloadParser.parse("vkCreateSwapchainKHR|VK_ERROR_SURFACE_LOST_KHR|extra|detail")
+        #expect(parsed == .stage(name: "vkCreateSwapchainKHR", value: "VK_ERROR_SURFACE_LOST_KHR|extra|detail"))
+    }
+
+    // MARK: - BootDiagnostics watchdog-panel field classification
+
+    @Test func managedStagesSetManagedThreadAliveAndLastManagedStage() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("game load begin")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.managedThreadAlive)
+        #expect(BootDiagnostics.shared.lastManagedStage == "game load begin")
+    }
+
+    @Test func rendererStagesSetLastRendererStage() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("swapchain creation begin")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.lastRendererStage == "swapchain creation begin")
+    }
+
+    @Test func surfaceAndSwapchainSuccessStagesSetTheirFlags() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("surface creation success")
+        BootDiagnostics.shared.log("swapchain creation success")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.surfaceCreated)
+        #expect(BootDiagnostics.shared.swapchainCreated)
+    }
+
+    @Test func metalViewStageSetsMetalViewAlive() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("MetalView.createView begin")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.metalViewAlive)
+    }
 }

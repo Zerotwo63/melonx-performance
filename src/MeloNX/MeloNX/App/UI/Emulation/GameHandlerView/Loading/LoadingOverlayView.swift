@@ -74,6 +74,18 @@ struct LoadingOverlayView: View {
             await MainActor.run {
                 if isLoading {
                     showWatchdog = true
+                    // The watchdog firing with no prior fail() call IS
+                    // itself a real, distinct failure - "nothing reached
+                    // swapchain/submit/present/frame within the timeout",
+                    // not the absence of information failureStage=none
+                    // used to silently imply.
+                    let diag = BootDiagnostics.shared
+                    if diag.failureStage == nil {
+                        diag.fail(
+                            stage: "boot watchdog",
+                            reason: "timeout waiting for swapchain/first frame; last managed stage = \(diag.lastManagedStage ?? "none"), last renderer stage = \(diag.lastRendererStage ?? "none")"
+                        )
+                    }
                 }
             }
         }

@@ -1208,6 +1208,115 @@ en qué etapa exacta — eso es precisamente lo que el próximo reporte de
 `Documents/Diagnostics/boot-report.txt` / el panel del watchdog debe
 revelar.
 
+## Diagnóstico real #2: `ryujinx.start` retorna en 0.02s, nunca se crea swapchain
+
+Reporte real del watchdog anterior, en dispositivo (native, no LiveContainer
+esta vez): `jitVerified=true`, `dualMappedJIT=true`, `ryujinxStarted=true`,
+pero `swapchainCreated/firstSubmit/firstPresent/firstFrame` todos `false`, y
+`failureStage/failureReason` ambos `none` a pesar de que claramente algo no
+funciona — exactamente el "estamos perdiendo el error" que motivó esta
+ronda. Además: `ryujinx.start returned` a los 0.02s, pero el reporte se
+generó a los 22.7s sin ningún stage nuevo — ninguno de los breadcrumbs C#
+de la ronda anterior aparecía en absoluto en el reporte.
+
+**Causa de "0.02s" encontrada leyendo el código, no asumida**:
+`Ryujinx.start(with:)` llama `runloop { ... }` → `Runner.start(_:)` →
+`Task.detached(priority: .userInitiated) { body() }` — esto SOLO programa
+el closure (que contiene la llamada real a
+`RyujinxBridge.mainRyu(argv:)`) en un hilo en segundo plano y retorna
+inmediatamente. `"ryujinx.start returned"` nunca probó que el juego
+realmente arrancara — solo que el `Task.detached` se programó.
+
+**Por qué los breadcrumbs C# no aparecían — verificado, no asumido**: el
+reporte anterior no tenía NINGÚN stage de C#, ni los que ya existían desde
+dos rondas atrás. Esto pedía verificación explícita en vez de seguir
+asumiendo que `Console.WriteLine` llega de forma confiable a
+`LogCapture` en este runtime iOS.
+
+**Lo implementado:**
+
+1. **Bridge determinista C#→Swift** (`Program.cs`: `ReportBootEvent`/
+   `ReportBootFailure`, nuevos): reutilizan el canal YA PROBADO
+   `TriggerCallbackWithData` (el mismo que ya usa "ran-first-frame" desde
+   hace dos rondas) bajo un identificador nuevo, `"boot-event"`, en vez de
+   depender solo de stdout. Payload `"name"` / `"name|value"` /
+   `"FAIL|stage|reason"`. Swift los recibe en
+   `BootDiagnostics.registerManagedBootEventChannel()`, decodificados por
+   `BootEventPayloadParser` (puro, testeado — ver tests nuevos).
+2. **Prueba explícita de alcance** al inicio de `MainExternal`:
+   `ReportBootEvent("BOOT-TEST managed code reached")` +
+   `Console.WriteLine`/`Console.Error.WriteLine` del mismo mensaje — la
+   próxima prueba real dirá, sin ambigüedad, si el código managed se
+   alcanza y si stdout/el bridge llegan.
+3. **Excepciones ya no se pierden**: `AppDomain.CurrentDomain.UnhandledException`
+   y `TaskScheduler.UnobservedTaskException` instalados una vez,
+   reportando tipo/Message/StackTrace/InnerException recursivo vía
+   `ReportBootFailure` sin tapar la excepción original (siempre
+   re-lanzada o deja seguir el catch existente).
+4. **Ciclo de vida del hilo gestionado** (`Ryujinx.swift`): `ryujinx.start
+   wrapper entered` → `managed thread creating` → (dentro del closure)
+   `managed thread started/entry` → `managed thread exit` justo tras que
+   `RyujinxBridge.mainRyu(argv:)` retorne. Dato clave verificado leyendo
+   `WindowBase.Execute()`: crea un hilo dedicado `"GUI.RenderLoop"` y
+   bloquea en `MainLoop()`/`_gpuDoneEvent.WaitOne()` — en una sesión
+   normal, `mainRyu` NO debería retornar hasta que el juego termine. Si
+   `"managed thread exit"` aparece pronto en la próxima prueba, es señal
+   directa de que algo retornó anormalmente antes de llegar al render real.
+5. **`Program.cs`/`WindowBase.cs`**: se completó la traza pedida —
+   `app data initialized`, `configuration initialized`, `renderer
+   selection begin`/`renderer = ...` (valor real, no asumido "siempre
+   Vulkan"), `game load begin/succeeded/failed` (con la razón real de
+   CADA rama que ya existía: LoadCart/LoadXci/LoadNca/LoadNsp/LoadProgram),
+   envuelto en try/catch con `ReportBootFailure` sin tapar el error.
+   `GPU thread started` (nombre real del hilo, `"GUI.RenderLoop"`),
+   `render loop entered`. Los 4 breadcrumbs más críticos del loop
+   (`first GPU command submitted/first present requested/completed/
+   emitting ran-first-frame`) se migraron de `Console.WriteLine` plano al
+   bridge determinista — son justo los que más importa verificar que
+   lleguen.
+6. **Vulkan/MoltenVK, con nombres simbólicos reales de `VkResult`**
+   (`VulkanInitialization.cs`/`Window.cs`: `Console.WriteLine` plano, NO
+   el bridge — estos proyectos no pueden referenciar `Program` de
+   `Ryujinx.Headless.SDL2`, dependencia inversa, documentado en comentario
+   en el propio código): `vkCreateInstance`, `vkEnumeratePhysicalDevices`
+   + conteo + dispositivo seleccionado (nombre real + ApiVersion, nunca
+   lanza), `vkGetPhysicalDeviceSurfaceSupportKHR` (ya se llamaba, solo se
+   loguea), `vkCreateDevice`, capabilities/formatos/present-modes de la
+   surface (ya consultados, solo logueados — cero llamadas Vulkan
+   nuevas), extent/formato elegido para el swapchain, `vkCreateSwapchainKHR`
+   con el `Result` real antes de `ThrowOnError()`.
+7. **Hallazgo real: el paso de creación de surface SÍ existe, y no estaba
+   en `Window.cs`** — está en `MoltenVKWindow.cs`'s `CreateWindowSurface`
+   (`vkCreateMetalSurfaceEXT`), que corre ANTES de que `Window.cs` haga
+   nada. Ahí se instrumentó exactamente la condición de carrera que se
+   sospechaba: `nativeMetalLayer == IntPtr.Zero` (el CAMetalLayer que
+   `MetalView.swift` debía haber entregado vía `setNativeWindow()` aún
+   no estaba listo) como fallo explícito y nombrado, no genérico.
+8. **`MetalView.createView()`**: ahora loguea ptr real del view, ptr real
+   del `CAMetalLayer`, `bounds`, `drawableSize`, `contentScaleFactor`,
+   window handle — valores reales, no "success". Esto es evidencia
+   directa para la hipótesis de carrera: `createView()` se llama
+   directamente desde `LaunchGameHandler` ANTES de que `EmulationView`
+   (SwiftUI) necesariamente haya insertado la vista en la jerarquía real
+   — si `bounds`/`drawableSize` salen en 0x0, confirma la carrera sin
+   necesidad de adivinar.
+9. **Watchdog corregido**: ya NO se queda en `failureStage=none` al
+   disparar — si no hay un fallo específico ya registrado, el propio
+   timeout del watchdog se registra como fallo real (`stage: "boot
+   watchdog"`) con el último stage managed/renderer conocido en el
+   mensaje. Panel con 7 campos nuevos (`managedThreadAlive`,
+   `renderThreadAlive`, `lastManagedStage`, `lastRendererStage`,
+   `lastVulkanResult`, `metalViewAlive`, `surfaceCreated`).
+
+**No se cambió ningún comportamiento real** — ni se deshabilitó Vulkan, ni
+se forzaron resultados, ni se simuló `swapchainCreated`/`firstFrame`, por
+instrucción explícita. Solo instrumentación aditiva.
+
+**Qué sigue sin poder verificarse aquí**: todo lo anterior depende de que
+CI compile correctamente (incluye NativeAOT), y la pregunta central —
+dónde se detiene realmente el pipeline — solo la responde la siguiente
+prueba real en el iPhone con este IPA.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -1234,3 +1343,4 @@ revelar.
 | `feat(jit): replace Copy-to-clipboard alert button with a real diagnostics sheet` | `fc15846e8` | `JITDiagnosticsView.swift` (nuevo), `JITCoordinator.swift`, `JITDiagnostics.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | El botón "Copy JIT Diagnostics" del commit anterior no mostraba nada útil — un `.alert` de SwiftUI se descarta en cuanto se toca cualquier botón, sin feedback posible. Se reemplaza por "View JIT Diagnostics", que presenta un `.sheet` real con el reporte completo como texto seleccionable, Copy/Share/Close reales, "Copied" visible sin cerrar la pantalla, y respaldo en `Documents/jit-diagnostics.txt`. `JITMethodAttempt` ahora lleva detected/enabled/attempted/startTime/endTime/result/error/underlyingError/errno/timeout/pairingStatus/connectionStatus por método; `probeExecutableMemory()` hace mmap+mprotect reales con errno capturado, llamado tras cada método que dice haber adquirido JIT (verificación real, no confiar en el booleano). `beginRetry()` agrega un separador `===== JIT RETRY #N =====` al log sin borrarlo. Investigación de código confirmó 4 métodos reales (JITStreamerEB/TrollStore/StikDebug externo/Built-in StikJIT) y su orden fijo de ejecución; `builtInStikJIT`/`.stikJIT` accedidos como propiedad vs función en distintos archivos son el mismo `Setting<Bool>` subyacente, no una discrepancia |
 | `fix(jit): fix dynamic cast crash in JITDiagnostics.buildReport()` | `888933c76` | `JITDiagnostics.swift`, `JITDiagnosticsView.swift` (incluye el `iOSNav` que quedó fuera del commit anterior), `MeloNXTests/JITFlowTests.swift` | Crash report real (`SIGABRT`/`swift_dynamicCastFailure` en `Setting.value.getter`, vía `JITDiagnostics.buildReport()`): accesos `s.stikJIT.value` dentro de interpolación de string no fijan `T = Bool` (sin contexto de tipo), a diferencia de un `if`/asignación `Bool`. `Setting.value`'s `uddefault as! T` fuerza el cast y aborta. Corregido con `boolSetting(_:default:)` vía `NativeSettingsManager.setting(forKey:default:)` (API no ambigua, mismo patrón ya usado en `LaunchGameHandler`), auditando los 6 accesos directos en `methodCapabilities()`/`enabledMethodNames()`/`buildReport()`. Se agrega `rawSettingDescription(_:)` sin casts y breadcrumbs `[JITDIAG] ...` persistidos en `Documents/jit-diagnostics-last-step.txt`. No se tocó `LaunchGameHandler`/`JITCoordinator`/orden de métodos JIT, por instrucción explícita |
 | `feat(boot): LiveContainer-aware JIT flow, full boot instrumentation, watchdog` | `cd0a1a453` | `RuntimeEnvironment.swift` (nuevo), `BootDiagnostics.swift` (nuevo), `BootWatchdogView.swift` (nuevo), `LaunchGameHandler.swift`, `JITCoordinator.swift`, `LogCapture.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (nuevo), + `Program.cs`/`WindowBase.cs`/`VulkanRenderer.cs`/`Window.cs`/`Translator.cs` (C#, solo logging aditivo) | Causa estructural: `startGame()` no esperaba el resultado async de `enableJIT()`, y `enableJIT()` intentaba sus métodos internos incluso en LiveContainer, donde StikDebug ya hizo ese trabajo antes de lanzar MeloNX. Se divide `startGame()` en verificación LiveContainer vs adquisición nativa → única `startGameAfterJITConfirmed()`. `JITCoordinator.failImmediately()` cancela polling en fallo terminal; `recordFailure` ya no sobrescribe la primera razón real. `BootDiagnostics` rastrea cada etapa con persistencia en disco; `LogCapture` corrige un bug real de múltiples-consumidores-compitiendo-por-el-mismo-stream. Watchdog de 15s muestra panel interactivo con Copy/Save/Exit. Hallazgo documentado (no inventado): `initialize_dualmapped()` retorna `true` casi incondicionalmente — no prueba que el JIT dual-mapped funcione en runtime. **CI (run 37490713768) compiló en verde** (incluye recompilar el core C# con NativeAOT) y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID sin cambios. Las cadenas Swift (`GAME BOOT DIAGNOSTICS`, `boot-report.txt`, `startGame called`, `JIT verification begin`, `LiveContainer launched MeloNX`, `initialize_dualmapped begin`) se confirmaron en el binario principal. **Limitación honesta**: la búsqueda de bytes NO funcionó contra `Ryujinx.Headless.SDL2.dylib` (NativeAOT) — ni siquiera para un string preexistente de hace tiempo (`"Dual Mapped JIT enabled."`), así que esa técnica simplemente no aplica de forma confiable a este binario compilado con NativeAOT; no es evidencia de que el cambio esté ausente. La verificación real para el lado C# es: los diffs se revisaron línea por línea antes de integrarlos (ver más arriba) y CI — que invoca el compilador real — terminó en verde |
+| `feat(boot): deterministic C#->Swift bridge, trace ryujinx.start to swapchain` | *(pendiente de build)* | `Ryujinx.swift`, `MetalView.swift`, `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` + `Program.cs`, `WindowBase.cs`, `VulkanInitialization.cs`, `Window.cs`, `MoltenVKWindow.cs` (C#) | Diagnóstico real #2 (ver sección arriba): `ryujinx.start` retornaba en 0.02s (solo programa un `Task.detached`, nunca esperó nada) y ningún breadcrumb C# de la ronda anterior aparecía en el reporte — sin confirmar si `Console.WriteLine` llega de verdad. Se agrega un bridge determinista `ReportBootEvent`/`ReportBootFailure` (reutiliza `TriggerCallbackWithData`, ya probado) con prueba explícita de alcance (`BOOT-TEST managed code reached`), `AppDomain.UnhandledException`/`TaskScheduler.UnobservedTaskException` instalados, ciclo de vida completo del hilo gestionado, traza completa `Load()`→`ExecutionEntrypoint()`→`Execute()`→`Render()` con nombre real del hilo GPU (`GUI.RenderLoop`), y Vulkan/MoltenVK con `VkResult` simbólico real en cada paso — incluyendo el hallazgo de que la creación de surface real vive en `MoltenVKWindow.CreateWindowSurface`, no en `Window.cs`, con la condición de carrera `nativeMetalLayer == IntPtr.Zero` instrumentada explícitamente. `MetalView.createView()` ahora loguea bounds/drawableSize/ptr reales. Watchdog ya no termina en `failureStage=none`. Ningún comportamiento real cambiado, solo logging aditivo |

@@ -130,24 +130,35 @@ class Ryujinx : ObservableObject {
         guard !isRunning else {
             throw RyujinxError.alreadyRunning
         }
-        
-        
+
+
         self.config = config
-        
+
         self.isRunning = true
-        
-        
+
+        BootDiagnostics.shared.log("ryujinx.start wrapper entered")
+        BootDiagnostics.shared.log("managed thread creating")
+
         runloop { [self] in
+            BootDiagnostics.shared.log("managed thread started")
+            BootDiagnostics.shared.log("managed thread entry")
+
             let url = URL(string: config.gamepath)
-            
+
             do {
                 let args = self.buildCommandLineArgs(from: config)
                 let accessing = url?.startAccessingSecurityScopedResource()
-                
+
                 // Start the emulation
                 if isRunning {
                     let result = RyujinxBridge.mainRyu(argv: args)//main_ryujinx_sdl(Int32(args.count), &argvPtrs)
-                    
+                    // mainRyu/main_ryujinx_sdl is itself synchronous and
+                    // only returns once the managed side's Main() returns -
+                    // reaching this line proves the managed call truly
+                    // returned (whether cleanly or via its own internal
+                    // catch), not that it merely scheduled more work.
+                    BootDiagnostics.shared.log("managed thread exit", result: "mainRyu returned \(result)")
+
                     if result != 0 {
                         Task { @MainActor in
                             self.isRunning = false
@@ -155,15 +166,18 @@ class Ryujinx : ObservableObject {
                         if let accessing, accessing {
                             url!.stopAccessingSecurityScopedResource()
                         }
-                        
+
                         throw RyujinxError.executionError(code: Int32(result))
                     }
+                } else {
+                    BootDiagnostics.shared.log("managed thread exit", result: "isRunning was already false, mainRyu never called")
                 }
             } catch {
+                BootDiagnostics.shared.fail(stage: "managed thread", reason: "\(error)")
                 Task { @MainActor in
                     self.isRunning = false
                 }
-                
+
                 Thread.sleep(forTimeInterval: 0.3)
                 let logs = LogCapture.shared.capturedLogs
                 let parsedLogs = extractExceptionInfo(logs)

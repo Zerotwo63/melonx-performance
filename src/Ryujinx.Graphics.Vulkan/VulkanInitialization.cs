@@ -131,6 +131,14 @@ namespace Ryujinx.Graphics.Vulkan
                 Marshal.FreeHGlobal(ppEnabledLayers[i]);
             }
 
+            // Ryujinx.Graphics.Vulkan cannot reference Ryujinx.Headless.SDL2.Program
+            // (reverse project dependency - this project is lower-level), so
+            // this one and the two below use plain Console.WriteLine rather
+            // than the ReportBootEvent bridge used everywhere else in this
+            // investigation. Logged BEFORE ThrowOnError() so the real
+            // VkResult is visible even on the failure path, with no change
+            // to what ThrowOnError() itself does.
+            Console.WriteLine($"[BOOT] vkCreateInstance = {result}");
             result.ThrowOnError();
 
             return instance;
@@ -138,13 +146,17 @@ namespace Ryujinx.Graphics.Vulkan
 
         internal static VulkanPhysicalDevice FindSuitablePhysicalDevice(Vk api, VulkanInstance instance, SurfaceKHR surface, string preferredGpuId)
         {
-            instance.EnumeratePhysicalDevices(out var physicalDevices).ThrowOnError();
+            Result enumerateResult = instance.EnumeratePhysicalDevices(out var physicalDevices);
+            Console.WriteLine($"[BOOT] vkEnumeratePhysicalDevices = {enumerateResult}");
+            Console.WriteLine($"[BOOT] physical device count = {physicalDevices.Length}");
+            enumerateResult.ThrowOnError();
 
             // First we try to pick the user preferred GPU.
             for (int i = 0; i < physicalDevices.Length; i++)
             {
                 if (IsPreferredAndSuitableDevice(api, physicalDevices[i], surface, preferredGpuId))
                 {
+                    Console.WriteLine($"[BOOT] physical device selected = {GetDeviceNameSafe(physicalDevices[i])} (preferred)");
                     return physicalDevices[i];
                 }
             }
@@ -154,11 +166,36 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 if (IsSuitableDevice(api, physicalDevices[i], surface))
                 {
+                    Console.WriteLine($"[BOOT] physical device selected = {GetDeviceNameSafe(physicalDevices[i])}");
                     return physicalDevices[i];
                 }
             }
 
+            Console.WriteLine("[BOOT] physical device selection failed: none of the available GPUs meets the minimum requirements");
             throw new VulkanException("Initialization failed, none of the available GPUs meets the minimum requirements.");
+        }
+
+        /// Device name reporting only - never throws, since a formatting
+        /// failure here must not change which device gets selected above.
+        private static string GetDeviceNameSafe(VulkanPhysicalDevice device)
+        {
+            try
+            {
+                unsafe
+                {
+                    fixed (byte* namePtr = device.PhysicalDeviceProperties.DeviceName)
+                    {
+                        return System.Text.Encoding.UTF8.GetString(
+                            namePtr,
+                            Array.IndexOf(device.PhysicalDeviceProperties.DeviceName.ToArray(), (byte)0) is int len && len >= 0 ? len : 0
+                        ) + $" (apiVersion={device.PhysicalDeviceProperties.ApiVersion})";
+                    }
+                }
+            }
+            catch
+            {
+                return "unknown";
+            }
         }
 
         internal static DeviceInfo[] GetSuitablePhysicalDevices(Vk api)
@@ -257,9 +294,13 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     queueCount = property.QueueCount;
 
+                    Console.WriteLine($"[BOOT] vkGetPhysicalDeviceSurfaceSupportKHR = true (queue family {index}, queueCount {queueCount})");
+
                     return index;
                 }
             }
+
+            Console.WriteLine("[BOOT] vkGetPhysicalDeviceSurfaceSupportKHR: no suitable queue family with surface support found");
 
             queueCount = 0;
 
@@ -610,7 +651,9 @@ namespace Ryujinx.Graphics.Vulkan
                 PEnabledFeatures = &features,
             };
 
-            api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out var device).ThrowOnError();
+            Result createDeviceResult = api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out var device);
+            Console.WriteLine($"[BOOT] vkCreateDevice = {createDeviceResult}");
+            createDeviceResult.ThrowOnError();
 
             for (int i = 0; i < enabledExtensions.Length; i++)
             {

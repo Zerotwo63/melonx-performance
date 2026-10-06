@@ -94,24 +94,131 @@ namespace Ryujinx.Headless.SDL2
         [DllImport("RyujinxHelper.framework/RyujinxHelper", CallingConvention = CallingConvention.Cdecl)]
         public static extern void TriggerCallback(string cIdentifier);
 
+        // Deterministic C#->Swift boot bridge, requested explicitly instead
+        // of relying on stdout/LogCapture alone (which this exact investigation
+        // exists to verify is even reaching Swift at all). Reuses the
+        // existing, already-proven TriggerCallbackWithData channel (same one
+        // "ran-first-frame"/"ProgressWithPTCorShaderCache" already use
+        // successfully from a background GPU thread) under one new
+        // identifier, "boot-event", rather than inventing a new native
+        // export. Payload is plain UTF-8 "name" or "name|value" - Swift's
+        // BootDiagnostics parses it directly into a real stage/result.
+        public static void ReportBootEvent(string name, string value = null)
+        {
+            string payload = value == null ? name : $"{name}|{value}";
+            Console.WriteLine($"[BOOT] {payload}");
+
+            byte[] bytes = Encoding.UTF8.GetBytes(payload);
+            IntPtr unmanagedPointer = Marshal.AllocHGlobal(bytes.Length);
+            try
+            {
+                Marshal.Copy(bytes, 0, unmanagedPointer, bytes.Length);
+                TriggerCallbackWithData("boot-event", unmanagedPointer, (UIntPtr)bytes.Length);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(unmanagedPointer);
+            }
+        }
+
+        /// Formats type/Message/StackTrace/InnerException recursively - per
+        /// instruction, the original exception must never be swallowed, only
+        /// reported alongside whatever the caller does with it (rethrow,
+        /// etc.). Sent through the same "boot-event" channel with a
+        /// "FAIL|stage|reason" payload so Swift's listener can tell a real
+        /// failure apart from a plain stage log.
+        public static void ReportBootFailure(string stage, Exception ex)
+        {
+            var sb = new StringBuilder();
+            Exception current = ex;
+            bool first = true;
+            while (current != null)
+            {
+                if (!first)
+                {
+                    sb.Append("\nInnerException: ");
+                }
+                sb.Append(current.GetType().FullName).Append(": ").Append(current.Message);
+                sb.Append('\n').Append(current.StackTrace);
+                current = current.InnerException;
+                first = false;
+            }
+            string reason = sb.ToString();
+
+            Console.WriteLine($"[BOOT] FAILURE at {stage}:\n{reason}");
+
+            string payload = $"FAIL|{stage}|{reason}";
+            byte[] bytes = Encoding.UTF8.GetBytes(payload);
+            IntPtr unmanagedPointer = Marshal.AllocHGlobal(bytes.Length);
+            try
+            {
+                Marshal.Copy(bytes, 0, unmanagedPointer, bytes.Length);
+                TriggerCallbackWithData("boot-event", unmanagedPointer, (UIntPtr)bytes.Length);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(unmanagedPointer);
+            }
+        }
+
+        private static bool _unhandledExceptionHandlersInstalled = false;
+
+        /// Per instruction: catch everything that could otherwise die
+        /// silently on a thread/task this process never observes directly.
+        /// Installed once, idempotently, as early as possible.
+        private static void InstallUnhandledExceptionHandlers()
+        {
+            if (_unhandledExceptionHandlersInstalled)
+            {
+                return;
+            }
+            _unhandledExceptionHandlersInstalled = true;
+
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+            {
+                ReportBootFailure("AppDomain.UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString() ?? "unknown unhandled exception object"));
+            };
+
+            TaskScheduler.UnobservedTaskException += (sender, e) =>
+            {
+                ReportBootFailure("TaskScheduler.UnobservedTaskException", e.Exception);
+                e.SetObserved();
+            };
+        }
+
         [UnmanagedCallersOnly(EntryPoint = "main_ryujinx_sdl")]
         public static unsafe int MainExternal(int argCount, IntPtr* pArgs)
         {
+            // Explicit, unambiguous test for whether ANY C# output reaches
+            // Swift at all - both the deterministic bridge and plain
+            // stdout/stderr, before anything else managed code could do
+            // might fail or hang. If "BOOT-TEST managed code reached" is
+            // missing from the next real report, main_ryujinx_sdl itself
+            // was never actually called despite ryujinx.start() returning.
+            ReportBootEvent("BOOT-TEST managed code reached");
+            Console.WriteLine("[BOOT-TEST] MANAGED CODE REACHED (stdout)");
+            Console.Error.WriteLine("[BOOT-TEST] MANAGED CODE REACHED (stderr)");
+
+            InstallUnhandledExceptionHandlers();
+
             string[] args = new string[argCount];
 
             try
             {
+                ReportBootEvent("managed entry reached");
                 for (int i = 0; i < argCount; i++)
                 {
                     args[i] = Marshal.PtrToStringAnsi(pArgs[i]);
 
                     Console.WriteLine(args[i]);
                 }
+                ReportBootEvent("args received", $"{argCount} args");
 
                 Main(args);
             }
             catch (Exception e)
             {
+                ReportBootFailure("main_ryujinx_sdl", e);
                 Console.WriteLine(e.ToString());
                 return -1;
             }
@@ -480,6 +587,7 @@ namespace Ryujinx.Headless.SDL2
         public static unsafe void Initialize()
         {
             AppDataManager.Initialize(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+            ReportBootEvent("app data initialized");
 
             if (_virtualFileSystem == null)
             {
@@ -515,6 +623,8 @@ namespace Ryujinx.Headless.SDL2
 
         static void Main(string[] args)
         {
+            ReportBootEvent("Program.Main entered");
+
             // Make process DPI aware for proper window sizing on high-res screens.
             ForceDpiAware.Windows();
 
@@ -1433,6 +1543,19 @@ namespace Ryujinx.Headless.SDL2
 
         static void Load(Options option)
         {
+            try
+            {
+                LoadInner(option);
+            }
+            catch (Exception ex)
+            {
+                ReportBootFailure("Program.Load", ex);
+                throw;
+            }
+        }
+
+        static void LoadInner(Options option)
+        {
             _libHacHorizonManager = new LibHacHorizonManager();
             _libHacHorizonManager.InitializeFsServer(_virtualFileSystem);
             _libHacHorizonManager.InitializeArpServer();
@@ -1604,6 +1727,7 @@ namespace Ryujinx.Headless.SDL2
 
             DriverUtilities.InitDriverConfig(option.BackendThreading == BackendThreading.Off);
             _virtualFileSystem.ReloadKeySet();
+            ReportBootEvent("configuration initialized");
             while (true)
             {
                 LoadApplication(option);
@@ -1789,12 +1913,28 @@ namespace Ryujinx.Headless.SDL2
 
             DisplaySleep.Prevent();
 
-            Console.WriteLine("[BOOT] window initialize begin");
-            _window.Initialize(_emulationContext, _inputConfiguration, _enableKeyboard, _enableMouse);
-            Console.WriteLine("[BOOT] window initialized");
+            ReportBootEvent("window initialize begin");
+            try
+            {
+                _window.Initialize(_emulationContext, _inputConfiguration, _enableKeyboard, _enableMouse);
+            }
+            catch (Exception ex)
+            {
+                ReportBootFailure("ExecutionEntrypoint.window initialize", ex);
+                throw;
+            }
+            ReportBootEvent("window initialized");
 
-            Console.WriteLine("[BOOT] window execute begin");
-            _window.Execute();
+            ReportBootEvent("window execute begin");
+            try
+            {
+                _window.Execute();
+            }
+            catch (Exception ex)
+            {
+                ReportBootFailure("ExecutionEntrypoint.window execute", ex);
+                throw;
+            }
 
             _emulationContext.Dispose();
             _window.Dispose();
@@ -1812,7 +1952,10 @@ namespace Ryujinx.Headless.SDL2
 
             Logger.RestartTime();
 
-            Console.WriteLine("[BOOT] GPU initialization begin");
+            ReportBootEvent("renderer selection begin");
+            ReportBootEvent("renderer = " + (OperatingSystem.IsIOS() ? "MoltenVK (Vulkan)" : options.GraphicsBackend.ToString()));
+
+            ReportBootEvent("GPU initialization begin");
             WindowBase window = CreateWindow(options);
 
             if (window is MoltenVKWindow mvulkanWindow) {
@@ -1820,7 +1963,7 @@ namespace Ryujinx.Headless.SDL2
             }
 
             IRenderer renderer = CreateRenderer(options, window);
-            Console.WriteLine("[BOOT] renderer created");
+            ReportBootEvent("renderer created");
 
             _window = window;
 
@@ -1835,12 +1978,12 @@ namespace Ryujinx.Headless.SDL2
             renderer.Window?.SetColorSpacePassthrough(true);
 
 
-            Console.WriteLine("[BOOT] HLE initialization begin");
+            ReportBootEvent("HLE initialization begin");
             _emulationContext = InitializeEmulationContext(window, renderer, options);
-            Console.WriteLine("[BOOT] HLE initialized");
+            ReportBootEvent("HLE initialized");
 
             SystemVersion firmwareVersion = _contentManager.GetCurrentFirmwareVersion();
-            Console.WriteLine("[BOOT] firmware initialized");
+            ReportBootEvent("firmware initialized");
 
             Logger.Notice.Print(LogClass.Application, $"Using Firmware Version: {firmwareVersion?.VersionString}");
 
@@ -1855,115 +1998,141 @@ namespace Ryujinx.Headless.SDL2
 
 
 
-            if (Directory.Exists(path))
+            ReportBootEvent("game load begin");
+
+            try
             {
-                string[] romFsFiles = Directory.GetFiles(path, "*.istorage");
-
-                if (romFsFiles.Length == 0)
+                if (Directory.Exists(path))
                 {
-                    romFsFiles = Directory.GetFiles(path, "*.romfs");
-                }
+                    string[] romFsFiles = Directory.GetFiles(path, "*.istorage");
 
-                if (romFsFiles.Length > 0)
-                {
-                    Logger.Info?.Print(LogClass.Application, "Loading as cart with RomFS.");
-
-                    if (!_emulationContext.LoadCart(path, romFsFiles[0]))
+                    if (romFsFiles.Length == 0)
                     {
-                        _emulationContext.Dispose();
+                        romFsFiles = Directory.GetFiles(path, "*.romfs");
+                    }
 
-                        return false;
+                    if (romFsFiles.Length > 0)
+                    {
+                        Logger.Info?.Print(LogClass.Application, "Loading as cart with RomFS.");
+
+                        if (!_emulationContext.LoadCart(path, romFsFiles[0]))
+                        {
+                            _emulationContext.Dispose();
+
+                            ReportBootEvent("game load failed", "LoadCart (with RomFS) returned false");
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        Logger.Info?.Print(LogClass.Application, "Loading as cart WITHOUT RomFS.");
+
+                        if (!_emulationContext.LoadCart(path))
+                        {
+                            _emulationContext.Dispose();
+
+                            ReportBootEvent("game load failed", "LoadCart returned false");
+                            return false;
+                        }
                     }
                 }
-                else
+                else if (File.Exists(path))
                 {
-                    Logger.Info?.Print(LogClass.Application, "Loading as cart WITHOUT RomFS.");
-
-                    if (!_emulationContext.LoadCart(path))
+                    switch (Path.GetExtension(path).ToLowerInvariant())
                     {
-                        _emulationContext.Dispose();
+                        case ".xci":
+                            Logger.Info?.Print(LogClass.Application, "Loading as XCI.");
 
-                        return false;
-                    }
-                }
-            }
-            else if (File.Exists(path))
-            {
-                switch (Path.GetExtension(path).ToLowerInvariant())
-                {
-                    case ".xci":
-                        Logger.Info?.Print(LogClass.Application, "Loading as XCI.");
+                            if (!_emulationContext.LoadXci(path))
+                            {
+                                _emulationContext.Dispose();
 
-                        if (!_emulationContext.LoadXci(path))
-                        {
-                            _emulationContext.Dispose();
-
-                            return false;
-                        }
-                        break;
-                    case ".nca":
-                        Logger.Info?.Print(LogClass.Application, "Loading as NCA.");
-
-                        if (!_emulationContext.LoadNca(path))
-                        {
-                            _emulationContext.Dispose();
-
-                            return false;
-                        }
-                        break;
-                    case ".nsp":
-                    case ".pfs0":
-                        Logger.Info?.Print(LogClass.Application, "Loading as NSP.");
-
-                        if (!_emulationContext.LoadNsp(path))
-                        {
-                            _emulationContext.Dispose();
-
-                            return false;
-                        }
-                        break;
-                    default:
-                        if (isFirmwareTitle) {
-                            Logger.Info?.Print(LogClass.Application, "Loading as Firmware Title (NCA).");
+                                ReportBootEvent("game load failed", "LoadXci returned false");
+                                return false;
+                            }
+                            break;
+                        case ".nca":
+                            Logger.Info?.Print(LogClass.Application, "Loading as NCA.");
 
                             if (!_emulationContext.LoadNca(path))
                             {
                                 _emulationContext.Dispose();
 
+                                ReportBootEvent("game load failed", "LoadNca returned false");
                                 return false;
                             }
-                        }
-                        else {
-                            Logger.Info?.Print(LogClass.Application, "Loading as Homebrew.");
-                            try
+                            break;
+                        case ".nsp":
+                        case ".pfs0":
+                            Logger.Info?.Print(LogClass.Application, "Loading as NSP.");
+
+                            if (!_emulationContext.LoadNsp(path))
                             {
-                                if (!_emulationContext.LoadProgram(path))
+                                _emulationContext.Dispose();
+
+                                ReportBootEvent("game load failed", "LoadNsp returned false");
+                                return false;
+                            }
+                            break;
+                        default:
+                            if (isFirmwareTitle) {
+                                Logger.Info?.Print(LogClass.Application, "Loading as Firmware Title (NCA).");
+
+                                if (!_emulationContext.LoadNca(path))
                                 {
                                     _emulationContext.Dispose();
 
+                                    ReportBootEvent("game load failed", "LoadNca (firmware title) returned false");
                                     return false;
                                 }
                             }
-                            catch (ArgumentOutOfRangeException)
-                            {
-                                Logger.Error?.Print(LogClass.Application, "The specified file is not supported by Ryujinx.");
+                            else {
+                                Logger.Info?.Print(LogClass.Application, "Loading as Homebrew.");
+                                try
+                                {
+                                    if (!_emulationContext.LoadProgram(path))
+                                    {
+                                        _emulationContext.Dispose();
 
-                                _emulationContext.Dispose();
+                                        ReportBootEvent("game load failed", "LoadProgram returned false");
+                                        return false;
+                                    }
+                                }
+                                catch (ArgumentOutOfRangeException)
+                                {
+                                    Logger.Error?.Print(LogClass.Application, "The specified file is not supported by Ryujinx.");
 
-                                return false;
+                                    _emulationContext.Dispose();
+
+                                    ReportBootEvent("game load failed", "LoadProgram threw ArgumentOutOfRangeException - file not supported");
+                                    return false;
+                                }
                             }
-                        }
-                        break;
+                            break;
+                    }
+                }
+                else
+                {
+                    Logger.Warning?.Print(LogClass.Application, $"Couldn't load '{options.InputPath}'. Please specify a valid XCI/NCA/NSP/PFS0/NRO file.");
+
+                    _emulationContext.Dispose();
+
+                    ReportBootEvent("game load failed", $"'{options.InputPath}' is not a valid XCI/NCA/NSP/PFS0/NRO file or directory");
+                    return false;
                 }
             }
-            else
+            catch (Exception ex)
             {
-                Logger.Warning?.Print(LogClass.Application, $"Couldn't load '{options.InputPath}'. Please specify a valid XCI/NCA/NSP/PFS0/NRO file.");
-
-                _emulationContext.Dispose();
-
-                return false;
+                // Per instruction: never swallow the original exception -
+                // report it, then rethrow unchanged. This is an outer net
+                // around the dispatch above; the existing, more specific
+                // ArgumentOutOfRangeException catch for LoadProgram is left
+                // exactly as it was.
+                ReportBootFailure("Program.LoadApplication", ex);
+                throw;
             }
+
+            ReportBootEvent("game load succeeded");
 
             // All Load*() branches above either `return false` on failure or
             // fall through here on success - reaching this point means the
@@ -1971,9 +2140,9 @@ namespace Ryujinx.Headless.SDL2
             // created/scheduled the guest's main thread as part of that load
             // call. There is no separate, later "start the guest" call in
             // this file to instrument instead.
-            Console.WriteLine("[BOOT] game file opened");
-            Console.WriteLine("[BOOT] executable loaded");
-            Console.WriteLine("[BOOT] guest execution begin");
+            ReportBootEvent("game file opened");
+            ReportBootEvent("executable loaded");
+            ReportBootEvent("guest execution begin");
 
             SetupProgressHandler();
             ExecutionEntrypoint();

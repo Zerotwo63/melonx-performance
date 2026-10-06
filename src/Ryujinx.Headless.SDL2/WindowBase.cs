@@ -284,11 +284,21 @@ namespace Ryujinx.Headless.SDL2
 
         public void Render()
         {
+            Program.ReportBootEvent("render loop entered");
+
             InitializeWindowRenderer();
 
-            Console.WriteLine("[BOOT] GPU renderer initialize begin");
-            Device.Gpu.Renderer.Initialize(_glLogLevel);
-            Console.WriteLine("[BOOT] GPU renderer initialized");
+            Program.ReportBootEvent("GPU renderer initialize begin");
+            try
+            {
+                Device.Gpu.Renderer.Initialize(_glLogLevel);
+            }
+            catch (Exception ex)
+            {
+                Program.ReportBootFailure("WindowBase.Render GPU renderer initialize", ex);
+                throw;
+            }
+            Program.ReportBootEvent("GPU renderer initialized");
 
             InitializeRenderer();
 
@@ -328,7 +338,7 @@ namespace Ryujinx.Headless.SDL2
                         if (firstSubmit)
                         {
                             firstSubmit = false;
-                            Console.WriteLine("[BOOT] first GPU command submitted");
+                            Program.ReportBootEvent("first GPU command submitted");
                         }
                     }
 
@@ -336,16 +346,16 @@ namespace Ryujinx.Headless.SDL2
                     {
                         if (firstFrame)
                         {
-                            Console.WriteLine("[BOOT] first present requested");
+                            Program.ReportBootEvent("first present requested");
                         }
 
                         Device.PresentFrame(SwapBuffers);
 
                         if (firstFrame)
                         {
-                            Console.WriteLine("[BOOT] first present completed");
+                            Program.ReportBootEvent("first present completed");
                             firstFrame = false;
-                            Console.WriteLine("[BOOT] emitting ran-first-frame");
+                            Program.ReportBootEvent("emitting ran-first-frame");
                             Program.TriggerCallback("ran-first-frame");
                         }
                     }
@@ -493,8 +503,10 @@ namespace Ryujinx.Headless.SDL2
                 Name = "GUI.RenderLoop",
             };
             renderLoopThread.Start();
+            Program.ReportBootEvent("GPU thread started", "GUI.RenderLoop");
 
             MainLoop();
+            Program.ReportBootEvent("MainLoop returned");
 
             // NOTE: The render loop is allowed to stay alive until the renderer itself is disposed, as it may handle resource dispose.
             // We only need to wait for all commands submitted during the main gpu loop to be processed.

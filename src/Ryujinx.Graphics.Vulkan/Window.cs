@@ -86,7 +86,17 @@ namespace Ryujinx.Graphics.Vulkan
 
         private unsafe void CreateSwapchain()
         {
+            // Window.cs cannot reference Ryujinx.Headless.SDL2.Program
+            // (reverse project dependency), so plain Console.WriteLine is
+            // used here, same as the rest of this investigation's
+            // Ryujinx.Graphics.Vulkan-side instrumentation. capabilities/
+            // formats/present-modes were ALREADY queried by this existing
+            // code before this edit - only the logging of their already-
+            // computed values is new, no new Vulkan calls were added.
+            Console.WriteLine("[BOOT] swapchain creation begin");
+
             _gd.SurfaceApi.GetPhysicalDeviceSurfaceCapabilities(_physicalDevice, _surface, out var capabilities);
+            Console.WriteLine($"[BOOT] surface capabilities: minImageCount={capabilities.MinImageCount}, maxImageCount={capabilities.MaxImageCount}, currentExtent={capabilities.CurrentExtent.Width}x{capabilities.CurrentExtent.Height}");
 
             uint surfaceFormatsCount;
 
@@ -98,6 +108,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _gd.SurfaceApi.GetPhysicalDeviceSurfaceFormats(_physicalDevice, _surface, &surfaceFormatsCount, pSurfaceFormats);
             }
+            Console.WriteLine($"[BOOT] surface formats count = {surfaceFormatsCount}");
 
             uint presentModesCount;
 
@@ -109,6 +120,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _gd.SurfaceApi.GetPhysicalDeviceSurfacePresentModes(_physicalDevice, _surface, &presentModesCount, pPresentModes);
             }
+            Console.WriteLine($"[BOOT] surface present modes count = {presentModesCount}");
 
             uint imageCount = capabilities.MinImageCount + 1;
             if (capabilities.MaxImageCount > 0 && imageCount > capabilities.MaxImageCount)
@@ -119,6 +131,8 @@ namespace Ryujinx.Graphics.Vulkan
             var surfaceFormat = ChooseSwapSurfaceFormat(surfaceFormats, _colorSpacePassthroughEnabled);
 
             var extent = ChooseSwapExtent(capabilities);
+
+            Console.WriteLine($"[BOOT] swapchain chosen format={surfaceFormat.Format}, colorSpace={surfaceFormat.ColorSpace}, extent={extent.Width}x{extent.Height}, imageCount={imageCount}");
 
             _width = (int)extent.Width;
             _height = (int)extent.Height;
@@ -160,8 +174,14 @@ namespace Ryujinx.Graphics.Vulkan
                 SwizzleComponent.Blue,
                 SwizzleComponent.Alpha);
 
-            _gd.SwapchainApi.CreateSwapchain(_device, in swapchainCreateInfo, null, out _swapchain).ThrowOnError();
-            Console.WriteLine("[BOOT] swapchain created");
+            Result swapchainResult = _gd.SwapchainApi.CreateSwapchain(_device, in swapchainCreateInfo, null, out _swapchain);
+            Console.WriteLine($"[BOOT] vkCreateSwapchainKHR = {swapchainResult}");
+            if (swapchainResult != Result.Success)
+            {
+                Console.WriteLine($"[BOOT] swapchain creation failed: {swapchainResult}");
+            }
+            swapchainResult.ThrowOnError();
+            Console.WriteLine("[BOOT] swapchain creation success");
 
             _gd.SwapchainApi.GetSwapchainImages(_device, _swapchain, &imageCount, null);
 
