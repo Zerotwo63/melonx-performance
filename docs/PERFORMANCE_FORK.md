@@ -604,6 +604,120 @@ prioridad es real (no inventada). No puede confirmar que
 `/attach/<pid>` devuelva `success: true` — eso requiere el túnel
 LocalDevVPN real y hardware físico.
 
+## Bug 1 — onboarding no avanzaba con keys/firmware en verde
+
+**Causa raíz, verificada por lectura de `SetupView.swift` y `MeloNXApp.swift`
+(no asumida):** `isInSetup`/`inSetup` (`@AppStorage("hasbeenfinished")`) solo se
+pone en `false` en dos sitios: el botón "Finish Setup" (que se *habilita*
+cuando `firmImported && keysImported`, pero nadie lo pulsa automáticamente)
+y el gesto oculto de doble-tap en "Welcome to MeloNX" que abre el diálogo de
+Skip. `keysImported`/`firmImported` sí se actualizaban correctamente al
+importar cada archivo — el checkmark verde es real — pero **ningún
+`.onChange` ni comprobación re-evaluaba esa condición para avanzar la
+pantalla por sí sola**. El usuario no estaba viendo un bug de `@State` que no
+notifica (SwiftUI sí propagaba los cambios correctamente); estaba viendo que
+la única acción que consulta `keysImported && firmImported` es un botón que
+requiere un tap manual, y que la UI nunca lo comunicaba como "pendiente de tu
+confirmación" — de ahí que recurriera al atajo de Skip vía "Welcome".
+
+**Archivo y función responsables:** `SetupView.swift` — faltaba cualquier
+observador sobre `keysImported`/`firmImported` que reevaluara el avance;
+`MeloNXApp.swift` no tiene este problema, solo lee `inSetup` para decidir
+qué vista mostrar.
+
+**Corrección:** nueva `OnboardingGate` (`App/UI/Setup/OnboardingGate.swift`),
+un `struct` puro con `requirementsSatisfied`/`currentStep`/`blockedReason` —
+testeable sin SwiftUI. `SetupView` ahora llama `reevaluateOnboardingState()`
+desde `.onChange(of: keysImported)`, `.onChange(of: firmImported)`, y al
+final de `.onAppear` (cubre reabrir la pantalla/la app con ambos ya
+instalados, donde no hay ningún cambio que dispare un `onChange`). Cuando
+`OnboardingGate.requirementsSatisfied == true`, pone `isInSetup = false`
+directamente — sin esperar un tap. El botón "Finish Setup" se deja como
+alternativa manual, ya redundante en el camino feliz.
+
+**Logs reales añadidos** (`[SETUP] keys import started/completed`, `keys
+valid`, `firmware import started/completed`, `firmware valid`,
+`reevaluating onboarding state`, `current onboarding step`, `requirements
+satisfied`, `advancing to JIT`, `advance blocked reason`) — exactamente los
+pedidos.
+
+**Qué sigue sin poder verificarse aquí**: que el `.onChange`/`.onAppear` de
+SwiftUI realmente disparen en producción solo se prueba por inspección de
+código y porque CI confirma que compila — una vista SwiftUI en ejecución
+real (reabrir pantalla, reabrir app) requiere un dispositivo o UI tests
+(`MeloNXUITests`, fuera de alcance aquí). Lo que SÍ es 100% verificable sin
+dispositivo es que `OnboardingGate` decide correctamente para cualquier
+combinación de `keysValid`/`firmwareValid` — eso es lo que cubren los tests.
+
+## Bug 2 — `Waiting for JIT` nunca resuelve con Built-in StikJIT
+
+**Causa raíz #1 (estructural, confirmada por lectura de código):**
+`MeloNXBuiltInJIT.enableCurrentProcess()` llamaba `.enable` directamente y
+retornaba sin esperar nada — `Void`, no `async`. El resultado real de la
+extensión (`MeloNXJITHelper.appex`) nunca llegaba a ningún sitio salvo un
+`print` de depuración. `LaunchGameHandler.enableJIT()` no tenía forma de
+saber si el intento interno había funcionado.
+
+**Causa raíz #2 (más grave, también confirmada por lectura de código):**
+`enableCurrentProcess()` **nunca llamaba a `.prepare`** — la operación que
+obtiene/cachea el Developer Disk Image que `StikJIT.enableJIT()` necesita
+para adjuntar un debugger. StikDebug (la app externa) hace ese "prepare" en
+su propio onboarding, por eso funciona para quien la tiene instalada; el
+camino Built-in, en esta instalación limpia sin StikDebug nunca instalado,
+iba directo a `.enable` sin DDI cacheado — casi garantizado a fallar
+silenciosamente dentro de la extensión.
+
+**Causa raíz #3 (por qué "se queda indefinidamente", no solo "falla"):**
+`JITPopover.onAppear` llamaba `JITCoordinator.shared.waitForJIT(...)` **sin
+`maxAttempts`** → usa el default `0` = sondeo sin límite. `JITCoordinator`
+nunca podía alcanzar `.timedOut` por diseño, y aunque lo alcanzara, el
+`completion` de `JITPopover` solo reaccionaba a `success == true` — el caso
+de fallo no tenía ninguna UI. Resultado: aunque todo lo demás fallara
+rápido, la pantalla se quedaría exactamente como la describió el usuario,
+indefinidamente, sin ningún mensaje.
+
+**Archivos y funciones responsables:** `MeloNXBuiltInJIT.enableCurrentProcess()`
+(causas #1 y #2), `JITPopover.swift` `.onAppear` (causa #3).
+
+**Qué hace realmente `enableCurrentProcess()` (antes de este fix):**
+únicamente: (a) lee el pairing file importado, (b) arma una request JSON,
+(c) inicia una `NSExtension` request hacia `MeloNXJITHelper.appex` vía una
+API privada, y (d) retorna inmediatamente. No esperaba respuesta, no
+verificaba nada, no podía saber si JIT realmente se concedió.
+
+**Corrección aplicada:**
+- `enableCurrentProcess()` ahora es `async -> Bool`: llama `.prepare`
+  primero y solo continúa a `.enable` si `.prepare` reporta éxito real;
+  devuelve el resultado real de `.enable`, con un `[JIT] failed reason =
+  ...` específico en cada punto de fallo posible.
+- `LaunchGameHandler.enableJIT()` ahora `await`s ese resultado y hace una
+  verificación inmediata adicional con `isJITEnabled()` (`[JIT] verification
+  started/result`) — información honesta, sin tocar `.acquired` (que sigue
+  siendo exclusivo de `JITCoordinator`, basado en su propio sondeo real).
+- `JITPopover` ahora limita el sondeo a 60 intentos × 0.5s (30s) y muestra
+  una alerta real con Retry/Cancel cuando `success == false` — ya no hay
+  ningún camino que termine en spinner infinito sin información.
+
+**¿El JIT integrado realmente funciona sin StikDebug instalado?** Con lo
+verificable desde código: **ahora puede intentarlo de forma honesta
+(prepare → enable → verificación real), pero no puedo confirmar que tenga
+éxito en el hardware real del usuario**, porque dependen de dos cosas que
+solo se pueden comprobar en un dispositivo:
+1. Que la API privada de `NSExtension` (el mismo truco de LiveContainer
+   para iniciar una extensión registrada con `NSExtensionActivationRule =
+   FALSEPREDICATE`) realmente arranque `MeloNXJITHelper.appex` en la
+   versión de iOS/firma de este dispositivo.
+2. Que `StikJIT.prepareDevice`/`enableJIT` (framework externo precompilado,
+   `StikJIT.xcframework`) puedan obtener un Developer Disk Image — lo que
+   probablemente requiere acceso a internet a los servicios de Apple la
+   primera vez, algo completamente ajeno al túnel LocalDevVPN usado por
+   `JITStreamerEB`.
+
+Si cualquiera de los dos falla, el usuario ahora verá `[JIT] failed reason
+= ...` específico y una alerta real en vez de un spinner infinito — pero
+**no se simula éxito en ningún punto**: `.acquired` sigue dependiendo
+exclusivamente de que `isJITEnabled()` sea `true` de verdad.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -621,3 +735,4 @@ LocalDevVPN real y hardware físico.
 | `feat(jit): wire Built-in StikJIT into the JIT method picker` | `f721bba88` | `LaunchGameHandler.swift`, `SettingsView.swift`, `BuiltInStikJIT/MeloNXBuiltInJIT.swift` (+`enableCurrentProcess()`) | Tercera rama en la cadena `if/else if` real de `enableJIT()` (no un enum nuevo); tercer `SettingsToggle`, deshabilitado con motivo real vía `BuiltInStikJITAvailability.unavailableReason()`. **Primer intento de CI falló** — ver fila siguiente |
 | `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
 | `feat(jit): activate JitStreamerEB as the internal JIT path, StikDebug as fallback-only` | `89f6c1a3a` | `JitStreamerEB/EnableJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift` (logs), `MeloNXTests/JITFlowTests.swift` (nuevo) | Causa real (ver sección arriba): el archivo cliente de `jkcoxson/JitStreamer-EB` existía con cero llamadores; StikDebug no era "requisito" por falta de mecanismo interno, sino porque el mecanismo interno nunca se conectó. `JITStreamerEB.attach()` migrado a `async`/`await` y conectado como primer intento, incondicional, en `enableJIT()`; TrollStore/StikDebug/Built-in StikJIT quedan como fallback explícito solo si `attach()` falla. `JITCoordinator` no necesitó cambios de lógica, solo los `print("[JIT] ...")` pedidos. **CI (run 37378791033) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID verificado sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`). De los 6 logs pedidos, 3 (`activation requested`/`internal method selected`/`fallback selected`, todos >15 bytes) se confirmaron presentes en el binario por búsqueda directa de bytes; los otros 3 (`waiting`/`acquired`/`timed out`, los tres ≤15 bytes) no aparecieron así — consistente con la small-string optimization de Swift (strings ≤15 UTF-8 bytes se guardan inline, no como constante de texto clásica), no con que el código se haya eliminado: están en el `HEAD` compilado real, verificados por lectura de fuente, pero esa presencia específica solo se confirma en línea viendo el log de consola en un dispositivo real |
+| `fix(onboarding+jit): auto-advance setup and make Built-in StikJIT actually verifiable` | *(pendiente de build)* | `OnboardingGate.swift` (nuevo), `SetupView.swift`, `MeloNXBuiltInJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift`, `JITPopover.swift`, `MeloNXTests/OnboardingGateTests.swift` (nuevo), `MeloNXTests/JITFlowTests.swift` | Bug 1 y Bug 2 reportados tras prueba real en dispositivo (ver secciones arriba). Bug 1: nada reevaluaba `keysImported && firmImported` para avanzar — solo un botón manual o el atajo de Skip; se agrega `OnboardingGate` + reevaluación reactiva (`.onChange` + `.onAppear`) que avanza sola. Bug 2: `enableCurrentProcess()` no esperaba ningún resultado y nunca llamaba `.prepare` (sin DDI cacheado, `.enable` no tiene nada con qué trabajar); además `JITPopover` sondeaba sin límite y sin reacción al fallo, por lo que "stuck forever" estaba garantizado por diseño incluso si todo lo demás fallara rápido. Se corrigen los tres puntos; no se simula `.acquired` en ningún punto |

@@ -98,28 +98,57 @@ enum MeloNXBuiltInJIT {
     }
 
     /// LaunchGameHandler.enableJIT()'s Built-in StikJIT branch calls this
-    /// directly, mirroring askForJIT()/enableJITStik(): read the imported
-    /// pairing file, fire the request, and return — JITCoordinator's
-    /// existing isJITEnabled() poll (already driving JITPopover and
-    /// checkJITAndRunGame) picks up the result the same way it does for
-    /// the other two JIT methods, since a successful
-    /// StikJIT.enableJIT() leaves CS_DEBUGGED set on this process, which
-    /// is exactly what isJITEnabled() already checks for.
-    static func enableCurrentProcess() {
+    /// and awaits a real result — a successful StikJIT.enableJIT() leaves
+    /// CS_DEBUGGED set on this process, which JITCoordinator's isJITEnabled()
+    /// poll (already driving JITPopover and checkJITAndRunGame) observes
+    /// independently. This function's return value does NOT set `.acquired`
+    /// itself — it only reports whether the helper's own attempt succeeded,
+    /// so callers can log a real reason instead of guessing.
+    ///
+    /// Root cause of "never completes" (verified by reading this file, not
+    /// assumed): the old version fired `.enable` directly and returned
+    /// immediately, never calling `.prepare` first. `.prepare` is the
+    /// operation that gets StikJIT a usable Developer Disk Image — on a
+    /// fresh install with no cached DDI (StikDebug was never installed to
+    /// prime one), `.enable` alone has nothing to work with. `.prepare` now
+    /// runs first and must report `success` before `.enable` is attempted.
+    static func enableCurrentProcess() async -> Bool {
+        print("[JIT] enableCurrentProcess called")
+
         guard let pairingData = try? Data(contentsOf: BuiltInStikJITAvailability.pairingFileURL) else {
-            print("[jit-helper] Built-in StikJIT: couldn't read the imported pairing file.")
-            return
+            print("[JIT] failed reason = could not read the imported pairing file")
+            return false
         }
 
-        let request = MeloNXJITHelperRequest(
-            operation: .enable,
-            targetPID: Int32(getpid()),
-            pairingData: pairingData
-        )
+        let prepareRequest = MeloNXJITHelperRequest(operation: .prepare, targetPID: nil, pairingData: pairingData)
+        switch await sendAsync(prepareRequest) {
+        case .success(let response) where response.success:
+            break
+        case .success(let response):
+            print("[JIT] failed reason = prepare failed: \(response.message)")
+            return false
+        case .failure(let error):
+            print("[JIT] failed reason = prepare request failed: \(error.localizedDescription)")
+            return false
+        }
 
-        send(request) { result in
-            if case .failure(let error) = result {
-                print("[jit-helper] Built-in StikJIT failed: \(error.localizedDescription)")
+        let enableRequest = MeloNXJITHelperRequest(operation: .enable, targetPID: Int32(getpid()), pairingData: pairingData)
+        switch await sendAsync(enableRequest) {
+        case .success(let response):
+            if !response.success {
+                print("[JIT] failed reason = \(response.message)")
+            }
+            return response.success
+        case .failure(let error):
+            print("[JIT] failed reason = \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private static func sendAsync(_ request: MeloNXJITHelperRequest) async -> Result<MeloNXJITHelperRequest.Response, Error> {
+        await withCheckedContinuation { continuation in
+            send(request) { result in
+                continuation.resume(returning: result)
             }
         }
     }

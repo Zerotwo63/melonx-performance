@@ -103,4 +103,96 @@ struct JITFlowTests {
 
         #expect(joinerResult == false)
     }
+
+    /// Bug 2 fix verification: JITPopover used to call waitForJIT with no
+    /// cap at all (maxAttempts: 0, the default), so JITCoordinator could
+    /// never reach .timedOut on its own — "stuck on Waiting for JIT
+    /// forever" was not a flaky timeout, it was structurally guaranteed.
+    /// This pins the exact state sequence a capped wait produces when
+    /// isJITEnabled() never returns true, which is the real-world case
+    /// whenever the underlying JIT mechanism silently fails.
+    @Test func timeoutPathReachesTimedOutNotStuckForever() async throws {
+        JITCoordinator.shared.cancel()
+
+        var observedStates: [JITCoordinator.ReadinessState] = []
+        var result: Bool?
+
+        _ = JITCoordinator.shared.waitForJIT(maxAttempts: 2, interval: 0.05) { success in
+            observedStates.append(JITCoordinator.shared.state)
+            result = success
+        }
+
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        #expect(result == false)
+        #expect(JITCoordinator.shared.state == .timedOut)
+        #expect(!JITCoordinator.shared.isPolling)
+    }
+
+    /// A caller retrying after a timeout (e.g. the popover's own Retry
+    /// button) must get a brand new, independent poll — not find the
+    /// coordinator wedged in .timedOut from the previous attempt.
+    @Test func retryAfterTimeoutStartsAFreshPoll() async throws {
+        JITCoordinator.shared.cancel()
+
+        var firstResult: Bool?
+        _ = JITCoordinator.shared.waitForJIT(maxAttempts: 1, interval: 0.05) { success in
+            firstResult = success
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(firstResult == false)
+        #expect(JITCoordinator.shared.state == .timedOut)
+
+        var secondResult: Bool?
+        let startedSecond = JITCoordinator.shared.waitForJIT(maxAttempts: 1, interval: 0.05) { success in
+            secondResult = success
+        }
+        #expect(startedSecond)
+        #expect(JITCoordinator.shared.isPolling)
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(secondResult == false)
+    }
+
+    /// Cancelling with no other caller joined must stop polling
+    /// immediately and never fire the completion at all — distinct from
+    /// cancelDoesNotStrandAJoinedCaller, which covers the opposite case.
+    @Test func cancelWithNoJoinerStopsPollingAndNeverResolves() async throws {
+        JITCoordinator.shared.cancel()
+
+        var fired = false
+        _ = JITCoordinator.shared.waitForJIT(maxAttempts: 0, interval: 0.05) { _ in
+            fired = true
+        }
+        #expect(JITCoordinator.shared.isPolling)
+
+        JITCoordinator.shared.cancel()
+        #expect(!JITCoordinator.shared.isPolling)
+        #expect(JITCoordinator.shared.state == .idle)
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!fired)
+    }
+
+    /// Pure wire-format check for the Built-in StikJIT helper protocol —
+    /// MeloNXBuiltInJIT.enableCurrentProcess() depends on this round-trip
+    /// being exact, since MeloNXJITHelper (a separate extension target)
+    /// keeps its own duplicate of this struct that must match byte-for-byte.
+    @Test func helperRequestResponseRoundTrips() throws {
+        let request = MeloNXJITHelperRequest(operation: .prepare, targetPID: 1234, pairingData: Data([0x01, 0x02]))
+        let encoded = try JSONEncoder().encode(request)
+        let decoded = try JSONDecoder().decode(MeloNXJITHelperRequest.self, from: encoded)
+
+        #expect(decoded.operation == .prepare)
+        #expect(decoded.targetPID == 1234)
+        #expect(decoded.pairingData == Data([0x01, 0x02]))
+
+        let response = MeloNXJITHelperRequest.Response(success: false, message: "no DDI cached", txmPresent: true)
+        let encodedResponse = try JSONEncoder().encode(response)
+        let decodedResponse = try JSONDecoder().decode(MeloNXJITHelperRequest.Response.self, from: encodedResponse)
+
+        #expect(!decodedResponse.success)
+        #expect(decodedResponse.message == "no DDI cached")
+        #expect(decodedResponse.txmPresent == true)
+    }
 }

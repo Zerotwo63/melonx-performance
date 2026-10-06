@@ -82,6 +82,8 @@ class LaunchGameHandler: ObservableObject {
     func enableJIT() {
         ryujinx.checkForJIT()
         print("[JIT] activation requested")
+        print("[JIT] request started")
+        print("[JIT] current state = \(JITCoordinator.shared.state)")
         print("Has TXM? \(ProcessInfo.processInfo.hasTXM)")
 
         guard !ryujinx.jitenabled else { return }
@@ -105,9 +107,22 @@ class LaunchGameHandler: ObservableObject {
                 // Requiring the user to discover and toggle it first made the
                 // "no third app" path effectively unreachable.
                 self.nativeSettings.builtInStikJIT.value = true
-                MeloNXBuiltInJIT.enableCurrentProcess()
+                print("[JIT] built-in JIT enabled setting = true")
+                print("[JIT] built-in activation started")
+
+                let builtInAcquired = await MeloNXBuiltInJIT.enableCurrentProcess()
+                print("[JIT] enableCurrentProcess returned = \(builtInAcquired)")
+
+                print("[JIT] verification started")
+                let verified = isJITEnabled()
+                print("[JIT] verification result = \(verified)")
+
+                if !verified {
+                    print("[JIT] failed reason = built-in activation did not grant JIT on this process")
+                }
             } else {
                 print("[JIT] no fallback available")
+                print("[JIT] built-in JIT enabled setting = false")
 
                 if self.currentGame != nil {
                     let reason: String

@@ -87,14 +87,43 @@ struct SetupView: View {
             RyujinxBridge.initialize()
             isInSetup = true
             keysImported = Ryujinx.shared.checkIfKeysImported()
-            
+
             let firmware = Ryujinx.shared.fetchFirmwareVersion()
             firmImported = (firmware == "" ? "0" : firmware) != "0"
 
+            // Covers reopening this screen or relaunching the app with both
+            // already imported from a previous session — finishSetupIfReady()
+            // must run here too, not just from the import callbacks, since
+            // nothing "changes" in that case to otherwise trigger it.
             finishSetupIfReady()
         }
     }
-    
+
+    // Bug 1 fix: keysImported/firmImported were tracked correctly, but
+    // nothing ever re-evaluated them to advance the screen on its own — the
+    // only way forward was the "Finish Setup" button (enabled, never
+    // auto-tapped) or the hidden double-tap-"Welcome"-to-Skip gesture. This
+    // runs after every import and on reappear, and advances by itself once
+    // both are actually valid.
+    private func finishSetupIfReady() {
+        print("[SETUP] reevaluating onboarding state")
+        let gate = OnboardingGate(keysValid: keysImported, firmwareValid: firmImported)
+        print("[SETUP] current onboarding step = \(gate.currentStep)")
+        print("[SETUP] requirements satisfied = \(gate.requirementsSatisfied)")
+
+        guard gate.requirementsSatisfied else {
+            print("[SETUP] advance blocked reason = \(gate.blockedReason ?? "unknown")")
+            return
+        }
+
+        print("[SETUP] advancing to JIT")
+        skippedSetup = false
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            isInSetup = false
+        }
+    }
+
     @ViewBuilder
     private func iPadSetupView() -> some View {
         GeometryReader { geometry in
@@ -397,19 +426,22 @@ struct SetupView: View {
     }
     
     private func handleKeysImport(result: Result<[URL], Error>) {
+        print("[SETUP] keys import started")
         do {
             let selectedFiles = try result.get()
-            
+
             guard selectedFiles.count == 2 else {
                 alertMessage = "Please select exactly 2 key files"
                 showAlert = true
+                print("[SETUP] keys import completed")
+                print("[SETUP] keys valid = false")
                 return
             }
 
             let fileManager = FileManager.default
             let systemDirectory = URL.documentsDirectory.appendingPathComponent("system")
             try fileManager.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
-            
+
             for fileURL in selectedFiles {
                 // A document picker URL can already be directly readable (for
                 // example when the picker gives us a copied/local URL). In that
@@ -426,34 +458,41 @@ struct SetupView: View {
                 let data = try Data(contentsOf: fileURL)
                 try data.write(to: destinationURL, options: .atomic)
             }
-            
+
             keysImported = Ryujinx.shared.checkIfKeysImported()
+            print("[SETUP] keys import completed")
+            print("[SETUP] keys valid = \(keysImported)")
+
             guard keysImported else {
                 alertMessage = "Keys were copied, but prod.keys was not found. Select the correct key files and try again."
                 showAlert = true
                 return
             }
 
-            if firmImported {
-                finishSetupIfReady()
-            } else {
-                alertMessage = "Keys imported successfully. Next, install the firmware. JIT is a separate requirement and is not enabled by Switch keys."
-                showAlert = true
-            }
-            
+            alertMessage = firmImported
+                ? "Keys imported successfully"
+                : "Keys imported successfully. Next, install the firmware. JIT is a separate requirement and is not enabled by Switch keys."
+            showAlert = true
+            finishSetupIfReady()
+
         } catch {
+            print("[SETUP] keys import completed")
+            print("[SETUP] keys valid = false")
             alertMessage = "Error importing keys: \(error.localizedDescription)"
             showAlert = true
         }
     }
-    
+
     private func handleFirmwareImport(result: Result<[URL], Error>) {
+        print("[SETUP] firmware import started")
         do {
             let selectedFiles = try result.get()
-            
+
             guard let fileURL = selectedFiles.first else {
                 alertMessage = "No file selected"
                 showAlert = true
+                print("[SETUP] firmware import completed")
+                print("[SETUP] firmware valid = false")
                 return
             }
 
@@ -465,10 +504,12 @@ struct SetupView: View {
                     fileURL.stopAccessingSecurityScopedResource()
                 }
             }
-            
+
             let (string, isErr) = RyujinxBridge.installFirmware(at: fileURL.path)
-            
+
             if isErr {
+                print("[SETUP] firmware import completed")
+                print("[SETUP] firmware valid = false")
                 alertMessage = string.isEmpty ? "Firmware installation failed" : string
                 showAlert = true
                 return
@@ -476,29 +517,20 @@ struct SetupView: View {
 
             Ryujinx.shared.firmwareversion = string
             firmImported = (string.isEmpty ? "0" : string) != "0"
+            print("[SETUP] firmware import completed")
+            print("[SETUP] firmware valid = \(firmImported)")
 
-            if firmImported {
-                finishSetupIfReady()
-            } else {
-                alertMessage = "Firmware installation finished, but MeloNX could not detect an installed firmware version."
-                showAlert = true
-            }
-            
+            alertMessage = firmImported
+                ? "Firmware installed successfully"
+                : "Firmware installation finished, but MeloNX could not detect an installed firmware version."
+            showAlert = true
+            finishSetupIfReady()
+
         } catch {
+            print("[SETUP] firmware import completed")
+            print("[SETUP] firmware valid = false")
             alertMessage = "Error importing firmware: \(error.localizedDescription)"
             showAlert = true
-        }
-    }
-    
-    private func finishSetupIfReady() {
-        guard keysImported && firmImported else { return }
-
-        // Persist completion immediately and leave the setup screen without
-        // requiring a second tap on Welcome/Finish Setup.
-        skippedSetup = false
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            isInSetup = false
         }
     }
     

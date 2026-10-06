@@ -79,6 +79,7 @@ final class JITCoordinator: ObservableObject {
             }
 
             attempt += 1
+            print("[JIT] waiting attempt = \(attempt)")
 
             if isJITEnabled() {
                 self.stopPolling()
@@ -92,6 +93,7 @@ final class JITCoordinator: ObservableObject {
                 self.stopPolling()
                 self.state = .timedOut
                 print("[JIT] timed out")
+                print("[JIT] timeout")
                 self.resolve(false, primary: completion)
                 return
             }

@@ -11,9 +11,10 @@ struct JITPopover: View {
     var onJITEnabled: () -> Void
     @Environment(\.presentationMode) var presentationMode
     @EnvironmentObject var gameHandler: LaunchGameHandler
-    
+
     @State private var isJIT: Bool = false
     @State private var pulseAnimation: Bool = false
+    @State private var showFailedAlert: Bool = false
     
     var body: some View {
         VStack(spacing: 20) {
@@ -84,23 +85,50 @@ struct JITPopover: View {
                 .fill(Color(.systemBackground))
                 .shadow(color: Color.black.opacity(0.1), radius: 20, x: 0, y: 10)
         )
+        .alert("JIT Not Acquired", isPresented: $showFailedAlert) {
+            Button("Retry") {
+                showFailedAlert = false
+                JITCoordinator.shared.cancel()
+                startWaiting()
+            }
+            Button("Cancel", role: .cancel) {
+                presentationMode.wrappedValue.dismiss()
+            }
+        } message: {
+            Text("MeloNX could not acquire JIT with the methods currently enabled in Settings.")
+        }
         .onAppear {
             pulseAnimation = true
-
-            JITCoordinator.shared.waitForJIT(trigger: { gameHandler.enableJIT() }) { success in
-                isJIT = success
-
-                if success {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        presentationMode.wrappedValue.dismiss()
-                    }
-                    onJITEnabled()
-                    Ryujinx.shared.checkForJIT()
-                }
-            }
+            startWaiting()
         }
         .onDisappear {
             JITCoordinator.shared.cancel()
+        }
+    }
+
+    // Was previously an uncapped poll (maxAttempts: 0, JITCoordinator's
+    // default) with no reaction to failure at all — this screen could
+    // only ever dismiss itself on success, so a real activation failure
+    // left it spinning on "Waiting for JIT" forever with no feedback.
+    // Capping it lets JITCoordinator actually reach `.timedOut`, and the
+    // failure branch here surfaces that instead of hiding it.
+    private func startWaiting() {
+        JITCoordinator.shared.waitForJIT(
+            trigger: { gameHandler.enableJIT() },
+            maxAttempts: 60,
+            interval: 0.5
+        ) { success in
+            isJIT = success
+
+            if success {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    presentationMode.wrappedValue.dismiss()
+                }
+                onJITEnabled()
+                Ryujinx.shared.checkForJIT()
+            } else {
+                showFailedAlert = true
+            }
         }
     }
 }
