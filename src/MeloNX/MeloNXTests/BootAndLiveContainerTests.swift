@@ -460,4 +460,159 @@ struct BootAndLiveContainerTests {
 
         #expect(BootDiagnostics.shared.renderLoopIterations == 3)
     }
+
+    // MARK: - Guest CPU / NvServices / GPU-FIFO producer trace (diagnóstico real #5)
+    //
+    // These tests only cover the diagnostic plumbing (event parsing and
+    // field classification) - they never fabricate real GPU/guest work,
+    // never set firstFrame artificially, and never touch the watchdog
+    // timeout itself. The goal of this round is to find the real blockage,
+    // not to make a boot "look" successful.
+
+    @Test func guestMainThreadFieldsTrackKProcessAndKThreadEvents() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("KProcess.Start: main thread created")
+        BootDiagnostics.shared.log("KProcess.Start: main thread Start result", result: "Success")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.guestMainThreadCreated)
+        #expect(BootDiagnostics.shared.guestMainThreadStarted)
+        #expect(!BootDiagnostics.shared.guestMainThreadAlive)
+
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.guestMainThreadAlive)
+        #expect(BootDiagnostics.shared.guestThreadCount == 1)
+        #expect(BootDiagnostics.shared.guestExecutionHeartbeats == 1)
+        #expect(BootDiagnostics.shared.lastGuestStage == "KThread.ThreadStart: guest Context.Execute begin")
+    }
+
+    /// A "Start result" that is NOT "Success" must not be reported as
+    /// started - the field name promises a real kernel-level outcome, not
+    /// just "the event fired".
+    @Test func guestMainThreadStartedIsFalseOnNonSuccessResult() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("KProcess.Start: main thread Start result", result: "InvalidState")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!BootDiagnostics.shared.guestMainThreadStarted)
+    }
+
+    @Test func fifoProducerFieldsTrackSubmitGpfifoAndQueueCounters() async throws {
+        BootDiagnostics.shared.beginBoot()
+        #expect(!BootDiagnostics.shared.fifoProducerAlive)
+
+        BootDiagnostics.shared.log("SubmitGpfifo ioctl received", result: "count=3")
+        BootDiagnostics.shared.log("GPU-FIFO total queued", result: "7")
+        BootDiagnostics.shared.log("GPU-FIFO total consumed", result: "5")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.fifoProducerAlive)
+        #expect(BootDiagnostics.shared.gpfifoSubmissions == 3)
+        #expect(BootDiagnostics.shared.fifoCommandsQueued == 7)
+        #expect(BootDiagnostics.shared.fifoCommandsConsumed == 5)
+    }
+
+    @Test func fifoWaitForCommandsParsesAllThreeCounters() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("GPU-FIFO WaitForCommands", result: "result=False,waitCalls=2400,waitTrue=0,waitFalse=2400")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.fifoWaitCalls == 2400)
+        #expect(BootDiagnostics.shared.fifoWaitTrue == 0)
+        #expect(BootDiagnostics.shared.fifoWaitFalse == 2400)
+    }
+
+    @Test func gpuContextAndChannelCreationFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("GpuContext created")
+        BootDiagnostics.shared.log("GPU channel created", result: "2")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.gpuContextCreated)
+        #expect(BootDiagnostics.shared.gpuChannelsCreated == 2)
+    }
+
+    /// Each layer (guest, GPU producer, Nv, translator) keeps its own
+    /// "last stage" independently - one layer's event must not clobber
+    /// another's, or the watchdog would misattribute where things stalled.
+    @Test func lastStagePerLayerStaysIndependent() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+        BootDiagnostics.shared.log("NvHostChannelDeviceFile created")
+        BootDiagnostics.shared.log("GPU-FIFO total queued", result: "1")
+        BootDiagnostics.shared.log("ARMeilleure.Translator.Execute entered", result: "threadCount=1")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.lastGuestStage == "KThread.ThreadStart: guest Context.Execute begin")
+        #expect(BootDiagnostics.shared.lastNvStage == "NvHostChannelDeviceFile created")
+        #expect(BootDiagnostics.shared.lastGpuProducerStage == "GPU-FIFO total queued")
+        #expect(BootDiagnostics.shared.lastTranslatorStage == "ARMeilleure.Translator.Execute entered")
+    }
+
+    @Test func gpuThreadAliveTracksMainThreadLambdaEnteredOnly() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("render loop entered")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.renderThreadAlive)
+        #expect(!BootDiagnostics.shared.gpuThreadAlive)
+
+        BootDiagnostics.shared.log("GPU.MainThread lambda entered")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.gpuThreadAlive)
+    }
+
+    @Test func beginBootResetsGuestAndFifoProducerFields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("KProcess.Start: main thread created")
+        BootDiagnostics.shared.log("SubmitGpfifo ioctl received", result: "count=1")
+        BootDiagnostics.shared.log("GPU channel created", result: "1")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.guestMainThreadCreated)
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(!BootDiagnostics.shared.guestMainThreadCreated)
+        #expect(!BootDiagnostics.shared.guestMainThreadStarted)
+        #expect(!BootDiagnostics.shared.guestMainThreadAlive)
+        #expect(BootDiagnostics.shared.guestThreadCount == 0)
+        #expect(BootDiagnostics.shared.guestExecutionHeartbeats == 0)
+        #expect(BootDiagnostics.shared.translatedFunctionsCreated == 0)
+        #expect(BootDiagnostics.shared.translatedFunctionsExecuted == 0)
+        #expect(BootDiagnostics.shared.lastGuestStage == nil)
+        #expect(!BootDiagnostics.shared.gpuContextCreated)
+        #expect(BootDiagnostics.shared.gpuChannelsCreated == 0)
+        #expect(BootDiagnostics.shared.gpfifoSubmissions == 0)
+        #expect(BootDiagnostics.shared.fifoCommandsQueued == 0)
+        #expect(BootDiagnostics.shared.fifoCommandsConsumed == 0)
+        #expect(BootDiagnostics.shared.fifoWaitCalls == 0)
+        #expect(BootDiagnostics.shared.fifoWaitTrue == 0)
+        #expect(BootDiagnostics.shared.fifoWaitFalse == 0)
+        #expect(BootDiagnostics.shared.lastGpuProducerStage == nil)
+        #expect(BootDiagnostics.shared.lastNvStage == nil)
+        #expect(BootDiagnostics.shared.lastTranslatorStage == nil)
+        #expect(!BootDiagnostics.shared.gpuThreadAlive)
+        #expect(!BootDiagnostics.shared.fifoProducerAlive)
+    }
+
+    @Test func buildReportIncludesNewGuestAndGpuProducerFields() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("GUEST:"))
+        #expect(report.contains("guestMainThreadCreated ="))
+        #expect(report.contains("GPU PRODUCER:"))
+        #expect(report.contains("gpfifoSubmissions ="))
+        #expect(report.contains("THREAD SNAPSHOT:"))
+        #expect(report.contains("fifoProducerAlive ="))
+    }
 }

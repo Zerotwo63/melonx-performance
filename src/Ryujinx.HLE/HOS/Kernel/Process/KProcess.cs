@@ -667,6 +667,8 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
                     return result;
                 }
 
+                BootEventBridge.Report("KProcess.Start: main thread created");
+
                 result = HandleTable.GenerateHandle(mainThread, out int mainThreadHandle);
 
                 if (result != Result.Success)
@@ -686,6 +688,8 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
                 SetState(newState);
 
                 result = mainThread.Start();
+
+                BootEventBridge.Report("KProcess.Start: main thread Start result", result.ToString());
 
                 if (result != Result.Success)
                 {

@@ -10,6 +10,11 @@ using ARMeilleure.State;
 using ARMeilleure.Translation.Cache;
 using ARMeilleure.Translation.PTC;
 using Ryujinx.Common;
+// ARMeilleure's .csproj already has a ProjectReference to Ryujinx.Common (see
+// ARMeilleure.csproj), so BootEventBridge.Report can be used directly here
+// (unlike Ryujinx.Graphics.Vulkan/Window.cs, which predates this bridge being
+// wired up to this project and used a plain Console.WriteLine fallback).
+using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -57,6 +62,10 @@ namespace ARMeilleure.Translation
         private Thread[] _backgroundTranslationThreads;
         private volatile int _threadCount;
 
+        // Additive diagnostics one-time markers only - do not affect behavior.
+        private int _firstFunctionCompiledLogged;
+        private int _firstFunctionExecutedLogged;
+
         public Translator(IJitMemoryAllocator allocator, IMemoryManager memory, bool for64Bits)
         {
             _allocator = allocator;
@@ -95,7 +104,11 @@ namespace ARMeilleure.Translation
 
         public void Execute(State.ExecutionContext context, ulong address)
         {
-            if (Interlocked.Increment(ref _threadCount) == 1)
+            int threadCount = Interlocked.Increment(ref _threadCount);
+
+            BootEventBridge.Report("ARMeilleure.Translator.Execute entered", $"threadCount={threadCount}");
+
+            if (threadCount == 1)
             {
                 if (_ptc.State == PtcState.Enabled)
                 {
@@ -211,9 +224,19 @@ namespace ARMeilleure.Translation
 
         internal TranslatedFunction GetOrTranslate(ulong address, ExecutionMode mode)
         {
+            if (Interlocked.CompareExchange(ref _firstFunctionExecutedLogged, 1, 0) == 0)
+            {
+                BootEventBridge.Report("ARMeilleure first function executed");
+            }
+
             if (!Functions.TryGetValue(address, out TranslatedFunction func))
             {
                 func = Translate(address, mode, highCq: false);
+
+                if (Interlocked.CompareExchange(ref _firstFunctionCompiledLogged, 1, 0) == 0)
+                {
+                    BootEventBridge.Report("ARMeilleure first function compiled");
+                }
 
                 TranslatedFunction oldFunc = Functions.GetOrAdd(address, func.GuestSize, func);
 

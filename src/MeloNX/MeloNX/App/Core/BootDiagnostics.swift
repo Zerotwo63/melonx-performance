@@ -78,8 +78,44 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var lastRenderLoopStage: String?
     @Published private(set) var lastRenderActivityTimestamp: Date?
 
+    // Diagnóstico real #5: guest CPU -> Horizon -> NvServices -> GPU FIFO
+    // producer -> ThreadedRenderer consumer. swapchain/acquire/submit are
+    // already confirmed working and the render loop is alive and iterating
+    // (WaitFifo just keeps returning false) - this section exists to answer
+    // "why does the guest never produce any GPU FIFO work", not to re-trace
+    // anything on the renderer/Vulkan side.
+    @Published private(set) var guestMainThreadCreated = false
+    @Published private(set) var guestMainThreadStarted = false
+    @Published private(set) var guestMainThreadAlive = false
+    @Published private(set) var guestThreadCount = 0
+    @Published private(set) var guestExecutionHeartbeats = 0
+    @Published private(set) var translatedFunctionsCreated = 0
+    @Published private(set) var translatedFunctionsExecuted = 0
+    @Published private(set) var lastGuestStage: String?
+
+    @Published private(set) var gpuContextCreated = false
+    @Published private(set) var gpuChannelsCreated = 0
+    @Published private(set) var gpfifoSubmissions = 0
+    @Published private(set) var fifoCommandsQueued = 0
+    @Published private(set) var fifoCommandsConsumed = 0
+    @Published private(set) var fifoWaitCalls = 0
+    @Published private(set) var fifoWaitTrue = 0
+    @Published private(set) var fifoWaitFalse = 0
+    @Published private(set) var lastGpuProducerStage: String?
+    @Published private(set) var lastNvStage: String?
+    @Published private(set) var lastTranslatorStage: String?
+
+    // Thread-snapshot panel (PASO 7): these three are "has this producer
+    // shown ANY sign of life", same honest semantics as managedThreadAlive/
+    // renderThreadAlive above - NOT a live OS thread-liveness poll.
+    @Published private(set) var gpuThreadAlive = false
+    @Published private(set) var fifoProducerAlive = false
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
+    private var snapshotTask: Task<Void, Never>?
+    private var snapshot10sTaken = false
+    private var snapshot20sTaken = false
     private let lock = NSLock()
 
     private init() {
@@ -147,7 +183,32 @@ final class BootDiagnostics: ObservableObject {
             self.renderLoopIterations = 0
             self.lastRenderLoopStage = nil
             self.lastRenderActivityTimestamp = nil
+            self.guestMainThreadCreated = false
+            self.guestMainThreadStarted = false
+            self.guestMainThreadAlive = false
+            self.guestThreadCount = 0
+            self.guestExecutionHeartbeats = 0
+            self.translatedFunctionsCreated = 0
+            self.translatedFunctionsExecuted = 0
+            self.lastGuestStage = nil
+            self.gpuContextCreated = false
+            self.gpuChannelsCreated = 0
+            self.gpfifoSubmissions = 0
+            self.fifoCommandsQueued = 0
+            self.fifoCommandsConsumed = 0
+            self.fifoWaitCalls = 0
+            self.fifoWaitTrue = 0
+            self.fifoWaitFalse = 0
+            self.lastGpuProducerStage = nil
+            self.lastNvStage = nil
+            self.lastTranslatorStage = nil
+            self.gpuThreadAlive = false
+            self.fifoProducerAlive = false
+            self.snapshot10sTaken = false
+            self.snapshot20sTaken = false
         }
+
+        scheduleThreadSnapshots()
     }
 
     @discardableResult
@@ -171,6 +232,41 @@ final class BootDiagnostics: ObservableObject {
         persistLastStep(message)
 
         return record
+    }
+
+    /// PASO 7: a logical snapshot of which producers/consumers have shown
+    /// any sign of life and their last known stage, taken at fixed points
+    /// in the boot timeline (~10s and ~20s) so the next device trace shows
+    /// the exact progression over time, not just the final state when the
+    /// watchdog gives up. Cancelled/restarted by every beginBoot().
+    private func scheduleThreadSnapshots() {
+        snapshotTask?.cancel()
+        snapshotTask = Task {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.captureSnapshot(label: "10s") }
+
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.captureSnapshot(label: "20s") }
+        }
+    }
+
+    private func captureSnapshot(label: String) {
+        if label == "10s" {
+            if snapshot10sTaken { return }
+            snapshot10sTaken = true
+        } else if label == "20s" {
+            if snapshot20sTaken { return }
+            snapshot20sTaken = true
+        }
+
+        let summary = "managedThreadAlive=\(managedThreadAlive),renderThreadAlive=\(renderThreadAlive)," +
+            "guestMainThreadAlive=\(guestMainThreadAlive),gpuThreadAlive=\(gpuThreadAlive),fifoProducerAlive=\(fifoProducerAlive)," +
+            "lastGuestStage=\(lastGuestStage ?? "none"),lastGpuProducerStage=\(lastGpuProducerStage ?? "none")," +
+            "lastNvStage=\(lastNvStage ?? "none"),lastTranslatorStage=\(lastTranslatorStage ?? "none")"
+
+        log("boot snapshot @\(label)", result: summary)
     }
 
     func fail(stage: String, reason: String) {
@@ -273,6 +369,59 @@ final class BootDiagnostics: ObservableObject {
             } else {
                 log("anomaly: ran-first-frame fired with no observed successful queuePresent", result: "lastPresentResult=\(lastPresentResult ?? "none")")
             }
+
+        // Diagnóstico real #5: guest CPU/Horizon -> NvServices -> GPU FIFO
+        // producer. None of these ever being set after a real device run
+        // IS the answer this round is looking for - they are deliberately
+        // left at their honest zero/false defaults otherwise, never guessed.
+        case "KProcess.Start: main thread created":
+            guestMainThreadCreated = true
+        case "KProcess.Start: main thread Start result":
+            guestMainThreadStarted = (result == "Success")
+        case "KThread.ThreadStart: guest Context.Execute begin":
+            guestMainThreadAlive = true
+            guestExecutionHeartbeats += 1
+            if let result, let s = Self.extractField(result, "threadCount"), let n = Int(s) {
+                guestThreadCount = max(guestThreadCount, n)
+            }
+        case "KThread.ThreadStart: guest Context.Execute returned":
+            // A guest thread returning during boot (before any real
+            // GPU work was ever produced) is anomalous enough to call out
+            // explicitly rather than let it blend into the STAGES list.
+            log("anomaly: guest Context.Execute returned", result: result)
+        case "ARMeilleure.Translator.Execute entered":
+            if let result, let s = Self.extractField(result, "threadCount"), let n = Int(s) {
+                guestThreadCount = max(guestThreadCount, n)
+            }
+        case "ARMeilleure first function compiled":
+            translatedFunctionsCreated = max(translatedFunctionsCreated, 1)
+        case "ARMeilleure first function executed":
+            translatedFunctionsExecuted = max(translatedFunctionsExecuted, 1)
+        case "GpuContext created":
+            gpuContextCreated = true
+        case "GPU channel created":
+            if let result, let n = Int(result) {
+                gpuChannelsCreated = n
+            }
+        case "SubmitGpfifo ioctl received":
+            fifoProducerAlive = true
+            if let result, let s = Self.extractField(result, "count"), let n = Int(s) {
+                gpfifoSubmissions = n
+            }
+        case "GPU-FIFO total queued":
+            if let result, let n = Int(result) {
+                fifoCommandsQueued = n
+            }
+        case "GPU-FIFO total consumed":
+            if let result, let n = Int(result) {
+                fifoCommandsConsumed = n
+            }
+        case "GPU-FIFO WaitForCommands":
+            if let result {
+                if let s = Self.extractField(result, "waitCalls"), let n = Int(s) { fifoWaitCalls = n }
+                if let s = Self.extractField(result, "waitTrue"), let n = Int(s) { fifoWaitTrue = n }
+                if let s = Self.extractField(result, "waitFalse"), let n = Int(s) { fifoWaitFalse = n }
+            }
         default:
             break
         }
@@ -297,6 +446,15 @@ final class BootDiagnostics: ObservableObject {
         if stage == "GPU thread started" || stage.contains("render loop entered") {
             renderThreadAlive = true
             renderLoopEntered = true
+        }
+
+        // gpuThreadAlive is deliberately more specific than renderThreadAlive
+        // above: it only fires once the GPU.MainThread lambda itself (the
+        // thread ThreadedRenderer.RunLoop spawns to run WindowBase.Render()'s
+        // while loop) is confirmed entered - not just the GUI.RenderLoop
+        // thread that calls RunLoop() in the first place.
+        if stage == "GPU.MainThread lambda entered" {
+            gpuThreadAlive = true
         }
 
         if stage.contains("surface creation success") {
@@ -337,6 +495,44 @@ final class BootDiagnostics: ObservableObject {
         if renderProgressStages.contains(stage) || stageLooksRenderer(stage) {
             lastRenderLoopStage = stage
             lastRenderActivityTimestamp = Date()
+        }
+
+        // Diagnóstico real #5 classification - deliberately separate Sets
+        // per layer (guest/kernel, GPU-FIFO producer, NvServices, ARMeilleure
+        // translator) even though some events could arguably fit more than
+        // one, so "where did we last see activity" stays unambiguous per
+        // layer instead of one event clobbering another layer's last stage.
+        let guestStages: Set<String> = [
+            "KProcess.Start: main thread created", "KProcess.Start: main thread Start result",
+            "KThread.ThreadStart: guest Context.Execute begin", "KThread.ThreadStart: guest Context.Execute returned",
+        ]
+        if guestStages.contains(stage) {
+            lastGuestStage = stage
+        }
+
+        let gpuProducerStages: Set<String> = [
+            "GpuContext created", "GPU channel created",
+            "GPU-FIFO enqueue begin", "GPU-FIFO command type", "GPU-FIFO enqueue success", "GPU-FIFO total queued",
+            "GPU-FIFO total consumed", "GPU-FIFO WaitForCommands", "GpuChannel.PushEntries called",
+        ]
+        if gpuProducerStages.contains(stage) {
+            lastGpuProducerStage = stage
+        }
+
+        let nvStages: Set<String> = [
+            "NvHostChannelDeviceFile created", "SubmitGpfifo ioctl received",
+            "before Channel.PushEntries", "after GPFifo.SignalNewEntries",
+        ]
+        if nvStages.contains(stage) {
+            lastNvStage = stage
+        }
+
+        let translatorStages: Set<String> = [
+            "ARMeilleure.Translator.Execute entered", "ARMeilleure first function compiled",
+            "ARMeilleure first function executed",
+        ]
+        if translatorStages.contains(stage) {
+            lastTranslatorStage = stage
         }
     }
 
@@ -442,6 +638,41 @@ final class BootDiagnostics: ObservableObject {
         lines.append("renderLoopIterations = \(renderLoopIterations)")
         lines.append("lastRenderLoopStage = \(lastRenderLoopStage ?? "none")")
         lines.append("secondsSinceLastRenderProgress = \(secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a")")
+        lines.append("")
+        lines.append("GUEST:")
+        lines.append("guestMainThreadCreated = \(guestMainThreadCreated)")
+        lines.append("guestMainThreadStarted = \(guestMainThreadStarted)")
+        lines.append("guestMainThreadAlive = \(guestMainThreadAlive)")
+        lines.append("guestThreadCount = \(guestThreadCount)")
+        lines.append("guestExecutionHeartbeats = \(guestExecutionHeartbeats)")
+        lines.append("translatedFunctionsCreated = \(translatedFunctionsCreated)")
+        lines.append("translatedFunctionsExecuted = \(translatedFunctionsExecuted)")
+        lines.append("lastGuestStage = \(lastGuestStage ?? "none")")
+        lines.append("")
+        lines.append("GPU PRODUCER:")
+        lines.append("gpuContextCreated = \(gpuContextCreated)")
+        lines.append("gpuChannelsCreated = \(gpuChannelsCreated)")
+        lines.append("gpfifoSubmissions = \(gpfifoSubmissions)")
+        lines.append("fifoCommandsQueued = \(fifoCommandsQueued)")
+        lines.append("fifoCommandsConsumed = \(fifoCommandsConsumed)")
+        lines.append("fifoWaitCalls = \(fifoWaitCalls)")
+        lines.append("fifoWaitTrue = \(fifoWaitTrue)")
+        lines.append("fifoWaitFalse = \(fifoWaitFalse)")
+        lines.append("lastGpuProducerStage = \(lastGpuProducerStage ?? "none")")
+        lines.append("lastNvStage = \(lastNvStage ?? "none")")
+        lines.append("lastTranslatorStage = \(lastTranslatorStage ?? "none")")
+        lines.append("")
+        lines.append("RENDERER:")
+        lines.append("renderLoopIterations = \(renderLoopIterations)")
+        lines.append("acquireAttemptCount = \(acquireAttemptCount)")
+        lines.append("firstAcquireSucceeded = \(firstAcquireSucceeded)")
+        lines.append("lastAcquireResult = \(lastAcquireResult ?? "none")")
+        lines.append("lastSubmitResult = \(lastSubmitResult ?? "none")")
+        lines.append("lastPresentResult = \(lastPresentResult ?? "none")")
+        lines.append("")
+        lines.append("THREAD SNAPSHOT:")
+        lines.append("gpuThreadAlive = \(gpuThreadAlive)")
+        lines.append("fifoProducerAlive = \(fifoProducerAlive)")
         lines.append("")
         lines.append("failureStage = \(failureStage ?? "none")")
         lines.append("failureReason = \(failureReason ?? "none")")

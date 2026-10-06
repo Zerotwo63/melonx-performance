@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Gpu.Memory;
 using System;
 using System.Collections.Concurrent;
@@ -94,6 +95,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         private bool _interrupt;
         private int _flushSkips;
 
+        // Additive diagnostics counters only - do not affect behavior.
+        private int _totalQueued;
+        private int _totalConsumed;
+        private int _waitCalls;
+        private int _waitTrue;
+        private int _waitFalse;
+
         /// <summary>
         /// Creates a new instance of the GPU General Purpose FIFO device.
         /// </summary>
@@ -122,14 +130,26 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <param name="commandBuffer">The command buffer containing the prefetched commands</param>
         internal void PushHostCommandBuffer(GPFifoProcessor processor, int[] commandBuffer)
         {
-            _commandBufferQueue.Enqueue(new CommandBuffer
+            CommandBuffer entry = new CommandBuffer
             {
                 Processor = processor,
                 Type = CommandBufferType.Prefetch,
                 Words = commandBuffer,
                 EntryAddress = ulong.MaxValue,
                 EntryCount = (uint)commandBuffer.Length,
-            });
+            };
+
+            int totalQueued = Interlocked.Increment(ref _totalQueued);
+
+            if (totalQueued <= 10 || totalQueued % 300 == 0)
+            {
+                BootEventBridge.Report("GPU-FIFO enqueue begin");
+                BootEventBridge.Report("GPU-FIFO command type", entry.Type.ToString());
+                BootEventBridge.Report("GPU-FIFO enqueue success");
+                BootEventBridge.Report("GPU-FIFO total queued", totalQueued.ToString());
+            }
+
+            _commandBufferQueue.Enqueue(entry);
         }
 
         /// <summary>
@@ -185,6 +205,16 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
                 }
 
                 _commandBufferQueue.Enqueue(commandBuffer);
+
+                int totalQueued = Interlocked.Increment(ref _totalQueued);
+
+                if (totalQueued <= 10 || totalQueued % 300 == 0)
+                {
+                    BootEventBridge.Report("GPU-FIFO enqueue begin");
+                    BootEventBridge.Report("GPU-FIFO command type", commandBuffer.Type.ToString());
+                    BootEventBridge.Report("GPU-FIFO enqueue success");
+                    BootEventBridge.Report("GPU-FIFO total queued", totalQueued.ToString());
+                }
             }
         }
 
@@ -194,7 +224,25 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <returns>True if commands were received, false if wait timed out</returns>
         public bool WaitForCommands()
         {
-            return !_commandBufferQueue.IsEmpty || (_event.WaitOne(8) && !_commandBufferQueue.IsEmpty);
+            bool result = !_commandBufferQueue.IsEmpty || (_event.WaitOne(8) && !_commandBufferQueue.IsEmpty);
+
+            int waitCalls = Interlocked.Increment(ref _waitCalls);
+
+            if (result)
+            {
+                Interlocked.Increment(ref _waitTrue);
+            }
+            else
+            {
+                Interlocked.Increment(ref _waitFalse);
+            }
+
+            if (waitCalls <= 10 || waitCalls % 300 == 0)
+            {
+                BootEventBridge.Report("GPU-FIFO WaitForCommands", $"result={result},waitCalls={waitCalls},waitTrue={_waitTrue},waitFalse={_waitFalse}");
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -208,6 +256,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             // Process command buffers.
             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
             {
+                int totalConsumed = Interlocked.Increment(ref _totalConsumed);
+
+                if (totalConsumed <= 10 || totalConsumed % 300 == 0)
+                {
+                    BootEventBridge.Report("GPU-FIFO total consumed", totalConsumed.ToString());
+                }
+
                 bool flushCommandBuffer = true;
 
                 if (_flushSkips != 0)

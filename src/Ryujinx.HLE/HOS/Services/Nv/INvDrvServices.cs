@@ -256,7 +256,17 @@ namespace Ryujinx.HLE.HOS.Services.Nv
 
                     if (errorCode == NvResult.Success)
                     {
-                        NvInternalResult internalResult = deviceFile.Ioctl(ioctlCommand, arguments);
+                        NvInternalResult internalResult;
+
+                        try
+                        {
+                            internalResult = deviceFile.Ioctl(ioctlCommand, arguments);
+                        }
+                        catch (Exception ex)
+                        {
+                            BootEventBridge.ReportFail("NvServices ioctl dispatch", ex);
+                            throw;
+                        }
 
                         if (internalResult == NvInternalResult.NotImplemented)
                         {

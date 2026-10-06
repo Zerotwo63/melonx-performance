@@ -67,6 +67,39 @@ struct BootWatchdogView: View {
                 row("Seconds since render progress", diagnostics.secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a")
             }
 
+            Text("GUEST").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("Guest main thread created", "\(diagnostics.guestMainThreadCreated)")
+                row("Guest main thread started", "\(diagnostics.guestMainThreadStarted)")
+                row("Guest main thread alive", "\(diagnostics.guestMainThreadAlive)")
+                row("Guest thread count", "\(diagnostics.guestThreadCount)")
+                row("Guest execution heartbeats", "\(diagnostics.guestExecutionHeartbeats)")
+                row("Translated functions created", "\(diagnostics.translatedFunctionsCreated)")
+                row("Translated functions executed", "\(diagnostics.translatedFunctionsExecuted)")
+                row("Last guest stage", diagnostics.lastGuestStage ?? "none")
+            }
+
+            Text("GPU PRODUCER").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("GPU context created", "\(diagnostics.gpuContextCreated)")
+                row("GPU channels created", "\(diagnostics.gpuChannelsCreated)")
+                row("gpfifo submissions", "\(diagnostics.gpfifoSubmissions)")
+                row("FIFO commands queued", "\(diagnostics.fifoCommandsQueued)")
+                row("FIFO commands consumed", "\(diagnostics.fifoCommandsConsumed)")
+                row("FIFO wait calls", "\(diagnostics.fifoWaitCalls)")
+                row("FIFO wait true", "\(diagnostics.fifoWaitTrue)")
+                row("FIFO wait false", "\(diagnostics.fifoWaitFalse)")
+                row("Last GPU producer stage", diagnostics.lastGpuProducerStage ?? "none")
+                row("Last Nv stage", diagnostics.lastNvStage ?? "none")
+                row("Last translator stage", diagnostics.lastTranslatorStage ?? "none")
+            }
+
+            Text("THREAD SNAPSHOT").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("GPU thread alive", "\(diagnostics.gpuThreadAlive)")
+                row("FIFO producer alive", "\(diagnostics.fifoProducerAlive)")
+            }
+
             Text("Failure stage: \(diagnostics.failureStage ?? "none")\nLast error: \(diagnostics.failureReason ?? "none")")
                 .font(.footnote)
                 .foregroundColor(diagnostics.failureReason == nil ? .white.opacity(0.6) : .red)

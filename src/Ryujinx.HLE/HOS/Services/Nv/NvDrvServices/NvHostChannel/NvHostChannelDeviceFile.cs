@@ -47,6 +47,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
 
         private NvFence _channelSyncpoint;
 
+        // Additive diagnostics counter only - does not affect behavior.
+        private int _submitGpfifoCount;
+
         public NvHostChannelDeviceFile(ServiceCtx context, IVirtualMemoryManager memory, ulong owner) : base(context, owner)
         {
             _device = context.Device;
@@ -57,6 +60,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
             _host1xContext = GetHost1XContext(context.Device.Gpu, owner);
             _contextId = _host1xContext.Host1x.CreateContext();
             Channel = _device.Gpu.CreateChannel();
+
+            BootEventBridge.Report("NvHostChannelDeviceFile created");
 
             ChannelInitialization.InitializeState(Channel);
 
@@ -324,11 +329,26 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
 
         private NvInternalResult SubmitGpfifo(Span<byte> arguments)
         {
-            int headerSize = Unsafe.SizeOf<SubmitGpfifoArguments>();
-            SubmitGpfifoArguments gpfifoSubmissionHeader = MemoryMarshal.Cast<byte, SubmitGpfifoArguments>(arguments)[0];
-            Span<ulong> gpfifoEntries = MemoryMarshal.Cast<byte, ulong>(arguments[headerSize..])[..gpfifoSubmissionHeader.NumEntries];
+            int submitCount = Interlocked.Increment(ref _submitGpfifoCount);
 
-            return SubmitGpfifo(ref gpfifoSubmissionHeader, gpfifoEntries);
+            if (submitCount <= 10 || submitCount % 300 == 0)
+            {
+                BootEventBridge.Report("SubmitGpfifo ioctl received", $"count={submitCount}");
+            }
+
+            try
+            {
+                int headerSize = Unsafe.SizeOf<SubmitGpfifoArguments>();
+                SubmitGpfifoArguments gpfifoSubmissionHeader = MemoryMarshal.Cast<byte, SubmitGpfifoArguments>(arguments)[0];
+                Span<ulong> gpfifoEntries = MemoryMarshal.Cast<byte, ulong>(arguments[headerSize..])[..gpfifoSubmissionHeader.NumEntries];
+
+                return SubmitGpfifo(ref gpfifoSubmissionHeader, gpfifoEntries);
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("NvHostChannelDeviceFile.SubmitGpfifo", ex);
+                throw;
+            }
         }
 
         private NvInternalResult AllocObjCtx(ref AllocObjCtxArguments arguments)
@@ -423,46 +443,68 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
 
         protected NvInternalResult SubmitGpfifo(ref SubmitGpfifoArguments header, Span<ulong> entries)
         {
-            if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceWait) && header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
+            try
             {
-                return NvInternalResult.InvalidInput;
-            }
-
-            if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceWait) && !_device.System.HostSyncpoint.IsSyncpointExpired(header.Fence.Id, header.Fence.Value))
-            {
-                Channel.PushHostCommandBuffer(CreateWaitCommandBuffer(header.Fence));
-            }
-
-            header.Fence.Id = _channelSyncpoint.Id;
-
-            if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) || header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
-            {
-                uint incrementCount = header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) ? 2u : 0u;
-
-                if (header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
+                if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceWait) && header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
                 {
-                    incrementCount += header.Fence.Value;
+                    return NvInternalResult.InvalidInput;
                 }
 
-                header.Fence.Value = _device.System.HostSyncpoint.IncrementSyncpointMaxExt(header.Fence.Id, (int)incrementCount);
+                if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceWait) && !_device.System.HostSyncpoint.IsSyncpointExpired(header.Fence.Id, header.Fence.Value))
+                {
+                    Channel.PushHostCommandBuffer(CreateWaitCommandBuffer(header.Fence));
+                }
+
+                header.Fence.Id = _channelSyncpoint.Id;
+
+                if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) || header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
+                {
+                    uint incrementCount = header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) ? 2u : 0u;
+
+                    if (header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
+                    {
+                        incrementCount += header.Fence.Value;
+                    }
+
+                    header.Fence.Value = _device.System.HostSyncpoint.IncrementSyncpointMaxExt(header.Fence.Id, (int)incrementCount);
+                }
+                else
+                {
+                    header.Fence.Value = _device.System.HostSyncpoint.ReadSyncpointMaxValue(header.Fence.Id);
+                }
+
+                // Shares the same gating/counter as the "SubmitGpfifo ioctl received" event above.
+                int submitCount = _submitGpfifoCount;
+                bool logGated = submitCount <= 10 || submitCount % 300 == 0;
+
+                if (logGated)
+                {
+                    BootEventBridge.Report("before Channel.PushEntries");
+                }
+
+                Channel.PushEntries(entries);
+
+                if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement))
+                {
+                    Channel.PushHostCommandBuffer(CreateIncrementCommandBuffer(ref header.Fence, header.Flags));
+                }
+
+                header.Flags = SubmitGpfifoFlags.None;
+
+                _device.Gpu.GPFifo.SignalNewEntries();
+
+                if (logGated)
+                {
+                    BootEventBridge.Report("after GPFifo.SignalNewEntries");
+                }
+
+                return NvInternalResult.Success;
             }
-            else
+            catch (Exception ex)
             {
-                header.Fence.Value = _device.System.HostSyncpoint.ReadSyncpointMaxValue(header.Fence.Id);
+                BootEventBridge.ReportFail("NvHostChannelDeviceFile.SubmitGpfifo", ex);
+                throw;
             }
-
-            Channel.PushEntries(entries);
-
-            if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement))
-            {
-                Channel.PushHostCommandBuffer(CreateIncrementCommandBuffer(ref header.Fence, header.Flags));
-            }
-
-            header.Flags = SubmitGpfifoFlags.None;
-
-            _device.Gpu.GPFifo.SignalNewEntries();
-
-            return NvInternalResult.Success;
         }
 
         public uint GetSyncpointChannel(uint index, bool isClientManaged)

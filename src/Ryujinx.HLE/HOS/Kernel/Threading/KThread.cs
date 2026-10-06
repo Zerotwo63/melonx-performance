@@ -45,6 +45,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
         private ThreadStart _customThreadStart;
         private bool _forcedUnschedulable;
 
+        // Additive diagnostics counter only - does not affect behavior. Shared across
+        // all KThread instances: counts real guest threads (not internal/non-guest
+        // threads using _customThreadStart) that have reached Owner.Context.Execute.
+        private static int s_guestThreadExecuteCount;
+
         public bool IsSchedulable => _customThreadStart == null && !_forcedUnschedulable;
 
         public ulong MutexAddress { get; set; }
@@ -1260,7 +1265,26 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
             }
             else
             {
-                Owner.Context.Execute(Context, _entrypoint);
+                int threadCount = Interlocked.Increment(ref s_guestThreadExecuteCount);
+
+                if (threadCount <= 10 || threadCount % 50 == 0)
+                {
+                    BootEventBridge.Report("KThread.ThreadStart: guest Context.Execute begin", $"threadCount={threadCount}");
+                }
+
+                try
+                {
+                    Owner.Context.Execute(Context, _entrypoint);
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("KThread.ThreadStart guest execution", ex);
+                    throw;
+                }
+
+                // Not gated - a guest thread returning from Execute is rare and
+                // significant enough to always report.
+                BootEventBridge.Report("KThread.ThreadStart: guest Context.Execute returned", $"threadCount={threadCount}");
             }
 
             Context.Dispose();

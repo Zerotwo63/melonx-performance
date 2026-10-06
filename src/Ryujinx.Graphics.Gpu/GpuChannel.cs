@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.GPFifo;
 using Ryujinx.Graphics.Gpu.Image;
@@ -16,6 +17,9 @@ namespace Ryujinx.Graphics.Gpu
         private readonly GPFifoDevice _device;
         private readonly GPFifoProcessor _processor;
         private MemoryManager _memoryManager;
+
+        // Additive diagnostics counter only - does not affect behavior.
+        private int _pushEntriesCalls;
 
         /// <summary>
         /// Channel buffer bindings manager.
@@ -116,6 +120,13 @@ namespace Ryujinx.Graphics.Gpu
         /// <param name="entries">GPFIFO entries</param>
         public void PushEntries(ReadOnlySpan<ulong> entries)
         {
+            int calls = Interlocked.Increment(ref _pushEntriesCalls);
+
+            if (calls <= 10 || calls % 300 == 0)
+            {
+                BootEventBridge.Report("GpuChannel.PushEntries called", $"entryCount={entries.Length}");
+            }
+
             _device.PushEntries(_processor, entries);
         }
 

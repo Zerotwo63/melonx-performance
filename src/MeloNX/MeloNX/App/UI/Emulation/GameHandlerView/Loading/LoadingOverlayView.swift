@@ -84,7 +84,7 @@ struct LoadingOverlayView: View {
                         let progress = diag.secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a"
                         diag.fail(
                             stage: "boot watchdog",
-                            reason: "timeout waiting for swapchain/first frame; lastManagedStage=\(diag.lastManagedStage ?? "none"), lastRendererStage=\(diag.lastRendererStage ?? "none"), lastRenderLoopStage=\(diag.lastRenderLoopStage ?? "none"), secondsSinceLastRenderProgress=\(progress), lastAcquireResult=\(diag.lastAcquireResult ?? "none"), lastSubmitResult=\(diag.lastSubmitResult ?? "none"), lastPresentResult=\(diag.lastPresentResult ?? "none")"
+                            reason: "timeout waiting for swapchain/first frame; lastManagedStage=\(diag.lastManagedStage ?? "none"), lastRendererStage=\(diag.lastRendererStage ?? "none"), lastRenderLoopStage=\(diag.lastRenderLoopStage ?? "none"), secondsSinceLastRenderProgress=\(progress), lastAcquireResult=\(diag.lastAcquireResult ?? "none"), lastSubmitResult=\(diag.lastSubmitResult ?? "none"), lastPresentResult=\(diag.lastPresentResult ?? "none"), guestMainThreadAlive=\(diag.guestMainThreadAlive), gpfifoSubmissions=\(diag.gpfifoSubmissions), fifoCommandsQueued=\(diag.fifoCommandsQueued), lastGuestStage=\(diag.lastGuestStage ?? "none"), lastGpuProducerStage=\(diag.lastGpuProducerStage ?? "none"), lastNvStage=\(diag.lastNvStage ?? "none")"
                         )
                     }
                 }

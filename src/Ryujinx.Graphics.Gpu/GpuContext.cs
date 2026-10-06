@@ -110,12 +110,17 @@ namespace Ryujinx.Graphics.Gpu
 
         private readonly ManualResetEvent _gpuReadyEvent;
 
+        // Additive diagnostics counter only - does not affect behavior.
+        private int _channelsCreated;
+
         /// <summary>
         /// Creates a new instance of the GPU emulation context.
         /// </summary>
         /// <param name="renderer">Host renderer</param>
         public GpuContext(IRenderer renderer)
         {
+            BootEventBridge.Report("GpuContext created");
+
             Renderer = renderer;
 
             GPFifo = new GPFifoDevice(this);
@@ -146,6 +151,10 @@ namespace Ryujinx.Graphics.Gpu
         /// <returns>The GPU channel</returns>
         public GpuChannel CreateChannel()
         {
+            int channelsCreated = Interlocked.Increment(ref _channelsCreated);
+
+            BootEventBridge.Report("GPU channel created", channelsCreated.ToString());
+
             return new GpuChannel(this);
         }
 
