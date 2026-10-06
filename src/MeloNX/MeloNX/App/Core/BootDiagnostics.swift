@@ -313,6 +313,26 @@ final class BootDiagnostics: ObservableObject {
             "command buffer begin", "command buffer recorded", "command buffer end",
             "queueSubmit begin", "queueSubmit result", "queuePresent begin", "queuePresent result",
             "first present requested", "first present completed", "ran-first-frame",
+            // Diagnóstico real #4 (GPU renderer initialized -> primer acquire):
+            // the actual game-loop closure runs on a SEPARATE thread
+            // ("GPU.MainThread") from the one Render() itself runs on
+            // ("GUI.RenderLoop") - these milestones are what prove that
+            // thread, and the blocking calls before its while-loop, are
+            // making real progress rather than silently stuck.
+            "GPU.MainThread lambda entered",
+            "before Device.Gpu.SetGpuThread", "after Device.Gpu.SetGpuThread",
+            "before Device.Gpu.InitializeShaderCache", "after Device.Gpu.InitializeShaderCache",
+            "SetGpuThread begin", "SetGpuThread: before GetCapabilities", "SetGpuThread: after GetCapabilities",
+            "InitializeShaderCache: before HostInitalized wait", "InitializeShaderCache: after HostInitalized wait",
+            "InitializeShaderCache: end",
+            "about to evaluate loop condition", "render loop iteration begin", "render loop returning early",
+            "render loop ended: _isActive became false",
+            "before pauseEvent wait", "after pauseEvent wait", "before WaitFifo", "after WaitFifo",
+            "ThreadedRenderer.RunLoop begin", "ThreadedRenderer.RunLoop: before gpuThread.Start",
+            "ThreadedRenderer.RunLoop: after gpuThread.Start", "ThreadedRenderer.RunLoop: before RenderLoop consumer",
+            "ThreadedRenderer.RunLoop: after RenderLoop consumer returned",
+            "ThreadedRenderer.InvokeCommand begin", "ThreadedRenderer.InvokeCommand: before wait",
+            "ThreadedRenderer.InvokeCommand: after wait",
         ]
         if renderProgressStages.contains(stage) || stageLooksRenderer(stage) {
             lastRenderLoopStage = stage

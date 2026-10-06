@@ -311,84 +311,158 @@ namespace Ryujinx.Headless.SDL2
             bool firstFrame = true;
             bool firstSubmit = true;
 
-            Device.Gpu.Renderer.RunLoop(() =>
+            try
             {
-                Device.Gpu.SetGpuThread();
-                Device.Gpu.InitializeShaderCache(_gpuCancellationTokenSource.Token);
-
-                while (_isActive)
+                Device.Gpu.Renderer.RunLoop(() =>
                 {
-                    if (_isStopped)
+                    // This lambda runs on a NEW thread ("GPU.MainThread")
+                    // created inside ThreadedRenderer.RunLoop() - NOT on the
+                    // "GUI.RenderLoop" thread that Render() itself runs on.
+                    // renderLoopEntered (set from "render loop entered"
+                    // above) only proves Render() started; it says nothing
+                    // about whether THIS lambda - and therefore the real
+                    // while(_isActive) loop below - ever actually runs.
+                    Program.ReportBootEvent("GPU.MainThread lambda entered");
+
+                    try
                     {
-                        return;
+                        Program.ReportBootEvent("before Device.Gpu.SetGpuThread");
+                        Device.Gpu.SetGpuThread();
+                        Program.ReportBootEvent("after Device.Gpu.SetGpuThread");
+
+                        Program.ReportBootEvent("before Device.Gpu.InitializeShaderCache");
+                        Device.Gpu.InitializeShaderCache(_gpuCancellationTokenSource.Token);
+                        Program.ReportBootEvent("after Device.Gpu.InitializeShaderCache");
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.ReportBootFailure("WindowBase.Render GPU.MainThread setup", ex);
+                        throw;
                     }
 
-                    _pauseEvent.WaitOne();
+                    int iteration = 0;
+                    bool isActiveNow = _isActive;
+                    Program.ReportBootEvent("about to evaluate loop condition", $"_isActive={isActiveNow}");
 
-                    _ticks += _chrono.ElapsedTicks;
-
-                    _chrono.Restart();
-
-                    if (Device.WaitFifo())
+                    while (_isActive)
                     {
-                        Device.Statistics.RecordFifoStart();
-                        Device.ProcessFrame();
-                        Device.Statistics.RecordFifoEnd();
+                        iteration++;
+                        bool verbose = iteration <= 5 || iteration % 300 == 0;
 
-                        if (firstSubmit)
+                        if (verbose)
                         {
-                            firstSubmit = false;
-                            Program.ReportBootEvent("GPU command FIFO processed");
+                            Program.ReportBootEvent("render loop iteration begin", iteration.ToString());
+                        }
+
+                        if (_isStopped)
+                        {
+                            Program.ReportBootEvent("render loop returning early", $"_isStopped=true,iteration={iteration}");
+                            return;
+                        }
+
+                        if (verbose)
+                        {
+                            Program.ReportBootEvent("before pauseEvent wait", iteration.ToString());
+                        }
+                        _pauseEvent.WaitOne();
+                        if (verbose)
+                        {
+                            Program.ReportBootEvent("after pauseEvent wait", iteration.ToString());
+                        }
+
+                        _ticks += _chrono.ElapsedTicks;
+
+                        _chrono.Restart();
+
+                        if (verbose)
+                        {
+                            Program.ReportBootEvent("before WaitFifo", iteration.ToString());
+                        }
+                        bool hasFifoCommands = Device.WaitFifo();
+                        if (verbose)
+                        {
+                            Program.ReportBootEvent("after WaitFifo", $"result={hasFifoCommands},iteration={iteration}");
+                        }
+
+                        if (hasFifoCommands)
+                        {
+                            Device.Statistics.RecordFifoStart();
+                            Device.ProcessFrame();
+                            Device.Statistics.RecordFifoEnd();
+
+                            if (firstSubmit)
+                            {
+                                firstSubmit = false;
+                                Program.ReportBootEvent("GPU command FIFO processed");
+                            }
+                        }
+
+                        while (Device.ConsumeFrameAvailable())
+                        {
+                            if (firstFrame)
+                            {
+                                Program.ReportBootEvent("first present requested");
+                            }
+
+                            Device.PresentFrame(SwapBuffers);
+
+                            if (firstFrame)
+                            {
+                                Program.ReportBootEvent("first present completed");
+                                firstFrame = false;
+                                Program.ReportBootEvent("emitting ran-first-frame");
+                                Program.TriggerCallback("ran-first-frame");
+                            }
+                        }
+
+                        if (_ticks >= _ticksPerFrame)
+                        {
+                            string dockedMode = Device.System.State.DockedMode ? "Docked" : "Handheld";
+                            float scale = GraphicsConfig.ResScale;
+                            if (scale != 1)
+                            {
+                                dockedMode += $" ({scale}x)";
+                            }
+
+                            StatusUpdatedEvent?.Invoke(this, new StatusUpdatedEventArgs(
+                                Device.EnableDeviceVsync,
+                                dockedMode,
+                                Device.Configuration.AspectRatio.ToText(),
+                                $"Game: {Device.Statistics.GetGameFrameRate():00.00} FPS ({Device.Statistics.GetGameFrameTime():00.00} ms)",
+                                $"FIFO: {Device.Statistics.GetFifoPercent():0.00} %",
+                                $"GPU: {_gpuDriverName}"));
+
+                            _ticks = Math.Min(_ticks - _ticksPerFrame, _ticksPerFrame);
+                        }
+
+                        if (verbose)
+                        {
+                            Program.ReportBootEvent("render loop heartbeat", iteration.ToString());
                         }
                     }
 
-                    while (Device.ConsumeFrameAvailable())
+                    Program.ReportBootEvent("render loop ended: _isActive became false", iteration.ToString());
+
+                    // Make sure all commands in the run loop are fully executed before leaving the loop.
+                    if (Device.Gpu.Renderer is ThreadedRenderer threaded)
                     {
-                        if (firstFrame)
-                        {
-                            Program.ReportBootEvent("first present requested");
-                        }
-
-                        Device.PresentFrame(SwapBuffers);
-
-                        if (firstFrame)
-                        {
-                            Program.ReportBootEvent("first present completed");
-                            firstFrame = false;
-                            Program.ReportBootEvent("emitting ran-first-frame");
-                            Program.TriggerCallback("ran-first-frame");
-                        }
+                        threaded.FlushThreadedCommands();
                     }
 
-                    if (_ticks >= _ticksPerFrame)
-                    {
-                        string dockedMode = Device.System.State.DockedMode ? "Docked" : "Handheld";
-                        float scale = GraphicsConfig.ResScale;
-                        if (scale != 1)
-                        {
-                            dockedMode += $" ({scale}x)";
-                        }
-
-                        StatusUpdatedEvent?.Invoke(this, new StatusUpdatedEventArgs(
-                            Device.EnableDeviceVsync,
-                            dockedMode,
-                            Device.Configuration.AspectRatio.ToText(),
-                            $"Game: {Device.Statistics.GetGameFrameRate():00.00} FPS ({Device.Statistics.GetGameFrameTime():00.00} ms)",
-                            $"FIFO: {Device.Statistics.GetFifoPercent():0.00} %",
-                            $"GPU: {_gpuDriverName}"));
-
-                        _ticks = Math.Min(_ticks - _ticksPerFrame, _ticksPerFrame);
-                    }
-                }
-
-                // Make sure all commands in the run loop are fully executed before leaving the loop.
-                if (Device.Gpu.Renderer is ThreadedRenderer threaded)
-                {
-                    threaded.FlushThreadedCommands();
-                }
-
-                _gpuDoneEvent.Set();
-            });
+                    _gpuDoneEvent.Set();
+                });
+            }
+            catch (Exception ex)
+            {
+                // RunLoop() was previously completely unguarded here - any
+                // exception escaping it (from the lambda itself, or from
+                // ThreadedRenderer.RenderLoop()'s command-processing, which
+                // also has no try/catch) would become an unhandled exception
+                // on the "GUI.RenderLoop" background thread, caught only by
+                // AppDomain.UnhandledException IF that handler runs in time.
+                Program.ReportBootFailure("WindowBase.Render RunLoop", ex);
+                throw;
+            }
 
             FinalizeWindowRenderer();
         }

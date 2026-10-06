@@ -1,5 +1,6 @@
 using Ryujinx.Common;
 using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL.Multithreading.Commands;
 using Ryujinx.Graphics.GAL.Multithreading.Commands.Buffer;
 using Ryujinx.Graphics.GAL.Multithreading.Commands.Renderer;
@@ -99,6 +100,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         public void RunLoop(ThreadStart gpuLoop)
         {
+            // IMPORTANT, confirmed by reading this method: the `gpuLoop`
+            // callback (WindowBase.Render()'s while(_isActive) loop) does
+            // NOT run on the thread that calls RunLoop() - it runs on a
+            // brand new thread ("GPU.MainThread") started right here. The
+            // CALLING thread (WindowBase.Render()'s own thread, "GUI.
+            // RenderLoop") instead immediately falls into RenderLoop()
+            // below, which is a *different* loop: this object's own GAL
+            // command-queue consumer, used to forward every Pipeline/
+            // Window call made from GPU.MainThread to the real backend
+            // (VulkanRenderer). The real vkAcquireNextImageKHR eventually
+            // happens on THIS thread (GUI.RenderLoop), not on GPU.MainThread.
+            BootEventBridge.Report("ThreadedRenderer.RunLoop begin");
             _running = true;
 
             _backendThread = Thread.CurrentThread;
@@ -108,9 +121,13 @@ namespace Ryujinx.Graphics.GAL.Multithreading
                 Name = "GPU.MainThread",
             };
 
+            BootEventBridge.Report("ThreadedRenderer.RunLoop: before gpuThread.Start");
             _gpuThread.Start();
+            BootEventBridge.Report("ThreadedRenderer.RunLoop: after gpuThread.Start");
 
+            BootEventBridge.Report("ThreadedRenderer.RunLoop: before RenderLoop consumer");
             RenderLoop();
+            BootEventBridge.Report("ThreadedRenderer.RunLoop: after RenderLoop consumer returned");
         }
 
         public void RenderLoop()
@@ -223,15 +240,35 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             }
         }
 
+        private int _invokeCommandLogCount;
+
         internal void InvokeCommand()
         {
+            bool verbose = _invokeCommandLogCount <= 10;
+            if (verbose)
+            {
+                _invokeCommandLogCount++;
+                BootEventBridge.Report("ThreadedRenderer.InvokeCommand begin");
+            }
+
             _invokeRun.Reset();
             _invokePtr = _lastProducedPtr;
 
             QueueCommand();
 
-            // Wait for the command to complete.
+            // Blocks (no timeout) until RenderLoop()'s consumer - running on
+            // the thread that called RunLoop(), i.e. "GUI.RenderLoop" - picks
+            // this command up and calls _invokeRun.Set(). If that consumer
+            // thread is stuck or never started, this call never returns.
+            if (verbose)
+            {
+                BootEventBridge.Report("ThreadedRenderer.InvokeCommand: before wait");
+            }
             _invokeRun.Wait();
+            if (verbose)
+            {
+                BootEventBridge.Report("ThreadedRenderer.InvokeCommand: after wait");
+            }
         }
 
         internal void WaitForFrame()

@@ -422,4 +422,42 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.lastRenderLoopStage == nil)
         #expect(BootDiagnostics.shared.secondsSinceLastRenderProgress() == nil)
     }
+
+    // MARK: - GPU.MainThread setup trace (diagnóstico real #4: GPU renderer initialized -> primer acquire)
+
+    /// These events live between "GPU renderer initialized" and the first
+    /// render-loop iteration, on a thread ("GPU.MainThread") distinct from
+    /// the one that logs "render loop entered" - they must still register
+    /// as real render progress, or the watchdog's lastRenderLoopStage would
+    /// go stale exactly during the window this round is trying to observe.
+    @Test func gpuMainThreadSetupEventsCountAsRenderProgress() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("GPU.MainThread lambda entered")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.lastRenderLoopStage == "GPU.MainThread lambda entered")
+
+        BootDiagnostics.shared.log("InitializeShaderCache: before HostInitalized wait")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.lastRenderLoopStage == "InitializeShaderCache: before HostInitalized wait")
+    }
+
+    /// The exact symptom this round investigates: renderLoopEntered=true
+    /// (set from the unrelated "render loop entered" event logged on the
+    /// GUI.RenderLoop thread) must not be confused with the GPU.MainThread
+    /// loop actually iterating - renderLoopIterations only advances from
+    /// real "render loop heartbeat" events emitted inside the while loop.
+    @Test func renderLoopIterationsOnlyAdvancesFromRealHeartbeats() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("render loop entered")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.renderLoopEntered)
+        #expect(BootDiagnostics.shared.renderLoopIterations == 0)
+
+        BootDiagnostics.shared.log("render loop heartbeat", result: "3")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.renderLoopIterations == 3)
+    }
 }

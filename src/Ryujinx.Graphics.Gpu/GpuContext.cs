@@ -1,4 +1,5 @@
 using Ryujinx.Common;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Device;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.GPFifo;
@@ -276,7 +277,16 @@ namespace Ryujinx.Graphics.Gpu
         /// </summary>
         public void InitializeShaderCache(CancellationToken cancellationToken)
         {
+            // HostInitalized is a ManualResetEvent that starts UNSIGNALED -
+            // this call blocks indefinitely (no timeout) until something
+            // calls HostInitalized.Set() (currently only done from the game
+            // load path in ProcessLoader.cs / FileSystemExtensions.cs). If
+            // that .Set() never happens, or happens on a path this session
+            // didn't take, this is where the GPU.MainThread would hang
+            // forever, before ever reaching the render while-loop below.
+            BootEventBridge.Report("InitializeShaderCache: before HostInitalized wait");
             HostInitalized.WaitOne();
+            BootEventBridge.Report("InitializeShaderCache: after HostInitalized wait");
 
             foreach (var physicalMemory in PhysicalMemoryRegistry.Values)
             {
@@ -284,6 +294,7 @@ namespace Ryujinx.Graphics.Gpu
             }
 
             _gpuReadyEvent.Set();
+            BootEventBridge.Report("InitializeShaderCache: end");
         }
 
         /// <summary>
@@ -299,9 +310,19 @@ namespace Ryujinx.Graphics.Gpu
         /// </summary>
         public void SetGpuThread()
         {
+            BootEventBridge.Report("SetGpuThread begin");
             _gpuThread = Thread.CurrentThread;
 
+            // Renderer.GetCapabilities() on a ThreadedRenderer round-trips
+            // through the GAL command queue and blocks (no timeout) until
+            // the backend thread (the one that called RunLoop - "GUI.
+            // RenderLoop") actually drains its RenderLoop() consumer and
+            // processes this command. If that consumer thread never gets
+            // scheduled, or dies/throws before reaching it, this call hangs
+            // here forever, before the render while-loop below ever starts.
+            BootEventBridge.Report("SetGpuThread: before GetCapabilities");
             Capabilities = Renderer.GetCapabilities();
+            BootEventBridge.Report("SetGpuThread: after GetCapabilities");
         }
 
         /// <summary>
