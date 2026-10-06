@@ -183,13 +183,17 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 unsafe
                 {
-                    fixed (byte* namePtr = device.PhysicalDeviceProperties.DeviceName)
+                    // DeviceName is a fixed-size buffer field; accessed in an
+                    // unsafe context it already evaluates to byte* directly,
+                    // so no further `fixed` statement (CS0213) or .ToArray()
+                    // (CS1061, byte* is not an array/Span) is needed here.
+                    byte* namePtr = device.PhysicalDeviceProperties.DeviceName;
+                    int len = 0;
+                    while (len < 256 && namePtr[len] != 0)
                     {
-                        return System.Text.Encoding.UTF8.GetString(
-                            namePtr,
-                            Array.IndexOf(device.PhysicalDeviceProperties.DeviceName.ToArray(), (byte)0) is int len && len >= 0 ? len : 0
-                        ) + $" (apiVersion={device.PhysicalDeviceProperties.ApiVersion})";
+                        len++;
                     }
+                    return System.Text.Encoding.UTF8.GetString(namePtr, len) + $" (apiVersion={device.PhysicalDeviceProperties.ApiVersion})";
                 }
             }
             catch
