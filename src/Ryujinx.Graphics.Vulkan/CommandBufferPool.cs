@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
@@ -58,6 +59,7 @@ namespace Ryujinx.Graphics.Vulkan
         private int _queuedIndexesPtr;
         private int _queuedCount;
         private int _inUseCount;
+        private int _logCount;
 
         public unsafe CommandBufferPool(
             Vk api,
@@ -255,6 +257,11 @@ namespace Ryujinx.Graphics.Vulkan
 
                         _api.BeginCommandBuffer(entry.CommandBuffer, in commandBufferBeginInfo).ThrowOnError();
 
+                        if (_logCount <= 10)
+                        {
+                            BootEventBridge.Report("command buffer begin");
+                        }
+
                         return new CommandBufferScoped(this, entry.CommandBuffer, cursor);
                     }
 
@@ -284,6 +291,7 @@ namespace Ryujinx.Graphics.Vulkan
 
                 Debug.Assert(entry.InUse);
                 Debug.Assert(entry.CommandBuffer.Handle == cbs.CommandBuffer.Handle);
+                _logCount++;
                 entry.InUse = false;
                 entry.InConsumption = true;
                 entry.SubmissionCount++;
@@ -291,7 +299,17 @@ namespace Ryujinx.Graphics.Vulkan
 
                 var commandBuffer = entry.CommandBuffer;
 
+                if (_logCount <= 10)
+                {
+                    BootEventBridge.Report("command buffer recorded");
+                }
+
                 _api.EndCommandBuffer(commandBuffer).ThrowOnError();
+
+                if (_logCount <= 10)
+                {
+                    BootEventBridge.Report("command buffer end");
+                }
 
                 fixed (Semaphore* pWaitSemaphores = waitSemaphores, pSignalSemaphores = signalSemaphores)
                 {
@@ -314,7 +332,21 @@ namespace Ryujinx.Graphics.Vulkan
                             Fence? fence = entry.Fence.Get();
                             if (fence != null)
                             {
-                                _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+                                if (_logCount <= 10)
+                                {
+                                    BootEventBridge.Report("queueSubmit begin", $"waitSemaphoreCount={sInfo.WaitSemaphoreCount},signalSemaphoreCount={sInfo.SignalSemaphoreCount}");
+                                }
+
+                                Result submitResult = _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe());
+                                if (_logCount <= 10)
+                                {
+                                    BootEventBridge.Report("queueSubmit result", submitResult.ToString());
+                                }
+                                submitResult.ThrowOnError();
+                            }
+                            else
+                            {
+                                BootEventBridge.Report("queueSubmit skipped", "no fence available on this command buffer entry");
                             }
                         }
                     }

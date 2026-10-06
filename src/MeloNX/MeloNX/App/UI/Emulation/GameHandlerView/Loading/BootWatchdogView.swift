@@ -51,6 +51,22 @@ struct BootWatchdogView: View {
                 row("Surface created", "\(diagnostics.surfaceCreated)")
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                row("Swapchain image count", diagnostics.swapchainImageCount.map { "\($0)" } ?? "unknown")
+                row("Acquire attempted", "\(diagnostics.acquireAttempted)")
+                row("Acquire count", "\(diagnostics.acquireAttemptCount)")
+                row("First acquire succeeded", "\(diagnostics.firstAcquireSucceeded)")
+                row("Last acquire result", diagnostics.lastAcquireResult ?? "none")
+                row("Command buffer started", "\(diagnostics.commandBufferStarted)")
+                row("Command buffer recorded", "\(diagnostics.commandBufferRecorded)")
+                row("Last submit result", diagnostics.lastSubmitResult ?? "none")
+                row("Last present result", diagnostics.lastPresentResult ?? "none")
+                row("Render loop entered", "\(diagnostics.renderLoopEntered)")
+                row("Render loop iterations", "\(diagnostics.renderLoopIterations)")
+                row("Last render loop stage", diagnostics.lastRenderLoopStage ?? "none")
+                row("Seconds since render progress", diagnostics.secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a")
+            }
+
             Text("Failure stage: \(diagnostics.failureStage ?? "none")\nLast error: \(diagnostics.failureReason ?? "none")")
                 .font(.footnote)
                 .foregroundColor(diagnostics.failureReason == nil ? .white.opacity(0.6) : .red)

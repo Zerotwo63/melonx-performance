@@ -201,6 +201,9 @@ namespace Ryujinx.Headless.SDL2
 
             InstallUnhandledExceptionHandlers();
 
+            BootEventBridge.ReportEvent = ReportBootEvent;
+            BootEventBridge.ReportFailure = ReportBootFailure;
+
             string[] args = new string[argCount];
 
             try

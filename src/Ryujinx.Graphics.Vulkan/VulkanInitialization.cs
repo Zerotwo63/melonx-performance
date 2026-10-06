@@ -133,12 +133,12 @@ namespace Ryujinx.Graphics.Vulkan
 
             // Ryujinx.Graphics.Vulkan cannot reference Ryujinx.Headless.SDL2.Program
             // (reverse project dependency - this project is lower-level), so
-            // this one and the two below use plain Console.WriteLine rather
-            // than the ReportBootEvent bridge used everywhere else in this
-            // investigation. Logged BEFORE ThrowOnError() so the real
-            // VkResult is visible even on the failure path, with no change
-            // to what ThrowOnError() itself does.
-            Console.WriteLine($"[BOOT] vkCreateInstance = {result}");
+            // this one and the ones below use BootEventBridge.Report, which
+            // routes through the same deterministic "boot-event" bridge once
+            // Program.cs wires it at managed-entry time. Logged BEFORE
+            // ThrowOnError() so the real VkResult is visible even on the
+            // failure path, with no change to what ThrowOnError() itself does.
+            BootEventBridge.Report("vkCreateInstance", result.ToString());
             result.ThrowOnError();
 
             return instance;
@@ -147,8 +147,8 @@ namespace Ryujinx.Graphics.Vulkan
         internal static VulkanPhysicalDevice FindSuitablePhysicalDevice(Vk api, VulkanInstance instance, SurfaceKHR surface, string preferredGpuId)
         {
             Result enumerateResult = instance.EnumeratePhysicalDevices(out var physicalDevices);
-            Console.WriteLine($"[BOOT] vkEnumeratePhysicalDevices = {enumerateResult}");
-            Console.WriteLine($"[BOOT] physical device count = {physicalDevices.Length}");
+            BootEventBridge.Report("vkEnumeratePhysicalDevices", enumerateResult.ToString());
+            BootEventBridge.Report("physical device count", physicalDevices.Length.ToString());
             enumerateResult.ThrowOnError();
 
             // First we try to pick the user preferred GPU.
@@ -156,7 +156,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 if (IsPreferredAndSuitableDevice(api, physicalDevices[i], surface, preferredGpuId))
                 {
-                    Console.WriteLine($"[BOOT] physical device selected = {GetDeviceNameSafe(physicalDevices[i])} (preferred)");
+                    BootEventBridge.Report("physical device selected", $"{GetDeviceNameSafe(physicalDevices[i])} (preferred)");
                     return physicalDevices[i];
                 }
             }
@@ -166,12 +166,12 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 if (IsSuitableDevice(api, physicalDevices[i], surface))
                 {
-                    Console.WriteLine($"[BOOT] physical device selected = {GetDeviceNameSafe(physicalDevices[i])}");
+                    BootEventBridge.Report("physical device selected", GetDeviceNameSafe(physicalDevices[i]));
                     return physicalDevices[i];
                 }
             }
 
-            Console.WriteLine("[BOOT] physical device selection failed: none of the available GPUs meets the minimum requirements");
+            BootEventBridge.Report("physical device selection failed", "none of the available GPUs meets the minimum requirements");
             throw new VulkanException("Initialization failed, none of the available GPUs meets the minimum requirements.");
         }
 
@@ -298,13 +298,13 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     queueCount = property.QueueCount;
 
-                    Console.WriteLine($"[BOOT] vkGetPhysicalDeviceSurfaceSupportKHR = true (queue family {index}, queueCount {queueCount})");
+                    BootEventBridge.Report("vkGetPhysicalDeviceSurfaceSupportKHR", $"true (queue family {index}, queueCount {queueCount})");
 
                     return index;
                 }
             }
 
-            Console.WriteLine("[BOOT] vkGetPhysicalDeviceSurfaceSupportKHR: no suitable queue family with surface support found");
+            BootEventBridge.Report("vkGetPhysicalDeviceSurfaceSupportKHR", "no suitable queue family with surface support found");
 
             queueCount = 0;
 
@@ -656,7 +656,7 @@ namespace Ryujinx.Graphics.Vulkan
             };
 
             Result createDeviceResult = api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out var device);
-            Console.WriteLine($"[BOOT] vkCreateDevice = {createDeviceResult}");
+            BootEventBridge.Report("vkCreateDevice", createDeviceResult.ToString());
             createDeviceResult.ThrowOnError();
 
             for (int i = 0; i < enabledExtensions.Length; i++)

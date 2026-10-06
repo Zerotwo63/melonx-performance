@@ -473,7 +473,7 @@ namespace Ryujinx.Graphics.Vulkan
         private void SetupContext(GraphicsDebugLevel logLevel)
         {
             _instance = VulkanInitialization.CreateInstance(Api, logLevel, _getRequiredExtensions());
-            Console.WriteLine("[BOOT] Vulkan instance created");
+            BootEventBridge.Report("Vulkan instance created");
             _debugMessenger = new VulkanDebugMessenger(Api, _instance.Instance, logLevel);
 
             if (Api.TryGetInstanceExtension(_instance.Instance, out KhrSurface surfaceApi))
@@ -487,7 +487,7 @@ namespace Ryujinx.Graphics.Vulkan
             var queueFamilyIndex = VulkanInitialization.FindSuitableQueueFamily(Api, _physicalDevice, _surface, out uint maxQueueCount);
 
             _device = VulkanInitialization.CreateDevice(Api, _physicalDevice, queueFamilyIndex, maxQueueCount);
-            Console.WriteLine("[BOOT] Vulkan device created");
+            BootEventBridge.Report("Vulkan device created");
 
             if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrSwapchain swapchainApi))
             {

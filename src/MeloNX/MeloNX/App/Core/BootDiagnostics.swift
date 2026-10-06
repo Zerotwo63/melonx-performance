@@ -57,6 +57,27 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var metalViewAlive = false
     @Published private(set) var surfaceCreated = false
 
+    // Swapchain -> acquire -> command buffer -> submit -> present trace
+    // (diagnóstico real #3): each flag below is set ONLY from a real,
+    // named Vulkan-level result event - never from "we entered the
+    // method" alone. See BootDiagnostics' doc comment update and
+    // PERFORMANCE_FORK.md for the exact contract each event name has
+    // with Ryujinx.Graphics.Vulkan/Window.cs and CommandBufferPool.cs.
+    @Published private(set) var swapchainImageCount: Int?
+    @Published private(set) var swapchainHandle: String?
+    @Published private(set) var acquireAttempted = false
+    @Published private(set) var acquireAttemptCount = 0
+    @Published private(set) var firstAcquireSucceeded = false
+    @Published private(set) var lastAcquireResult: String?
+    @Published private(set) var commandBufferStarted = false
+    @Published private(set) var commandBufferRecorded = false
+    @Published private(set) var lastSubmitResult: String?
+    @Published private(set) var lastPresentResult: String?
+    @Published private(set) var renderLoopEntered = false
+    @Published private(set) var renderLoopIterations = 0
+    @Published private(set) var lastRenderLoopStage: String?
+    @Published private(set) var lastRenderActivityTimestamp: Date?
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private let lock = NSLock()
@@ -112,6 +133,20 @@ final class BootDiagnostics: ObservableObject {
             self.lastVulkanResult = nil
             self.metalViewAlive = false
             self.surfaceCreated = false
+            self.swapchainImageCount = nil
+            self.swapchainHandle = nil
+            self.acquireAttempted = false
+            self.acquireAttemptCount = 0
+            self.firstAcquireSucceeded = false
+            self.lastAcquireResult = nil
+            self.commandBufferStarted = false
+            self.commandBufferRecorded = false
+            self.lastSubmitResult = nil
+            self.lastPresentResult = nil
+            self.renderLoopEntered = false
+            self.renderLoopIterations = 0
+            self.lastRenderLoopStage = nil
+            self.lastRenderActivityTimestamp = nil
         }
     }
 
@@ -154,6 +189,23 @@ final class BootDiagnostics: ObservableObject {
         return "background"
     }
 
+    /// Stage names whose `result` is itself a VkResult string - the only
+    /// reliable way to populate `lastVulkanResult`. A previous version of
+    /// this matched on `stage.contains("vulkan")`, which never actually
+    /// matched any real stage name (they're all "vkCreateInstance",
+    /// "vkCreateSwapchainKHR", "acquire result", etc - none contain the
+    /// literal word "vulkan") - that bug is why `lastVulkanResult` always
+    /// read "none" even once Vulkan calls were clearly succeeding.
+    /// "vkGetPhysicalDeviceSurfaceSupportKHR" is deliberately excluded here:
+    /// its value is "true (queue family N, queueCount M)" on success, not a
+    /// VkResult symbol, so including it would make lastVulkanResult show a
+    /// non-VkResult string instead of the thing its name promises.
+    private static let vulkanResultStageNames: Set<String> = [
+        "vkCreateInstance", "vkEnumeratePhysicalDevices", "vkCreateDevice",
+        "vkCreateMetalSurfaceEXT", "vkCreateSwapchainKHR",
+        "acquire result", "queueSubmit result", "queuePresent result",
+    ]
+
     private func applyKnownStage(_ stage: String, result: String?) {
         switch stage {
         case "environment":
@@ -166,6 +218,61 @@ final class BootDiagnostics: ObservableObject {
             ryujinxStarted = true
         case "MetalView.createView begin", "MetalView.createView end":
             metalViewAlive = true
+        case "swapchain creation success":
+            swapchainCreated = true
+            if let result {
+                swapchainHandle = Self.extractField(result, "handle")
+                if let s = Self.extractField(result, "imageCount"), let n = Int(s) {
+                    swapchainImageCount = n
+                }
+            }
+        case "acquire begin":
+            acquireAttempted = true
+        case "acquire result":
+            acquireAttemptCount += 1
+            lastAcquireResult = result
+            if result == "Success" {
+                firstAcquireSucceeded = true
+            }
+        case "command buffer begin":
+            commandBufferStarted = true
+        case "command buffer recorded":
+            commandBufferRecorded = true
+        case "queueSubmit result":
+            lastSubmitResult = result
+            // firstSubmit means a REAL vkQueueSubmit returned Success - not
+            // "we entered the method that calls it", which is what the
+            // previous round's "first GPU command submitted" breadcrumb
+            // actually measured (Device.WaitFifo() returning true, a
+            // managed-level FIFO concept, not a Vulkan API result).
+            if result == "Success" {
+                firstSubmit = true
+            }
+        case "queuePresent result":
+            lastPresentResult = result
+            // firstPresent means a REAL vkQueuePresentKHR returned Success
+            // or SuboptimalKHR (SuboptimalKHR still presented the frame -
+            // the swapchain is just scheduled for recreation on next use).
+            if result == "Success" || result == "SuboptimalKhr" {
+                firstPresent = true
+            }
+        case "render loop heartbeat":
+            if let result, let n = Int(result) {
+                renderLoopIterations = n
+            }
+        case "ran-first-frame":
+            // The engine's own "a frame was handed to SwapBuffers" signal.
+            // Trust it as firstFrame ONLY if we already saw a real
+            // successful present - otherwise this is a real anomaly (the
+            // engine believes it presented a frame but our instrumentation
+            // of the one and only present call site never observed a
+            // matching success), worth surfacing rather than silently
+            // accepting.
+            if firstPresent {
+                firstFrame = true
+            } else {
+                log("anomaly: ran-first-frame fired with no observed successful queuePresent", result: "lastPresentResult=\(lastPresentResult ?? "none")")
+            }
         default:
             break
         }
@@ -183,33 +290,58 @@ final class BootDiagnostics: ObservableObject {
             lastRendererStage = stage
         }
 
-        if stage.localizedCaseInsensitiveContains("vulkan"), let result {
+        if Self.vulkanResultStageNames.contains(stage), let result {
             lastVulkanResult = result
         }
 
         if stage == "GPU thread started" || stage.contains("render loop entered") {
             renderThreadAlive = true
+            renderLoopEntered = true
         }
 
         if stage.contains("surface creation success") {
             surfaceCreated = true
         }
 
-        if stage.contains("swapchain creation success") || stage == "swapchain created" {
-            swapchainCreated = true
+        // Render-loop stall detection: ANY of these per-frame Vulkan-level
+        // events (not just the broad "renderer" substring markers above,
+        // which miss e.g. "queueSubmit result") counts as real forward
+        // progress with a fresh timestamp - this is what
+        // secondsSinceLastRenderProgress is computed from.
+        let renderProgressStages: Set<String> = [
+            "render loop entered", "render loop heartbeat", "acquire begin", "acquire result",
+            "command buffer begin", "command buffer recorded", "command buffer end",
+            "queueSubmit begin", "queueSubmit result", "queuePresent begin", "queuePresent result",
+            "first present requested", "first present completed", "ran-first-frame",
+        ]
+        if renderProgressStages.contains(stage) || stageLooksRenderer(stage) {
+            lastRenderLoopStage = stage
+            lastRenderActivityTimestamp = Date()
         }
+    }
 
-        if stage.contains("first GPU command submitted") || stage.contains("first submit") {
-            firstSubmit = true
+    /// Pulls `key=value` out of a comma-separated "k1=v1,k2=v2" result
+    /// string (the format BootEventBridge-side events use for multi-field
+    /// payloads, e.g. "handle=123,extent=1320x743,imageCount=3").
+    private static func extractField(_ payload: String, _ key: String) -> String? {
+        for part in payload.split(separator: ",") {
+            if let eq = part.range(of: "=") {
+                let k = String(part[part.startIndex..<eq.lowerBound])
+                if k == key {
+                    return String(part[eq.upperBound...])
+                }
+            }
         }
+        return nil
+    }
 
-        if stage.contains("first present") {
-            firstPresent = true
-        }
-
-        if stage == "ran-first-frame" || stage.contains("ran-first-frame") || stage.contains("first frame") {
-            firstFrame = true
-        }
+    /// Seconds since the render loop last showed any real forward progress
+    /// (any per-frame Vulkan-level event, see `applyKnownStage`) - nil if
+    /// the render loop never even entered. Computed on read rather than
+    /// stored, so callers always get a fresh value.
+    func secondsSinceLastRenderProgress() -> Double? {
+        guard let lastRenderActivityTimestamp else { return nil }
+        return Date().timeIntervalSince(lastRenderActivityTimestamp)
     }
 
     private func stageLooksManaged(_ stage: String) -> Bool {
@@ -276,6 +408,20 @@ final class BootDiagnostics: ObservableObject {
         lines.append("lastVulkanResult = \(lastVulkanResult ?? "none")")
         lines.append("metalViewAlive = \(metalViewAlive)")
         lines.append("surfaceCreated = \(surfaceCreated)")
+        lines.append("")
+        lines.append("swapchainImageCount = \(swapchainImageCount.map { "\($0)" } ?? "unknown")")
+        lines.append("acquireAttempted = \(acquireAttempted)")
+        lines.append("acquireAttemptCount = \(acquireAttemptCount)")
+        lines.append("firstAcquireSucceeded = \(firstAcquireSucceeded)")
+        lines.append("lastAcquireResult = \(lastAcquireResult ?? "none")")
+        lines.append("commandBufferStarted = \(commandBufferStarted)")
+        lines.append("commandBufferRecorded = \(commandBufferRecorded)")
+        lines.append("lastSubmitResult = \(lastSubmitResult ?? "none")")
+        lines.append("lastPresentResult = \(lastPresentResult ?? "none")")
+        lines.append("renderLoopEntered = \(renderLoopEntered)")
+        lines.append("renderLoopIterations = \(renderLoopIterations)")
+        lines.append("lastRenderLoopStage = \(lastRenderLoopStage ?? "none")")
+        lines.append("secondsSinceLastRenderProgress = \(secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a")")
         lines.append("")
         lines.append("failureStage = \(failureStage ?? "none")")
         lines.append("failureReason = \(failureReason ?? "none")")

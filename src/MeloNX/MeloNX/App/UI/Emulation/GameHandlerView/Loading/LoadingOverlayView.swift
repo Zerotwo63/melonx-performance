@@ -81,9 +81,10 @@ struct LoadingOverlayView: View {
                     // used to silently imply.
                     let diag = BootDiagnostics.shared
                     if diag.failureStage == nil {
+                        let progress = diag.secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a"
                         diag.fail(
                             stage: "boot watchdog",
-                            reason: "timeout waiting for swapchain/first frame; last managed stage = \(diag.lastManagedStage ?? "none"), last renderer stage = \(diag.lastRendererStage ?? "none")"
+                            reason: "timeout waiting for swapchain/first frame; lastManagedStage=\(diag.lastManagedStage ?? "none"), lastRendererStage=\(diag.lastRendererStage ?? "none"), lastRenderLoopStage=\(diag.lastRenderLoopStage ?? "none"), secondsSinceLastRenderProgress=\(progress), lastAcquireResult=\(diag.lastAcquireResult ?? "none"), lastSubmitResult=\(diag.lastSubmitResult ?? "none"), lastPresentResult=\(diag.lastPresentResult ?? "none")"
                         )
                     }
                 }
@@ -183,7 +184,10 @@ struct LoadingOverlayView: View {
 
         RegisterCallback("ran-first-frame") { _ in
             print("cool, first frame! :3")
-            BootDiagnostics.shared.log("received ran-first-frame")
+            // Exact string "ran-first-frame" matters - BootDiagnostics'
+            // applyKnownStage() switches on it exactly to cross-check this
+            // engine-level signal against the real queuePresent result.
+            BootDiagnostics.shared.log("ran-first-frame")
             Task { @MainActor in
                 watchdogTask?.cancel()
                 withAnimation(.easeOut(duration: 0.3)) {

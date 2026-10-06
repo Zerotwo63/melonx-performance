@@ -338,7 +338,7 @@ namespace Ryujinx.Headless.SDL2
                         if (firstSubmit)
                         {
                             firstSubmit = false;
-                            Program.ReportBootEvent("first GPU command submitted");
+                            Program.ReportBootEvent("GPU command FIFO processed");
                         }
                     }
 

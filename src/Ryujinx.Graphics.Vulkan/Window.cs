@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Vulkan.Effects;
 using Silk.NET.Vulkan;
@@ -26,6 +27,7 @@ namespace Ryujinx.Graphics.Vulkan
         private Semaphore[] _renderFinishedSemaphores;
 
         private int _frameIndex;
+        private int _presentLogCount;
 
         private int _width;
         private int _height;
@@ -87,16 +89,18 @@ namespace Ryujinx.Graphics.Vulkan
         private unsafe void CreateSwapchain()
         {
             // Window.cs cannot reference Ryujinx.Headless.SDL2.Program
-            // (reverse project dependency), so plain Console.WriteLine is
-            // used here, same as the rest of this investigation's
+            // (reverse project dependency), so BootEventBridge.Report is
+            // used here, which routes through the same deterministic
+            // "boot-event" bridge once Program.cs wires it at managed-entry
+            // time, same as the rest of this investigation's
             // Ryujinx.Graphics.Vulkan-side instrumentation. capabilities/
             // formats/present-modes were ALREADY queried by this existing
             // code before this edit - only the logging of their already-
             // computed values is new, no new Vulkan calls were added.
-            Console.WriteLine("[BOOT] swapchain creation begin");
+            BootEventBridge.Report("swapchain creation begin");
 
             _gd.SurfaceApi.GetPhysicalDeviceSurfaceCapabilities(_physicalDevice, _surface, out var capabilities);
-            Console.WriteLine($"[BOOT] surface capabilities: minImageCount={capabilities.MinImageCount}, maxImageCount={capabilities.MaxImageCount}, currentExtent={capabilities.CurrentExtent.Width}x{capabilities.CurrentExtent.Height}");
+            BootEventBridge.Report("surface capabilities", $"minImageCount={capabilities.MinImageCount},maxImageCount={capabilities.MaxImageCount},currentExtent={capabilities.CurrentExtent.Width}x{capabilities.CurrentExtent.Height}");
 
             uint surfaceFormatsCount;
 
@@ -108,7 +112,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _gd.SurfaceApi.GetPhysicalDeviceSurfaceFormats(_physicalDevice, _surface, &surfaceFormatsCount, pSurfaceFormats);
             }
-            Console.WriteLine($"[BOOT] surface formats count = {surfaceFormatsCount}");
+            BootEventBridge.Report("surface formats count", surfaceFormatsCount.ToString());
 
             uint presentModesCount;
 
@@ -120,7 +124,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _gd.SurfaceApi.GetPhysicalDeviceSurfacePresentModes(_physicalDevice, _surface, &presentModesCount, pPresentModes);
             }
-            Console.WriteLine($"[BOOT] surface present modes count = {presentModesCount}");
+            BootEventBridge.Report("surface present modes count", presentModesCount.ToString());
 
             uint imageCount = capabilities.MinImageCount + 1;
             if (capabilities.MaxImageCount > 0 && imageCount > capabilities.MaxImageCount)
@@ -132,7 +136,7 @@ namespace Ryujinx.Graphics.Vulkan
 
             var extent = ChooseSwapExtent(capabilities);
 
-            Console.WriteLine($"[BOOT] swapchain chosen format={surfaceFormat.Format}, colorSpace={surfaceFormat.ColorSpace}, extent={extent.Width}x{extent.Height}, imageCount={imageCount}");
+            BootEventBridge.Report("swapchain chosen", $"format={surfaceFormat.Format},colorSpace={surfaceFormat.ColorSpace},extent={extent.Width}x{extent.Height},imageCount={imageCount}");
 
             _width = (int)extent.Width;
             _height = (int)extent.Height;
@@ -175,13 +179,12 @@ namespace Ryujinx.Graphics.Vulkan
                 SwizzleComponent.Alpha);
 
             Result swapchainResult = _gd.SwapchainApi.CreateSwapchain(_device, in swapchainCreateInfo, null, out _swapchain);
-            Console.WriteLine($"[BOOT] vkCreateSwapchainKHR = {swapchainResult}");
+            BootEventBridge.Report("vkCreateSwapchainKHR", swapchainResult.ToString());
             if (swapchainResult != Result.Success)
             {
-                Console.WriteLine($"[BOOT] swapchain creation failed: {swapchainResult}");
+                BootEventBridge.Report("swapchain creation failed", swapchainResult.ToString());
             }
             swapchainResult.ThrowOnError();
-            Console.WriteLine("[BOOT] swapchain creation success");
 
             _gd.SwapchainApi.GetSwapchainImages(_device, _swapchain, &imageCount, null);
 
@@ -191,6 +194,8 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _gd.SwapchainApi.GetSwapchainImages(_device, _swapchain, &imageCount, pSwapchainImages);
             }
+
+            BootEventBridge.Report("swapchain creation success", $"handle={_swapchain.Handle},extent={_width}x{_height},imageCount={_swapchainImages.Length}");
 
             _swapchainImageViews = new TextureView[imageCount];
 
@@ -331,6 +336,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public unsafe override void Present(ITexture texture, ImageCrop crop, Action swapBuffersCallback)
         {
+            _presentLogCount++;
+
             _gd.PipelineInternal.AutoFlush.Present();
 
             uint nextImage = 0;
@@ -338,6 +345,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             while (true)
             {
+                if (_presentLogCount <= 10)
+                {
+                    BootEventBridge.Report("acquire begin");
+                }
+
                 var acquireResult = _gd.SwapchainApi.AcquireNextImage(
                     _device,
                     _swapchain,
@@ -345,6 +357,12 @@ namespace Ryujinx.Graphics.Vulkan
                     _imageAvailableSemaphores[semaphoreIndex],
                     new Fence(),
                     ref nextImage);
+
+                if (_presentLogCount <= 10)
+                {
+                    BootEventBridge.Report("acquire result", acquireResult.ToString());
+                    BootEventBridge.Report("acquire imageIndex", nextImage.ToString());
+                }
 
                 if (acquireResult == Result.ErrorOutOfDateKhr ||
                     acquireResult == Result.SuboptimalKhr ||
@@ -363,6 +381,11 @@ namespace Ryujinx.Graphics.Vulkan
             var swapchainImage = _swapchainImages[nextImage];
 
             _gd.FlushAllCommands();
+
+            if (_presentLogCount <= 10)
+            {
+                BootEventBridge.Report("present command buffer rent");
+            }
 
             var cbs = _gd.CommandBufferPool.Rent();
 
@@ -498,9 +521,19 @@ namespace Ryujinx.Graphics.Vulkan
                 PResults = &result,
             };
 
+            if (_presentLogCount <= 10)
+            {
+                BootEventBridge.Report("queuePresent begin", $"imageIndex={nextImage}");
+            }
+
+            Result presentResult;
             lock (_gd.QueueLock)
             {
-                _gd.SwapchainApi.QueuePresent(_gd.Queue, in presentInfo);
+                presentResult = _gd.SwapchainApi.QueuePresent(_gd.Queue, in presentInfo);
+            }
+            if (_presentLogCount <= 10)
+            {
+                BootEventBridge.Report("queuePresent result", presentResult.ToString());
             }
         }
 

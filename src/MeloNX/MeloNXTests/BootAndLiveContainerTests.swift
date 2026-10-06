@@ -269,4 +269,157 @@ struct BootAndLiveContainerTests {
 
         #expect(BootDiagnostics.shared.metalViewAlive)
     }
+
+    // MARK: - Swapchain -> acquire -> submit -> present trace (diagnóstico real #3)
+
+    /// Real bug this guards against: a previous round logged
+    /// "swapchain creation success" unconditionally reaching the report,
+    /// but the actual device trace showed swapchainCreated=false even
+    /// though MoltenVK's own driver log proved vkCreateSwapchainKHR had
+    /// really succeeded - the transport (plain Console.WriteLine from a
+    /// lower-level project) was unreliable, not the logic. This test only
+    /// guards the Swift-side logic: a bare "swapchain creation begin" or
+    /// "vkCreateSwapchainKHR" result event must NOT mark success by itself.
+    @Test func swapchainOnlyMarksTrueAfterSuccessEvent() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("swapchain creation begin")
+        BootDiagnostics.shared.log("vkCreateSwapchainKHR", result: "Success")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!BootDiagnostics.shared.swapchainCreated)
+
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=123,extent=1320x743,imageCount=3")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.swapchainCreated)
+        #expect(BootDiagnostics.shared.swapchainHandle == "123")
+        #expect(BootDiagnostics.shared.swapchainImageCount == 3)
+    }
+
+    /// firstSubmit must reflect a REAL vkQueueSubmit success, not merely
+    /// entering the method that calls it - the exact bug the previous
+    /// round's "first GPU command submitted" breadcrumb had (it fired on
+    /// Device.WaitFifo() returning true, a managed-level FIFO concept).
+    @Test func submitOnlyMarksTrueAfterRealSuccess() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("queueSubmit begin")
+        BootDiagnostics.shared.log("queueSubmit result", result: "ErrorDeviceLost")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!BootDiagnostics.shared.firstSubmit)
+        #expect(BootDiagnostics.shared.lastSubmitResult == "ErrorDeviceLost")
+
+        BootDiagnostics.shared.log("queueSubmit result", result: "Success")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.firstSubmit)
+        #expect(BootDiagnostics.shared.lastSubmitResult == "Success")
+    }
+
+    /// firstPresent accepts both Success and SuboptimalKHR (frame still
+    /// presented, swapchain just scheduled for recreation) but nothing else.
+    @Test func presentMarksTrueOnSuccessOrSuboptimalButNotOtherResults() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("queuePresent result", result: "ErrorOutOfDateKhr")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!BootDiagnostics.shared.firstPresent)
+
+        BootDiagnostics.shared.log("queuePresent result", result: "SuboptimalKhr")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.firstPresent)
+        #expect(BootDiagnostics.shared.lastPresentResult == "SuboptimalKhr")
+    }
+
+    /// firstFrame must only be trusted when the engine's "ran-first-frame"
+    /// signal is corroborated by a real successful present - otherwise it's
+    /// a logged anomaly, not a silently-accepted success.
+    @Test func ranFirstFrameOnlySetsFirstFrameWhenPresentAlreadySucceeded() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("ran-first-frame")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!BootDiagnostics.shared.firstFrame)
+
+        BootDiagnostics.shared.log("queuePresent result", result: "Success")
+        BootDiagnostics.shared.log("ran-first-frame")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.firstFrame)
+    }
+
+    /// The watchdog's whole purpose: distinguish "render thread alive" from
+    /// "render thread alive AND actually progressing" - the last Vulkan-
+    /// level milestone and its timestamp must be retained for exactly that.
+    @Test func renderActivityTimestampAdvancesOnRealProgressEvents() async throws {
+        BootDiagnostics.shared.beginBoot()
+        #expect(BootDiagnostics.shared.secondsSinceLastRenderProgress() == nil)
+
+        BootDiagnostics.shared.log("acquire result", result: "Success")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.lastRenderLoopStage == "acquire result")
+        let elapsed = BootDiagnostics.shared.secondsSinceLastRenderProgress()
+        #expect(elapsed != nil && elapsed! < 2.0)
+    }
+
+    @Test func acquireResultAccumulatesCountAndLastResult() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("acquire begin")
+        BootDiagnostics.shared.log("acquire result", result: "NotReady")
+        BootDiagnostics.shared.log("acquire result", result: "Success")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.acquireAttempted)
+        #expect(BootDiagnostics.shared.acquireAttemptCount == 2)
+        #expect(BootDiagnostics.shared.lastAcquireResult == "Success")
+        #expect(BootDiagnostics.shared.firstAcquireSucceeded)
+    }
+
+    @Test func lastVulkanResultIsSetOnlyByRealVkResultCarryingStages() async throws {
+        BootDiagnostics.shared.beginBoot()
+        // Stage names that do NOT carry a VkResult must not clobber it.
+        BootDiagnostics.shared.log("render loop entered")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(BootDiagnostics.shared.lastVulkanResult == nil)
+
+        BootDiagnostics.shared.log("vkCreateSwapchainKHR", result: "Success")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(BootDiagnostics.shared.lastVulkanResult == "Success")
+    }
+
+    /// beginBoot() must clear every new field from this round too, or a
+    /// retry attempt would start with stale success/failure state.
+    @Test func beginBootResetsSwapchainTraceFields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=2")
+        BootDiagnostics.shared.log("acquire result", result: "Success")
+        BootDiagnostics.shared.log("command buffer begin")
+        BootDiagnostics.shared.log("queueSubmit result", result: "Success")
+        BootDiagnostics.shared.log("queuePresent result", result: "Success")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.swapchainCreated)
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(!BootDiagnostics.shared.swapchainCreated)
+        #expect(BootDiagnostics.shared.swapchainImageCount == nil)
+        #expect(BootDiagnostics.shared.swapchainHandle == nil)
+        #expect(!BootDiagnostics.shared.acquireAttempted)
+        #expect(BootDiagnostics.shared.acquireAttemptCount == 0)
+        #expect(!BootDiagnostics.shared.firstAcquireSucceeded)
+        #expect(BootDiagnostics.shared.lastAcquireResult == nil)
+        #expect(!BootDiagnostics.shared.commandBufferStarted)
+        #expect(!BootDiagnostics.shared.commandBufferRecorded)
+        #expect(BootDiagnostics.shared.lastSubmitResult == nil)
+        #expect(BootDiagnostics.shared.lastPresentResult == nil)
+        #expect(!BootDiagnostics.shared.renderLoopEntered)
+        #expect(BootDiagnostics.shared.renderLoopIterations == 0)
+        #expect(BootDiagnostics.shared.lastRenderLoopStage == nil)
+        #expect(BootDiagnostics.shared.secondsSinceLastRenderProgress() == nil)
+    }
 }
