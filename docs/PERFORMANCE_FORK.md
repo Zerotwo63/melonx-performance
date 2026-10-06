@@ -1317,6 +1317,101 @@ CI compile correctamente (incluye NativeAOT), y la pregunta central —
 dónde se detiene realmente el pipeline — solo la responde la siguiente
 prueba real en el iPhone con este IPA.
 
+## Diagnóstico real #3: el transporte, no el hook, era el problema — y faltaba instrumentación real de acquire/submit/present
+
+El diagnóstico #2 produjo un reporte real del iPhone con una contradicción
+aparente: `managedThreadAlive=true`, `renderThreadAlive=true`,
+`lastRendererStage=GPU renderer initialized`, `MetalView alive=true`,
+`surfaceCreated=true` — pero `swapchainCreated=false`,
+`firstSubmit/firstPresent/firstFrame=false`, y el watchdog disparando por
+timeout. Al mismo tiempo, el log crudo de MoltenVK detrás del reporte
+mostraba `[mvk-info] Created ... swapchain images with size (1320, 743)`.
+
+**Causa real, confirmada leyendo el código, no supuesta:**
+
+1. `Window.cs`/`VulkanInitialization.cs` (proyecto `Ryujinx.Graphics.Vulkan`)
+   no pueden referenciar `Ryujinx.Headless.SDL2.Program` (dependencia
+   inversa), así que su instrumentación usaba `Console.WriteLine` plano en
+   vez del bridge determinista (`TriggerCallbackWithData`) ya probado que
+   usan `MetalView`/surface creation. Ese transporte plano nunca estaba
+   confirmado como confiable en iOS — y el reporte real demuestra que NO
+   lo es: `surfaceCreated=true` (vía bridge) llegó bien, `swapchainCreated`
+   (vía `Console.WriteLine` puro) no, aunque MoltenVK probaba que el
+   `vkCreateSwapchainKHR` subyacente sí había tenido éxito. Es decir: el
+   swapchain SÍ existía — nuestra instrumentación de ese punto exacto
+   nunca llegaba a Swift.
+2. Se corrige creando `Ryujinx.Common.Logging.BootEventBridge`: una clase
+   estática con delegados `ReportEvent`/`ReportFailure` que `Program.cs`
+   conecta a los ya probados `ReportBootEvent`/`ReportBootFailure` en el
+   arranque managed; si nunca se conecta, cae a `Console.WriteLine` (no se
+   pierde nada en ningún caso). `Window.cs`, `CommandBufferPool.cs`,
+   `VulkanInitialization.cs` y `VulkanRenderer.cs` migran TODOS sus
+   `[BOOT]` existentes a este bridge — mismo contenido, transporte
+   confiable.
+3. Un segundo bug real, independiente del transporte: `Window.Present()`
+   — el método que de verdad ejecuta `vkAcquireNextImageKHR` y
+   `vkQueuePresentKHR` en cada frame — no tenía NINGUNA instrumentación
+   previa, y el `VkResult` real de `QueuePresent` se descartaba por
+   completo (nunca se leía ni se comprobaba en ningún lado del código).
+   Se añade logging gated a las primeras 10 llamadas de `acquire
+   begin/result/imageIndex` y `queuePresent begin/result`, capturando
+   ahora ese valor sin cambiar ningún control de flujo (no se añadió
+   ningún `ThrowOnError` nuevo).
+4. `CommandBufferPool.Rent()`/`Return()` — el sitio real de
+   `vkBeginCommandBuffer`/`vkEndCommandBuffer`/`vkQueueSubmit` — se
+   instrumenta igual (gated a 10 veces, porque este pool es compartido por
+   todo el renderer, no solo por present). Se descubre y registra
+   explícitamente un camino silencioso existente: si `fence == null`,
+   `vkQueueSubmit` simplemente nunca se llamaba, sin log ni error — ahora
+   emite `"queueSubmit skipped"` siempre (no gated), por si ese es
+   justamente el punto de bloqueo.
+5. Se corrige un breadcrumb engañoso en `WindowBase.cs`: `"first GPU
+   command submitted"` en realidad solo medía `Device.WaitFifo()==true`
+   (un concepto de FIFO gestionado de Ryujinx, no una llamada Vulkan real)
+   — renombrado a `"GPU command FIFO processed"` para no confundirlo con
+   el nuevo evento real `"queueSubmit result"`.
+6. Lado Swift: se encuentra y corrige un bug real en el clasificador de
+   `BootDiagnostics` — `lastVulkanResult` buscaba la subcadena `"vulkan"`
+   en el nombre de la etapa, pero NINGUNA etapa real la contiene
+   (`"vkCreateInstance"`, `"acquire result"`, etc. no contienen la palabra
+   "vulkan") — por eso ese campo siempre leía `"none"` aunque las llamadas
+   Vulkan sí tuvieran resultado. Se reemplaza por un set explícito de
+   nombres de etapa cuyo valor es realmente un `VkResult`.
+7. Se redefinen `firstSubmit`/`firstPresent`/`firstFrame` con semántica
+   real en vez de "entramos al método": `firstSubmit` = primer
+   `"queueSubmit result"=Success`; `firstPresent` = primer `"queuePresent
+   result"` en `{Success, SuboptimalKhr}`; `firstFrame` = la señal del
+   motor `"ran-first-frame"` SOLO si `firstPresent` ya era `true` — si
+   llega sin un present exitoso observado, se registra como anomalía
+   (`log(...)`, no `fail(...)`, porque la señal del motor podría ser
+   legítima y el hueco estar solo en nuestra instrumentación) en vez de
+   aceptarse ciegamente.
+8. Nuevos campos de diagnóstico (ver `BootWatchdogView.swift` y
+   `buildReport()`): `swapchainImageCount`, `swapchainHandle`,
+   `acquireAttempted`/`acquireAttemptCount`/`firstAcquireSucceeded`/
+   `lastAcquireResult`, `commandBufferStarted`/`commandBufferRecorded`,
+   `lastSubmitResult`, `lastPresentResult`, `renderLoopEntered`/
+   `renderLoopIterations`/`lastRenderLoopStage`/
+   `secondsSinceLastRenderProgress`. El watchdog ahora registra su fallo
+   por timeout con todos estos datos en el mensaje, no solo
+   `lastManagedStage`/`lastRendererStage`.
+
+**No se cambió ningún comportamiento de renderizado** — ni vsync, ni
+present mode, ni drawable size, ni threading, por instrucción explícita.
+Solo instrumentación aditiva y captura de valores de retorno que antes se
+descartaban.
+
+**CI (run 37535535539, commit `4f0d249a7`) compiló en verde** y produjo
+`MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios
+(`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`).
+
+**Qué sigue sin poder verificarse aquí**: si el swapchain/acquire/submit/
+present de verdad progresan o dónde se detienen exactamente — eso solo lo
+responde la siguiente prueba real en el iPhone con este IPA, leyendo
+`swapchainImageCount`, `lastAcquireResult`, `lastSubmitResult`,
+`lastPresentResult` y `lastRenderLoopStage`/`secondsSinceLastRenderProgress`
+en el reporte.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -1345,3 +1440,4 @@ prueba real en el iPhone con este IPA.
 | `feat(boot): LiveContainer-aware JIT flow, full boot instrumentation, watchdog` | `cd0a1a453` | `RuntimeEnvironment.swift` (nuevo), `BootDiagnostics.swift` (nuevo), `BootWatchdogView.swift` (nuevo), `LaunchGameHandler.swift`, `JITCoordinator.swift`, `LogCapture.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (nuevo), + `Program.cs`/`WindowBase.cs`/`VulkanRenderer.cs`/`Window.cs`/`Translator.cs` (C#, solo logging aditivo) | Causa estructural: `startGame()` no esperaba el resultado async de `enableJIT()`, y `enableJIT()` intentaba sus métodos internos incluso en LiveContainer, donde StikDebug ya hizo ese trabajo antes de lanzar MeloNX. Se divide `startGame()` en verificación LiveContainer vs adquisición nativa → única `startGameAfterJITConfirmed()`. `JITCoordinator.failImmediately()` cancela polling en fallo terminal; `recordFailure` ya no sobrescribe la primera razón real. `BootDiagnostics` rastrea cada etapa con persistencia en disco; `LogCapture` corrige un bug real de múltiples-consumidores-compitiendo-por-el-mismo-stream. Watchdog de 15s muestra panel interactivo con Copy/Save/Exit. Hallazgo documentado (no inventado): `initialize_dualmapped()` retorna `true` casi incondicionalmente — no prueba que el JIT dual-mapped funcione en runtime. **CI (run 37490713768) compiló en verde** (incluye recompilar el core C# con NativeAOT) y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID sin cambios. Las cadenas Swift (`GAME BOOT DIAGNOSTICS`, `boot-report.txt`, `startGame called`, `JIT verification begin`, `LiveContainer launched MeloNX`, `initialize_dualmapped begin`) se confirmaron en el binario principal. **Limitación honesta**: la búsqueda de bytes NO funcionó contra `Ryujinx.Headless.SDL2.dylib` (NativeAOT) — ni siquiera para un string preexistente de hace tiempo (`"Dual Mapped JIT enabled."`), así que esa técnica simplemente no aplica de forma confiable a este binario compilado con NativeAOT; no es evidencia de que el cambio esté ausente. La verificación real para el lado C# es: los diffs se revisaron línea por línea antes de integrarlos (ver más arriba) y CI — que invoca el compilador real — terminó en verde |
 | `feat(boot): deterministic C#->Swift bridge, trace ryujinx.start to swapchain` | `165268dd3` | `Ryujinx.swift`, `MetalView.swift`, `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` + `Program.cs`, `WindowBase.cs`, `VulkanInitialization.cs`, `Window.cs`, `MoltenVKWindow.cs` (C#) | Diagnóstico real #2 (ver sección arriba): `ryujinx.start` retornaba en 0.02s (solo programa un `Task.detached`, nunca esperó nada) y ningún breadcrumb C# de la ronda anterior aparecía en el reporte — sin confirmar si `Console.WriteLine` llega de verdad. Se agrega un bridge determinista `ReportBootEvent`/`ReportBootFailure` (reutiliza `TriggerCallbackWithData`, ya probado) con prueba explícita de alcance (`BOOT-TEST managed code reached`), `AppDomain.UnhandledException`/`TaskScheduler.UnobservedTaskException` instalados, ciclo de vida completo del hilo gestionado, traza completa `Load()`→`ExecutionEntrypoint()`→`Execute()`→`Render()` con nombre real del hilo GPU (`GUI.RenderLoop`), y Vulkan/MoltenVK con `VkResult` simbólico real en cada paso — incluyendo el hallazgo de que la creación de surface real vive en `MoltenVKWindow.CreateWindowSurface`, no en `Window.cs`, con la condición de carrera `nativeMetalLayer == IntPtr.Zero` instrumentada explícitamente. `MetalView.createView()` ahora loguea bounds/drawableSize/ptr reales. Watchdog ya no termina en `failureStage=none`. Ningún comportamiento real cambiado, solo logging aditivo. **CI (run 37524911759) falló de verdad al compilar**: `GetDeviceNameSafe` (helper nuevo en `VulkanInitialization.cs`) no compilaba — ver fila siguiente |
 | `fix(boot): fix CS0213/CS1061 compile error in GetDeviceNameSafe` | `f927f32f1` | `VulkanInitialization.cs` | `DeviceName` es un fixed-size buffer; en contexto `unsafe`, acceder a él YA evalúa directamente a `byte*` (no a un array/buffer que necesite `fixed` de nuevo) — envolverlo en un segundo `fixed (byte* namePtr = ...)` causaba CS0213 ("already fixed expression"), y llamar `.ToArray()` sobre ese `byte*` causaba CS1061 (no existe ese método en un puntero). Corregido recorriendo el buffer manualmente hasta el NUL para obtener la longitud, sin `fixed` adicional ni `.ToArray()`. **CI (run 37526203219) compiló en verde** y produjo `MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`) |
+| `feat(boot): trace real swapchain/acquire/submit/present path, fix unreliable transport` | `4f0d249a7` | `BootEventBridge.cs` (nuevo, `Ryujinx.Common/Logging`), `Window.cs`, `CommandBufferPool.cs`, `VulkanInitialization.cs`, `VulkanRenderer.cs`, `Program.cs`, `WindowBase.cs` (C#) + `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (Swift) | Diagnóstico real #3 (ver sección arriba): reporte real del iPhone mostraba `swapchainCreated=false` pese a que MoltenVK probaba que `vkCreateSwapchainKHR` había tenido éxito — causa: transporte `Console.WriteLine` plano no confiable en proyectos sin acceso al bridge determinista. Se crea `BootEventBridge` (delegado conectado por `Program.cs` al bridge ya probado, con fallback a `Console.WriteLine`) y se migran todos los `[BOOT]` existentes de `Ryujinx.Graphics.Vulkan`. Se instrumenta por primera vez el camino real de `Window.Present()` (`vkAcquireNextImageKHR`/`vkQueuePresentKHR`, antes sin ningún log y con el `VkResult` de present descartado — bug real) y `CommandBufferPool` (`vkQueueSubmit`, incluyendo el caso `fence==null` que lo saltaba en silencio). Lado Swift: corregido un bug real en `lastVulkanResult` (buscaba la subcadena "vulkan", que ninguna etapa real contiene), redefinidos `firstSubmit`/`firstPresent`/`firstFrame` para exigir un `VkResult` real de éxito en vez de "entramos al método", 14 campos nuevos de diagnóstico, watchdog con mensaje de fallo mucho más rico, 9 tests nuevos. Ningún comportamiento de renderizado cambiado. **CI (run 37535535539) compiló en verde** y produjo `MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios |
