@@ -859,6 +859,76 @@ de Xcode (este repo usa Swift 5.0 sin concurrencia estricta, y
 `Task.detached` ya tiene precedente en `Runner.swift`, pero solo CI puede
 confirmarlo).
 
+## Bug 1 confirmado resuelto en dispositivo real; foco exclusivo en Bug 2 (JIT)
+
+El usuario confirmó en iPhone real: keys OK, firmware OK, Setup avanza
+automáticamente sin tocar Welcome/Skip. El fix de `3a6a43486`
+(`Task.Run` eliminado del instalador nativo) funcionó. **No se vuelve a
+tocar nada de `SetupView.swift`/`OnboardingGate.swift`/`Program.cs` en
+este commit**, por instrucción explícita.
+
+Con onboarding resuelto, MeloNX llega a la pantalla de JIT y muestra
+"JIT Not Acquired" — la alerta genérica de `JITPopover` (tras 30s de
+sondeo sin éxito), no la alerta detallada de `LaunchGameHandler`. Antes
+de adivinar una causa, se revisó el gating pedido explícitamente:
+
+- `hasJITEntitlement`/`increased-memory-limit`: **código muerto** desde
+  la reconciliación con los commits paralelos (`52dcc9b4c`) —
+  `shouldLaunchGame`/`shouldShowPopover`/`shouldCheckJIT` ya no lo
+  referencian. No es la causa actual (ya se corrigió en una ronda
+  anterior).
+- `get-task-allow`: gate real, pero solo dentro de
+  `BuiltInStikJITAvailability.unavailableReason()` — y AltStore/firma
+  de desarrollo gratuita normalmente SÍ lo incluye por defecto, así que
+  no se asume que bloquee nada sin medirlo.
+- `builtInStikJIT`: ya no es un requisito manual — `enableJIT()` lo
+  enciende solo cuando `BuiltInStikJITAvailability.isAvailable`.
+
+**Hipótesis más probable (sin confirmar aún por falta de medición real):**
+`BuiltInStikJITAvailability.unavailableReason() == .noPairingFileImported`.
+El usuario nunca ha instalado StikDebug ni tiene un pairing file
+importado — sin él, la cadena entera de Built-in StikJIT es `false` por
+definición, cae al último `else` de `enableJIT()`, y el único método que
+de verdad se intenta es `JITStreamerEB` (que depende de que el túnel
+LocalDevVPN esté arriba). No se asume: el reporte de diagnóstico que
+sigue existe exactamente para confirmar o refutar esto con datos reales
+del dispositivo, no con esta inferencia de código.
+
+**Instrumentación agregada** (`JITDiagnostics.swift`, nuevo; logging
+en `JITCoordinator`/`LaunchGameHandler`; botón en `JITPopover`):
+
+- `JITCoordinator` ahora lleva un historial real por intento
+  (`methodAttempts: [JITMethodAttempt]`, con nombre/inicio/resultado/
+  error/tiempo transcurrido) y un log visible en pantalla
+  (`diagnosticsLog`, mismo patrón que el de `SetupView` — `print()` no
+  sirve sin Mac). Los `print("[JIT] ...")` existentes se migraron a
+  `logDiag(...)` para que también aparezcan ahí.
+- `LaunchGameHandler.enableJIT()` registra cada método que intenta
+  (`beginAttempt`/`finishAttempt`) — incluyendo TrollStore/StikDebug, que
+  al ser apps externas se marcan `"started (external, result observed
+  via JITCoordinator's poll)"` en vez de fabricar un true/false que
+  MeloNX no puede conocer síncronamente.
+- `JITDiagnostics.buildReport()` construye el reporte completo pedido
+  (App/Entitlements/Settings/Runtime/Coordinator/METHOD N/FINAL),
+  incluyendo pruebas de capacidad reales en tiempo de ejecución:
+  `canAllocateExecutableMemory` (reusa `allocateTest()`),
+  `canChangeMemoryProtection` (mprotect puro, sin verificar ejecución),
+  `MAP_JIT test` (mmap con el flag `0x0800` hardcodeado — no expuesto de
+  forma consistente en los headers del SDK de iOS), `pthread_jit_write_
+  protect available` (`dlsym`), `debuggerAttached` (`checkDebugged()`).
+  `increased-memory-limit` se reporta como un entitlement más, nunca
+  como señal de que JIT esté disponible.
+- Botón **"Copy JIT Diagnostics"** en la propia alerta "JIT Not Acquired"
+  de `JITPopover` — copia el reporte completo al portapapeles vía
+  `UIPasteboard`, visible/copiable sin Xcode/Mac.
+
+**Qué sigue sin poder verificarse aquí**: cuál es la razón real de
+`unavailableReason()` en el dispositivo del usuario, si `JITStreamerEB`
+realmente alcanza el túnel LocalDevVPN, y si alguna de las pruebas de
+capacidad runtime (`MAP_JIT`, `pthread_jit_write_protect`) se comporta
+distinto a lo esperado en este hardware/firma específicos — todo eso
+requiere el reporte copiado desde el iPhone real.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -879,3 +949,4 @@ confirmarlo).
 | `fix(onboarding+jit): auto-advance setup and make Built-in StikJIT actually verifiable` | `180a6a684` | `OnboardingGate.swift` (nuevo), `SetupView.swift`, `MeloNXBuiltInJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift`, `JITPopover.swift`, `MeloNXTests/OnboardingGateTests.swift` (nuevo), `MeloNXTests/JITFlowTests.swift` | Bug 1 y Bug 2 reportados tras prueba real en dispositivo (ver secciones arriba). Bug 1: nada reevaluaba `keysImported && firmImported` para avanzar — solo un botón manual o el atajo de Skip; se agrega `OnboardingGate` + `finishSetupIfReady()` que avanza sola tras cada import y en `onAppear`. Bug 2: `enableCurrentProcess()` no esperaba ningún resultado y nunca llamaba `.prepare` (sin DDI cacheado, `.enable` no tiene nada con qué trabajar); además `JITPopover` sondeaba sin límite y sin reacción al fallo, por lo que "stuck forever" estaba garantizado por diseño incluso si todo lo demás fallara rápido. Se corrigen los tres puntos; no se simula `.acquired` en ningún punto. **Reconciliado por rebase** con 5 commits paralelos ya presentes en el remoto (`a48ad6dc5`..`52dcc9b4c`, mismo autor) que atacaban los mismos bugs desde otro ángulo — incluyendo un hallazgo real que esta sesión no había visto: `shouldLaunchGame`/`shouldShowPopover`/`shouldCheckJIT` estaban también condicionados a `hasJITEntitlement`, que un build firmado por AltStore gratis no tiene, lo que podía impedir que `JITPopover` se mostrara. La rama final conserva ambos aportes: su manejo robusto de `startAccessingSecurityScopedResource()`, su auto-activación del toggle `builtInStikJIT` y su alerta con motivo real, más el `async`/`.prepare`-primero de esta sesión y los logs `[SETUP]`/`[JIT]` pedidos. **CI (run 37409105830) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.2 MB); bundle ID sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`); todas las cadenas `[SETUP] ...`/`[JIT] ...` de más de 15 bytes verificadas presentes en el binario por búsqueda directa |
 | `fix(setup): add on-device diagnostics panel, Bug 1 still not fixed` | `f850cddcf` | `SetupView.swift` | **`180a6a684` no resolvió Bug 1 en el iPhone real** del usuario (ver sección arriba) — se queda en Welcome/Setup tras importar keys+firmware, solo avanza con Welcome→Skip manual. En vez de adivinar de nuevo, se agrega un panel de diagnóstico visible en la propia pantalla de Setup (sin Xcode/Mac): snapshot real de filesystem/core para keys y firmware (independiente del `@State` cacheado), estado de `OnboardingGate`, log visible con las cadenas `[KEYS]`/`[FIRMWARE]`/`[SETUP]` pedidas, botón "Reevaluate Now" (llama la misma función que debería dispararse solo) y "Copy Diagnostics" (copia todo al clipboard). No se afirma que Bug 1 esté resuelto; esto existe para que la siguiente prueba real aísle la causa entre: import que no termina, validador que devuelve false, instancia equivocada, SwiftUI que no refresca, otra vista revirtiendo la transición, validación prematura, o ruta equivocada. JIT (Bug 2) no se toca salvo preservar sus logs existentes |
 | `fix(firmware): make native firmware install actually block until done` | `3a6a43486` | `Program.cs`, `SetupView.swift` | Causa exacta de Bug 1 (ver sección arriba): `Program.InstallFirmware` lanzaba la instalación real en `Task.Run(...)` y retornaba de inmediato la versión del paquete de *origen* (`VerifyFirmwarePackage`, que nunca toca `registered/`); `[FIRMWARE] real validation = true` estaba validando la fuente, no el destino. Se quita el `Task.Run`, se llama la instalación síncrona directamente y se verifica contra `GetCurrentFirmwareVersion()` (destino real) antes de retornar. Rutas confirmadas por lectura de código: SOURCE = URL del picker, TEMP = `Documents/bis/system/temp` (se borra tras moverse), DESTINATION = `Documents/bis/system/Contents/registered` — coincide con la ruta que ya usaba el diagnóstico, sin discrepancia de rutas. En Swift, `handleFirmwareImport` pasa a `Task.detached` (patrón ya usado en `Runner.swift`) para no congelar el hilo principal ahora que la llamada nativa bloquea de verdad; sin sleep/asyncAfter, espera el resultado real. Logs separados: picker vs installation vs final validation. Nuevo: sección "candidate paths" en el panel con conteo de archivos por ruta candidata |
+| `feat(jit): add in-app JIT diagnostics report and per-method attempt tracking` | *(pendiente de build)* | `JITDiagnostics.swift` (nuevo), `JITCoordinator.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | Bug 1 confirmado resuelto en iPhone real; foco exclusivo en Bug 2 (JIT) por instrucción explícita — `SetupView.swift`/`OnboardingGate.swift`/`Program.cs` no se tocan en este commit. `JITCoordinator` gana un historial real por intento (`methodAttempts`) y un log visible en pantalla (`logDiag`, mismo patrón que `SetupView`); `LaunchGameHandler.enableJIT()` registra cada método que intenta (JITStreamerEB/TrollStore/StikDebug/Built-in StikJIT), marcando los externos como "started (external)" en vez de fabricar un resultado que MeloNX no puede conocer síncronamente. `JITDiagnostics.buildReport()` arma el reporte completo pedido (App/Entitlements/Settings/Runtime/Coordinator/METHOD N/FINAL) con pruebas reales de capacidad (`allocateTest`, mprotect puro, `MAP_JIT`, `pthread_jit_write_protect_np`, `debuggerAttached`) — `increased-memory-limit` se reporta como un entitlement más, nunca como señal de que JIT esté disponible. Botón "Copy JIT Diagnostics" en la alerta de `JITPopover`. Revisado el gating pedido (`hasJITEntitlement`/`get-task-allow`/`builtInStikJIT`/`shouldCheckJIT`/`shouldShowPopover`/`shouldLaunchGame`): `hasJITEntitlement` ya es código muerto desde la reconciliación anterior; hipótesis más probable sin confirmar aún es `BuiltInStikJITAvailability.unavailableReason() == .noPairingFileImported` (el usuario nunca ha importado un pairing file) — el reporte de diagnóstico existe para confirmarlo con datos reales, no con esta inferencia |

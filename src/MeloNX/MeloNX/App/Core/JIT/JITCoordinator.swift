@@ -15,6 +15,18 @@ import Foundation
 ///   which checked isJITEnabled() immediately before ever waiting —
 ///   waitForJIT() does the same immediate check below so migrating that
 ///   call site doesn't add a spurious 0.5s delay when JIT is already on.
+/// One attempt at one JIT method, as seen by LaunchGameHandler.enableJIT().
+/// Exists so "Copy JIT Diagnostics" can show a real per-method history
+/// instead of just the final state.
+struct JITMethodAttempt: Identifiable {
+    let id = UUID()
+    let name: String
+    let startedAt: Date
+    var result: String = "pending"
+    var error: String?
+    var elapsed: TimeInterval?
+}
+
 final class JITCoordinator: ObservableObject {
     static let shared = JITCoordinator()
 
@@ -26,6 +38,9 @@ final class JITCoordinator: ObservableObject {
     }
 
     @Published private(set) var state: ReadinessState = .idle
+    @Published private(set) var diagnosticsLog: [String] = []
+    @Published private(set) var methodAttempts: [JITMethodAttempt] = []
+    @Published private(set) var lastFailureReason: String?
 
     private var pollTimer: Timer?
     private var pendingCompletions: [(Bool) -> Void] = []
@@ -33,6 +48,53 @@ final class JITCoordinator: ObservableObject {
     private init() {}
 
     var isPolling: Bool { pollTimer != nil }
+
+    /// On-screen, visible-without-Xcode log — same reasoning as SetupView's
+    /// diagLog: print() alone is useless to someone testing on a real
+    /// iPhone with no Mac.
+    func logDiag(_ message: String) {
+        print(message)
+        diagnosticsLog.append(message)
+        if diagnosticsLog.count > 300 {
+            diagnosticsLog.removeFirst(diagnosticsLog.count - 300)
+        }
+    }
+
+    func resetAttempts() {
+        methodAttempts.removeAll()
+        lastFailureReason = nil
+    }
+
+    @discardableResult
+    func beginAttempt(_ name: String) -> UUID {
+        let attempt = JITMethodAttempt(name: name, startedAt: Date())
+        methodAttempts.append(attempt)
+        logDiag("[JIT] attempting \(name)")
+        return attempt.id
+    }
+
+    /// `result` is free-form on purpose: TrollStore/StikDebug hand off to an
+    /// external app and MeloNX never learns their outcome synchronously —
+    /// callers for those pass something like "started (external)" instead
+    /// of a true/false this function would have to fabricate.
+    func finishAttempt(_ id: UUID, result: String, error: String? = nil) {
+        guard let index = methodAttempts.firstIndex(where: { $0.id == id }) else { return }
+        let elapsed = Date().timeIntervalSince(methodAttempts[index].startedAt)
+        methodAttempts[index].result = result
+        methodAttempts[index].error = error
+        methodAttempts[index].elapsed = elapsed
+
+        if let error {
+            logDiag("[JIT] \(methodAttempts[index].name) failed: \(error)")
+        } else {
+            logDiag("[JIT] \(methodAttempts[index].name) \(result)")
+        }
+    }
+
+    func recordFailure(_ reason: String) {
+        lastFailureReason = reason
+        logDiag("[JIT] acquisition failed")
+    }
 
     /// Starts a single poll loop for JIT readiness, or — if one is already
     /// running (e.g. checkJITAndRunGame's resume-after-relaunch wait is
@@ -63,14 +125,14 @@ final class JITCoordinator: ObservableObject {
 
         if isJITEnabled() {
             state = .ready
-            print("[JIT] acquired")
+            logDiag("[JIT] acquired")
             completion(true)
             return true
         }
 
         var attempt = 0
         state = .waiting(attempt: attempt)
-        print("[JIT] waiting")
+        logDiag("[JIT] waiting")
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] timer in
             guard let self else {
@@ -79,12 +141,13 @@ final class JITCoordinator: ObservableObject {
             }
 
             attempt += 1
-            print("[JIT] waiting attempt = \(attempt)")
+            self.logDiag("[JIT] waiting attempt = \(attempt)")
+            self.logDiag("[JIT] waiting attempt \(attempt)")
 
             if isJITEnabled() {
                 self.stopPolling()
                 self.state = .ready
-                print("[JIT] acquired")
+                self.logDiag("[JIT] acquired")
                 self.resolve(true, primary: completion)
                 return
             }
@@ -92,8 +155,9 @@ final class JITCoordinator: ObservableObject {
             if maxAttempts > 0 && attempt >= maxAttempts {
                 self.stopPolling()
                 self.state = .timedOut
-                print("[JIT] timed out")
-                print("[JIT] timeout")
+                self.logDiag("[JIT] timed out")
+                self.logDiag("[JIT] timeout")
+                self.recordFailure("JITCoordinator timed out after \(attempt) attempts")
                 self.resolve(false, primary: completion)
                 return
             }

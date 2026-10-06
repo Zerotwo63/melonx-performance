@@ -195,4 +195,60 @@ struct JITFlowTests {
         #expect(decodedResponse.message == "no DDI cached")
         #expect(decodedResponse.txmPresent == true)
     }
+
+    // --- JIT diagnostics plumbing (new) ---
+
+    @Test func beginAndFinishAttemptRecordsSuccess() {
+        JITCoordinator.shared.resetAttempts()
+
+        let id = JITCoordinator.shared.beginAttempt("TestMethod")
+        JITCoordinator.shared.finishAttempt(id, result: "success")
+
+        let attempt = JITCoordinator.shared.methodAttempts.first { $0.id == id }
+        #expect(attempt?.name == "TestMethod")
+        #expect(attempt?.result == "success")
+        #expect(attempt?.error == nil)
+        #expect((attempt?.elapsed ?? -1) >= 0)
+    }
+
+    @Test func finishAttemptRecordsError() {
+        JITCoordinator.shared.resetAttempts()
+
+        let id = JITCoordinator.shared.beginAttempt("TestMethod")
+        JITCoordinator.shared.finishAttempt(id, result: "failed", error: "boom")
+
+        let attempt = JITCoordinator.shared.methodAttempts.first { $0.id == id }
+        #expect(attempt?.result == "failed")
+        #expect(attempt?.error == "boom")
+    }
+
+    @Test func resetAttemptsClearsHistoryAndFailureReason() {
+        let id = JITCoordinator.shared.beginAttempt("TestMethod")
+        JITCoordinator.shared.finishAttempt(id, result: "failed", error: "boom")
+        JITCoordinator.shared.recordFailure("overall failure")
+
+        #expect(!JITCoordinator.shared.methodAttempts.isEmpty)
+        #expect(JITCoordinator.shared.lastFailureReason != nil)
+
+        JITCoordinator.shared.resetAttempts()
+
+        #expect(JITCoordinator.shared.methodAttempts.isEmpty)
+        #expect(JITCoordinator.shared.lastFailureReason == nil)
+    }
+
+    /// JITStreamerEB is attempted unconditionally by LaunchGameHandler,
+    /// regardless of any Settings toggle — this must always be listed,
+    /// even with every fallback toggle off.
+    @Test func enabledMethodNamesAlwaysListsInternalPath() {
+        let names = JITDiagnostics.enabledMethodNames()
+        #expect(names.contains { $0.contains("JITStreamerEB") })
+    }
+
+    @Test func diagnosticsReportIsNeverEmpty() {
+        let report = JITDiagnostics.buildReport()
+        #expect(report.contains("[JIT DIAGNOSTICS]"))
+        #expect(report.contains("Entitlements:"))
+        #expect(report.contains("Runtime:"))
+        #expect(report.contains("FINAL:"))
+    }
 }

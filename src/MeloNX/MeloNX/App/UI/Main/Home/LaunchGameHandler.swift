@@ -81,6 +81,9 @@ class LaunchGameHandler: ObservableObject {
     /// internal attempt has had a real chance to succeed or fail.
     func enableJIT() {
         ryujinx.checkForJIT()
+        JITCoordinator.shared.resetAttempts()
+        JITCoordinator.shared.logDiag("[JIT] acquisition started")
+        JITCoordinator.shared.logDiag("[JIT] enabled methods = \(JITDiagnostics.enabledMethodNames().joined(separator: ", "))")
         print("[JIT] activation requested")
         print("[JIT] request started")
         print("[JIT] current state = \(JITCoordinator.shared.state)")
@@ -92,16 +95,29 @@ class LaunchGameHandler: ObservableObject {
         gametorun = currentGame?.titleId ?? ""
 
         Task { @MainActor in
+            let jsebAttempt = JITCoordinator.shared.beginAttempt("JITStreamerEB")
             let acquired = await JITStreamerEB.attach()
+            JITCoordinator.shared.finishAttempt(
+                jsebAttempt,
+                result: acquired ? "success" : "failed",
+                error: acquired ? nil : "internal JIT server unreachable or attach request failed"
+            )
 
             guard !acquired else { return }
 
             print("[JIT] fallback selected")
 
             if self.nativeSettings.useTrollStore.value {
+                let attempt = JITCoordinator.shared.beginAttempt("TrollStore")
                 askForJIT()
+                // TrollStore hands off to the OS/another process - MeloNX has
+                // no synchronous result here. JITCoordinator's own poll is
+                // the only thing allowed to decide acquired/failed.
+                JITCoordinator.shared.finishAttempt(attempt, result: "started (external, result observed via JITCoordinator's poll)")
             } else if self.nativeSettings.stikJIT.value {
+                let attempt = JITCoordinator.shared.beginAttempt("StikDebug (external app)")
                 enableJITStik()
+                JITCoordinator.shared.finishAttempt(attempt, result: "started (external, result observed via JITCoordinator's poll)")
             } else if BuiltInStikJITAvailability.isAvailable {
                 // If the embedded helper is usable, prefer it automatically.
                 // Requiring the user to discover and toggle it first made the
@@ -110,6 +126,7 @@ class LaunchGameHandler: ObservableObject {
                 print("[JIT] built-in JIT enabled setting = true")
                 print("[JIT] built-in activation started")
 
+                let attempt = JITCoordinator.shared.beginAttempt("Built-in StikJIT")
                 let builtInAcquired = await MeloNXBuiltInJIT.enableCurrentProcess()
                 print("[JIT] enableCurrentProcess returned = \(builtInAcquired)")
 
@@ -117,12 +134,21 @@ class LaunchGameHandler: ObservableObject {
                 let verified = isJITEnabled()
                 print("[JIT] verification result = \(verified)")
 
+                JITCoordinator.shared.finishAttempt(
+                    attempt,
+                    result: verified ? "success" : "failed",
+                    error: verified ? nil : (builtInAcquired
+                        ? "enableCurrentProcess reported success but isJITEnabled() is still false"
+                        : "enableCurrentProcess did not grant JIT")
+                )
+
                 if !verified {
                     print("[JIT] failed reason = built-in activation did not grant JIT on this process")
                 }
             } else {
                 print("[JIT] no fallback available")
                 print("[JIT] built-in JIT enabled setting = false")
+                JITCoordinator.shared.recordFailure("no JIT method is available: the internal JITStreamerEB path failed and no fallback is enabled/available")
 
                 if self.currentGame != nil {
                     let reason: String

@@ -91,6 +91,9 @@ struct JITPopover: View {
                 JITCoordinator.shared.cancel()
                 startWaiting()
             }
+            Button("Copy JIT Diagnostics") {
+                JITDiagnostics.copyReportToClipboard()
+            }
             Button("Cancel", role: .cancel) {
                 presentationMode.wrappedValue.dismiss()
             }
