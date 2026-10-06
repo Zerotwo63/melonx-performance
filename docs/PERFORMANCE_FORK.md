@@ -718,6 +718,58 @@ Si cualquiera de los dos falla, el usuario ahora verá `[JIT] failed reason
 **no se simula éxito en ningún punto**: `.acquired` sigue dependiendo
 exclusivamente de que `isJITEnabled()` sea `true` de verdad.
 
+## Corrección: `180a6a684` NO resolvió Bug 1 en dispositivo real
+
+Prueba real en iPhone tras instalar el IPA de `180a6a684`: importar keys y
+firmware **no** avanzó la pantalla automáticamente — se quedó en
+Welcome/Setup, y solo avanzó después de que el usuario tocara "Welcome"
+(doble-tap) y usara Skip manualmente. Es decir, **el fix no funcionó en la
+práctica**, a pesar de que `OnboardingGate` pasaba todos sus tests
+unitarios. Esto es exactamente la discrepancia que el pedido original
+señaló: tests verdes sobre un tipo puro no prueban que la lógica de
+`SetupView` real se ejecute de la forma esperada en un dispositivo.
+
+En vez de adivinar una tercera vez, se agrega instrumentación visible EN
+la propia pantalla de Setup — sin necesitar Xcode/Mac — para que la
+siguiente prueba real determine cuál de estas hipótesis es la correcta:
+
+- A) la importación realmente no termina
+- B) el validador (`checkIfKeysImported()`/`fetchFirmwareVersion()`) devuelve `false`
+- C) Setup observa otra instancia
+- D) el estado se actualiza pero SwiftUI no refresca
+- E) la transición sí ocurre pero otra vista la revierte
+- F) la validación se ejecuta demasiado pronto
+- G) firmware/keys quedan en una ruta distinta de la que revisa Setup
+
+**Lo que se agregó** (`SetupView.swift`, estrictamente temporal/diagnóstico):
+
+- Un panel visible en la propia pantalla de Setup (iPhone e iPad) con:
+  KEYS (archivo encontrado + ruta exacta `Documents/system/prod.keys` +
+  validación real vía `Ryujinx.shared.checkIfKeysImported()`), FIRMWARE
+  (contenido encontrado en `Documents/bis/system/Contents/registered` +
+  versión detectada + validación real vía
+  `Ryujinx.shared.fetchFirmwareVersion()`), y SETUP (`hasKeys`/`hasFirmware`
+  cacheados, `requirementsSatisfied`, step actual, razón de bloqueo).
+  Deliberadamente consulta el filesystem/core real en cada render, no solo
+  el `@State` cacheado — si alguna vez difieren, eso aísla D/G directamente.
+- Log visible en pantalla (no solo `print()`, inútil sin Mac) con las
+  cadenas exactas pedidas: `[KEYS] importer completion`,
+  `[KEYS] real validation = ...`, `[FIRMWARE] importer completion`,
+  `[FIRMWARE] real validation = ...`, `[SETUP] reevaluate called`,
+  `[SETUP] keys = ...`, `[SETUP] firmware = ...`,
+  `[SETUP] requirementsSatisfied = ...`, `[SETUP] transition oldState -> newState`.
+- Botón **Reevaluate Now**, que llama exactamente `refreshAndEvaluate(...)`
+  — la misma función que `onAppear` y ambos importadores ya llaman — para
+  distinguir un problema de disparo/reactividad (si al presionarlo avanza)
+  de un problema de fuente de verdad (si sigue en `false`).
+- Botón **Copy Diagnostics**, que copia todo lo anterior (snapshot +
+  log completo) al clipboard vía `UIPasteboard`, para reportarlo sin Mac.
+
+**Importante:** esto es deliberadamente temporal — vive en el código hasta
+que la próxima prueba real en dispositivo identifique cuál de A–G es la
+causa; no se afirma que Bug 1 esté resuelto. Bug 2 (JIT) no se toca en
+este commit salvo preservar los logs `[JIT] ...` ya existentes.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -736,3 +788,4 @@ exclusivamente de que `isJITEnabled()` sea `true` de verdad.
 | `fix(jit): fix LocalizedStringKey conversion and MainActor isolation error` | `98c95e203` | `SettingsView.swift`, `LaunchGameHandler.swift` | Dos errores reales de compilación (log real, no especulado): (1) `infoMessage:` de `SettingsToggle` espera `LocalizedStringKey`, no `String` — los demás call sites pasan literales (que convierten implícitamente), pero `builtInStikJITInfoMessage` es una `String` calculada en tiempo de ejecución, así que necesita `LocalizedStringKey(...)` explícito. (2) Llamar a `MeloNXBuiltInJIT.enableCurrentProcess()` (`@MainActor`) desde `enableJIT()` (no aislado) en un contexto síncrono — se resuelve envolviendo la llamada en `Task { @MainActor in ... }`, el mismo patrón que ya usa el resto del código (`Ryujinx.swift`) |
 | `feat(jit): activate JitStreamerEB as the internal JIT path, StikDebug as fallback-only` | `89f6c1a3a` | `JitStreamerEB/EnableJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift` (logs), `MeloNXTests/JITFlowTests.swift` (nuevo) | Causa real (ver sección arriba): el archivo cliente de `jkcoxson/JitStreamer-EB` existía con cero llamadores; StikDebug no era "requisito" por falta de mecanismo interno, sino porque el mecanismo interno nunca se conectó. `JITStreamerEB.attach()` migrado a `async`/`await` y conectado como primer intento, incondicional, en `enableJIT()`; TrollStore/StikDebug/Built-in StikJIT quedan como fallback explícito solo si `attach()` falla. `JITCoordinator` no necesitó cambios de lógica, solo los `print("[JIT] ...")` pedidos. **CI (run 37378791033) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID verificado sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`). De los 6 logs pedidos, 3 (`activation requested`/`internal method selected`/`fallback selected`, todos >15 bytes) se confirmaron presentes en el binario por búsqueda directa de bytes; los otros 3 (`waiting`/`acquired`/`timed out`, los tres ≤15 bytes) no aparecieron así — consistente con la small-string optimization de Swift (strings ≤15 UTF-8 bytes se guardan inline, no como constante de texto clásica), no con que el código se haya eliminado: están en el `HEAD` compilado real, verificados por lectura de fuente, pero esa presencia específica solo se confirma en línea viendo el log de consola en un dispositivo real |
 | `fix(onboarding+jit): auto-advance setup and make Built-in StikJIT actually verifiable` | `180a6a684` | `OnboardingGate.swift` (nuevo), `SetupView.swift`, `MeloNXBuiltInJIT.swift`, `LaunchGameHandler.swift`, `JITCoordinator.swift`, `JITPopover.swift`, `MeloNXTests/OnboardingGateTests.swift` (nuevo), `MeloNXTests/JITFlowTests.swift` | Bug 1 y Bug 2 reportados tras prueba real en dispositivo (ver secciones arriba). Bug 1: nada reevaluaba `keysImported && firmImported` para avanzar — solo un botón manual o el atajo de Skip; se agrega `OnboardingGate` + `finishSetupIfReady()` que avanza sola tras cada import y en `onAppear`. Bug 2: `enableCurrentProcess()` no esperaba ningún resultado y nunca llamaba `.prepare` (sin DDI cacheado, `.enable` no tiene nada con qué trabajar); además `JITPopover` sondeaba sin límite y sin reacción al fallo, por lo que "stuck forever" estaba garantizado por diseño incluso si todo lo demás fallara rápido. Se corrigen los tres puntos; no se simula `.acquired` en ningún punto. **Reconciliado por rebase** con 5 commits paralelos ya presentes en el remoto (`a48ad6dc5`..`52dcc9b4c`, mismo autor) que atacaban los mismos bugs desde otro ángulo — incluyendo un hallazgo real que esta sesión no había visto: `shouldLaunchGame`/`shouldShowPopover`/`shouldCheckJIT` estaban también condicionados a `hasJITEntitlement`, que un build firmado por AltStore gratis no tiene, lo que podía impedir que `JITPopover` se mostrara. La rama final conserva ambos aportes: su manejo robusto de `startAccessingSecurityScopedResource()`, su auto-activación del toggle `builtInStikJIT` y su alerta con motivo real, más el `async`/`.prepare`-primero de esta sesión y los logs `[SETUP]`/`[JIT]` pedidos. **CI (run 37409105830) compiló en verde** y produjo `MeloNX-unsigned.ipa` (91.2 MB); bundle ID sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`); todas las cadenas `[SETUP] ...`/`[JIT] ...` de más de 15 bytes verificadas presentes en el binario por búsqueda directa |
+| `fix(setup): add on-device diagnostics panel, Bug 1 still not fixed` | *(pendiente de build)* | `SetupView.swift` | **`180a6a684` no resolvió Bug 1 en el iPhone real** del usuario (ver sección arriba) — se queda en Welcome/Setup tras importar keys+firmware, solo avanza con Welcome→Skip manual. En vez de adivinar de nuevo, se agrega un panel de diagnóstico visible en la propia pantalla de Setup (sin Xcode/Mac): snapshot real de filesystem/core para keys y firmware (independiente del `@State` cacheado), estado de `OnboardingGate`, log visible con las cadenas `[KEYS]`/`[FIRMWARE]`/`[SETUP]` pedidas, botón "Reevaluate Now" (llama la misma función que debería dispararse solo) y "Copy Diagnostics" (copia todo al clipboard). No se afirma que Bug 1 esté resuelto; esto existe para que la siguiente prueba real aísle la causa entre: import que no termina, validador que devuelve false, instancia equivocada, SwiftUI que no refresca, otra vista revirtiendo la transición, validación prematura, o ruta equivocada. JIT (Bug 2) no se toca salvo preservar sus logs existentes |

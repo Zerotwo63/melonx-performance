@@ -17,6 +17,8 @@ struct SetupView: View {
     @State private var keysImported = false
     @State private var firmImported = false
     @State private var showMainSetup = false
+    @State private var diagnosticsLog: [String] = []
+    @State private var lastOnboardingState: OnboardingStep = .keys
     @AppStorage("MeloNXAppMode") private var appModeRaw: String = ""
     @AppStorage("skippedSetup") var skippedSetup: Bool = false
     @Binding var isInSetup: Bool
@@ -86,41 +88,233 @@ struct SetupView: View {
         .onAppear {
             RyujinxBridge.initialize()
             isInSetup = true
-            keysImported = Ryujinx.shared.checkIfKeysImported()
-
-            let firmware = Ryujinx.shared.fetchFirmwareVersion()
-            firmImported = (firmware == "" ? "0" : firmware) != "0"
 
             // Covers reopening this screen or relaunching the app with both
-            // already imported from a previous session — finishSetupIfReady()
-            // must run here too, not just from the import callbacks, since
-            // nothing "changes" in that case to otherwise trigger it.
-            finishSetupIfReady()
+            // already imported from a previous session — this must run here
+            // too, not just from the import callbacks, since nothing
+            // "changes" in that case to otherwise trigger it.
+            refreshAndEvaluate(trigger: "onAppear")
         }
     }
 
-    // Bug 1 fix: keysImported/firmImported were tracked correctly, but
-    // nothing ever re-evaluated them to advance the screen on its own — the
-    // only way forward was the "Finish Setup" button (enabled, never
-    // auto-tapped) or the hidden double-tap-"Welcome"-to-Skip gesture. This
-    // runs after every import and on reappear, and advances by itself once
-    // both are actually valid.
+    // On-screen, visible-without-Xcode log for Bug A diagnosis. print()
+    // alone is useless to someone testing on a real iPhone with no Mac —
+    // this mirrors every line into a buffer the setup screen itself shows.
+    private func diagLog(_ message: String) {
+        print(message)
+        diagnosticsLog.append(message)
+        if diagnosticsLog.count > 300 {
+            diagnosticsLog.removeFirst(diagnosticsLog.count - 300)
+        }
+    }
+
+    // The single reevaluation path — onAppear, both import handlers, and
+    // the manual "Reevaluate Now" diagnostic button all call this exact
+    // function with nothing else in between. That's deliberate: if pressing
+    // the button advances setup but the automatic call sites don't, the bug
+    // is in *when* this runs, not in this function itself. If the button
+    // also fails, the bug is upstream of this function (real state never
+    // actually becomes true) and the diagnostics panel's "real" column
+    // shows which of keys/firmware is actually responsible.
+    private func refreshAndEvaluate(trigger: String) {
+        diagLog("[SETUP] reevaluate called")
+        diagLog("[SETUP] reevaluate trigger = \(trigger)")
+
+        keysImported = Ryujinx.shared.checkIfKeysImported()
+        let firmware = Ryujinx.shared.fetchFirmwareVersion()
+        firmImported = (firmware == "" ? "0" : firmware) != "0"
+
+        finishSetupIfReady()
+    }
+
+    // Bug A fix attempt #1 (180a6a684): keysImported/firmImported were
+    // tracked correctly, but nothing ever re-evaluated them to advance the
+    // screen on its own. On real-device testing that fix still did not
+    // advance automatically — the diagnostics panel below exists to find
+    // out why, rather than guess again.
     private func finishSetupIfReady() {
-        print("[SETUP] reevaluating onboarding state")
         let gate = OnboardingGate(keysValid: keysImported, firmwareValid: firmImported)
-        print("[SETUP] current onboarding step = \(gate.currentStep)")
-        print("[SETUP] requirements satisfied = \(gate.requirementsSatisfied)")
+
+        diagLog("[SETUP] keys = \(keysImported)")
+        diagLog("[SETUP] firmware = \(firmImported)")
+        diagLog("[SETUP] requirementsSatisfied = \(gate.requirementsSatisfied)")
+
+        if gate.currentStep != lastOnboardingState {
+            diagLog("[SETUP] transition \(lastOnboardingState) -> \(gate.currentStep)")
+            lastOnboardingState = gate.currentStep
+        }
 
         guard gate.requirementsSatisfied else {
-            print("[SETUP] advance blocked reason = \(gate.blockedReason ?? "unknown")")
+            diagLog("[SETUP] advance blocked reason = \(gate.blockedReason ?? "unknown")")
             return
         }
 
-        print("[SETUP] advancing to JIT")
+        diagLog("[SETUP] advancing to JIT")
         skippedSetup = false
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
             isInSetup = false
+        }
+    }
+
+    // --- Diagnostics (temporary, for isolating Bug A on-device without Xcode) ---
+
+    private struct KeysSnapshot {
+        let found: Bool
+        let path: String
+        let realValidation: Bool
+    }
+
+    private struct FirmwareSnapshot {
+        let contentFound: Bool
+        let path: String
+        let detectedVersion: String
+        let realValidation: Bool
+    }
+
+    /// Queries the filesystem directly, independent of cached @State —
+    /// hypothesis G/B material: if this disagrees with `keysImported`,
+    /// the cached flag is stale (D) rather than the file genuinely missing.
+    private func keysSnapshot() -> KeysSnapshot {
+        let path = URL.documentsDirectory.appendingPathComponent("system").appendingPathComponent("prod.keys")
+        let found = FileManager.default.fileExists(atPath: path.path)
+        return KeysSnapshot(found: found, path: path.path, realValidation: Ryujinx.shared.checkIfKeysImported())
+    }
+
+    /// Two independent signals on purpose: `contentFound` reads the actual
+    /// registered-content directory on disk (Ryujinx.removeFirmware's own
+    /// path), while `realValidation` goes through the same native bridge
+    /// call the rest of the app trusts. If a user's device shows
+    /// contentFound=true but realValidation=false, the native firmware
+    /// version cache/bridge is the real bug, not SwiftUI.
+    private func firmwareSnapshot() -> FirmwareSnapshot {
+        let path = URL.documentsDirectory
+            .appendingPathComponent("bis")
+            .appendingPathComponent("system")
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("registered")
+        let contentFound = ((try? FileManager.default.contentsOfDirectory(atPath: path.path)) ?? []).isEmpty == false
+        let version = Ryujinx.shared.fetchFirmwareVersion()
+        let realValidation = (version.isEmpty ? "0" : version) != "0"
+        return FirmwareSnapshot(contentFound: contentFound, path: path.path, detectedVersion: version, realValidation: realValidation)
+    }
+
+    private func copyDiagnosticsToClipboard() {
+        let keys = keysSnapshot()
+        let firmware = firmwareSnapshot()
+        let gate = OnboardingGate(keysValid: keysImported, firmwareValid: firmImported)
+
+        var text = "MeloNX Setup Diagnostics\n"
+        text += "KEYS: fileFound=\(keys.found) path=\(keys.path) realValidation=\(keys.realValidation)\n"
+        text += "FIRMWARE: contentFound=\(firmware.contentFound) path=\(firmware.path) detectedVersion=\(firmware.detectedVersion) realValidation=\(firmware.realValidation)\n"
+        text += "SETUP: hasKeys(cached)=\(keysImported) hasFirmware(cached)=\(firmImported) requirementsSatisfied=\(gate.requirementsSatisfied) step=\(gate.currentStep) blockedReason=\(gate.blockedReason ?? "none")\n"
+        text += "LOG:\n" + diagnosticsLog.joined(separator: "\n")
+
+        UIPasteboard.general.string = text
+        diagLog("[SETUP] diagnostics copied to clipboard")
+    }
+
+    // Split into sections on purpose: a single VStack with this many direct
+    // children would exceed SwiftUI's ViewBuilder arity limit and fail to
+    // compile — each section function stays well under that on its own.
+    @ViewBuilder
+    private func diagnosticsPanel() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Diagnostics").font(.headline)
+            diagnosticsKeysSection()
+            diagnosticsFirmwareSection()
+            diagnosticsSetupSection()
+            diagnosticsActionButtons()
+            diagnosticsLogSection()
+        }
+        .padding()
+        .background(Color(UIColor.secondarySystemBackground))
+        .cornerRadius(12)
+        .padding(.horizontal)
+    }
+
+    @ViewBuilder
+    private func diagnosticsKeysSection() -> some View {
+        let keys = keysSnapshot()
+        VStack(alignment: .leading, spacing: 10) {
+            Text("KEYS").font(.caption).bold().foregroundColor(.secondary)
+            diagRow("file found", "\(keys.found)")
+            diagRow("path", keys.path)
+            diagRow("real validation", "\(keys.realValidation)")
+        }
+    }
+
+    @ViewBuilder
+    private func diagnosticsFirmwareSection() -> some View {
+        let firmware = firmwareSnapshot()
+        VStack(alignment: .leading, spacing: 10) {
+            Text("FIRMWARE").font(.caption).bold().foregroundColor(.secondary)
+            diagRow("content found", "\(firmware.contentFound)")
+            diagRow("path", firmware.path)
+            diagRow("detected version", firmware.detectedVersion.isEmpty ? "(none)" : firmware.detectedVersion)
+            diagRow("real validation", "\(firmware.realValidation)")
+        }
+    }
+
+    @ViewBuilder
+    private func diagnosticsSetupSection() -> some View {
+        let gate = OnboardingGate(keysValid: keysImported, firmwareValid: firmImported)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SETUP").font(.caption).bold().foregroundColor(.secondary)
+            diagRow("hasKeys (cached)", "\(keysImported)")
+            diagRow("hasFirmware (cached)", "\(firmImported)")
+            diagRow("requirementsSatisfied", "\(gate.requirementsSatisfied)")
+            diagRow("onboarding step", "\(gate.currentStep)")
+            diagRow("blocked reason", gate.blockedReason ?? "none")
+        }
+    }
+
+    @ViewBuilder
+    private func diagnosticsActionButtons() -> some View {
+        HStack {
+            Button("Reevaluate Now") {
+                refreshAndEvaluate(trigger: "manualButton")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button("Copy Diagnostics") {
+                copyDiagnosticsToClipboard()
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private func diagnosticsLogSection() -> some View {
+        if !diagnosticsLog.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Log").font(.caption).bold().foregroundColor(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(diagnosticsLog.indices, id: \.self) { index in
+                            Text(diagnosticsLog[index])
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 140)
+            }
+        }
+    }
+
+    private func diagRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
         }
     }
 
@@ -215,43 +409,47 @@ struct SetupView: View {
                         .frame(maxWidth: 400)
                     }
                     
-                    VStack(spacing: 20) {
-                        setupStep(
-                            title: "Import Keys",
-                            description: "Add your encryption keys",
-                            systemImage: "key.fill",
-                            isCompleted: keysImported,
-                            action: { isImportingKeys = true }
-                        )
-                        
-                        setupStep(
-                            title: "Add Firmware",
-                            description: "Install Nintendo Switch firmware",
-                            systemImage: "square.and.arrow.down",
-                            isCompleted: firmImported,
-                            isEnabled: keysImported,
-                            action: { isImportingFirmware = true }
-                        )
-                        
-                        Button(action: { isInSetup = false }) {
-                            HStack {
-                                Text("Finish Setup")
-                                    .fontWeight(.semibold)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(
-                                firmImported && keysImported
-                                    ? Color.blue
-                                    : Color.blue.opacity(0.3)
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            setupStep(
+                                title: "Import Keys",
+                                description: "Add your encryption keys",
+                                systemImage: "key.fill",
+                                isCompleted: keysImported,
+                                action: { isImportingKeys = true }
                             )
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
+
+                            setupStep(
+                                title: "Add Firmware",
+                                description: "Install Nintendo Switch firmware",
+                                systemImage: "square.and.arrow.down",
+                                isCompleted: firmImported,
+                                isEnabled: keysImported,
+                                action: { isImportingFirmware = true }
+                            )
+
+                            Button(action: { isInSetup = false }) {
+                                HStack {
+                                    Text("Finish Setup")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(
+                                    firmImported && keysImported
+                                        ? Color.blue
+                                        : Color.blue.opacity(0.3)
+                                )
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                            }
+                            .disabled(!(firmImported && keysImported))
+
+                            diagnosticsPanel()
                         }
-                        .disabled(!(firmImported && keysImported))
+                        .frame(maxWidth: 500)
+                        .padding()
                     }
-                    .frame(maxWidth: 500)
-                    .padding()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding()
@@ -260,7 +458,7 @@ struct SetupView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
     }
-    
+
     @ViewBuilder
     private func iPhoneSetupView() -> some View {
         ZStack {
@@ -358,10 +556,12 @@ struct SetupView: View {
                             isEnabled: keysImported,
                             action: { isImportingFirmware = true }
                         )
+
+                        diagnosticsPanel()
                     }
                     .padding()
                 }
-                
+
                 // Finish Button
                 VStack {
                     Button(action: { isInSetup = false }) {
@@ -426,15 +626,14 @@ struct SetupView: View {
     }
     
     private func handleKeysImport(result: Result<[URL], Error>) {
-        print("[SETUP] keys import started")
+        diagLog("[KEYS] importer completion")
         do {
             let selectedFiles = try result.get()
 
             guard selectedFiles.count == 2 else {
                 alertMessage = "Please select exactly 2 key files"
                 showAlert = true
-                print("[SETUP] keys import completed")
-                print("[SETUP] keys valid = false")
+                diagLog("[KEYS] real validation = false (wrong file count)")
                 return
             }
 
@@ -459,9 +658,10 @@ struct SetupView: View {
                 try data.write(to: destinationURL, options: .atomic)
             }
 
-            keysImported = Ryujinx.shared.checkIfKeysImported()
-            print("[SETUP] keys import completed")
-            print("[SETUP] keys valid = \(keysImported)")
+            let realValidation = Ryujinx.shared.checkIfKeysImported()
+            diagLog("[KEYS] real validation = \(realValidation)")
+
+            refreshAndEvaluate(trigger: "keysImportHandler")
 
             guard keysImported else {
                 alertMessage = "Keys were copied, but prod.keys was not found. Select the correct key files and try again."
@@ -473,26 +673,23 @@ struct SetupView: View {
                 ? "Keys imported successfully"
                 : "Keys imported successfully. Next, install the firmware. JIT is a separate requirement and is not enabled by Switch keys."
             showAlert = true
-            finishSetupIfReady()
 
         } catch {
-            print("[SETUP] keys import completed")
-            print("[SETUP] keys valid = false")
+            diagLog("[KEYS] real validation = false (exception: \(error.localizedDescription))")
             alertMessage = "Error importing keys: \(error.localizedDescription)"
             showAlert = true
         }
     }
 
     private func handleFirmwareImport(result: Result<[URL], Error>) {
-        print("[SETUP] firmware import started")
+        diagLog("[FIRMWARE] importer completion")
         do {
             let selectedFiles = try result.get()
 
             guard let fileURL = selectedFiles.first else {
                 alertMessage = "No file selected"
                 showAlert = true
-                print("[SETUP] firmware import completed")
-                print("[SETUP] firmware valid = false")
+                diagLog("[FIRMWARE] real validation = false (no file selected)")
                 return
             }
 
@@ -508,27 +705,25 @@ struct SetupView: View {
             let (string, isErr) = RyujinxBridge.installFirmware(at: fileURL.path)
 
             if isErr {
-                print("[SETUP] firmware import completed")
-                print("[SETUP] firmware valid = false")
+                diagLog("[FIRMWARE] real validation = false (install error: \(string))")
                 alertMessage = string.isEmpty ? "Firmware installation failed" : string
                 showAlert = true
                 return
             }
 
             Ryujinx.shared.firmwareversion = string
-            firmImported = (string.isEmpty ? "0" : string) != "0"
-            print("[SETUP] firmware import completed")
-            print("[SETUP] firmware valid = \(firmImported)")
+            let realValidation = (string.isEmpty ? "0" : string) != "0"
+            diagLog("[FIRMWARE] real validation = \(realValidation)")
+
+            refreshAndEvaluate(trigger: "firmwareImportHandler")
 
             alertMessage = firmImported
                 ? "Firmware installed successfully"
                 : "Firmware installation finished, but MeloNX could not detect an installed firmware version."
             showAlert = true
-            finishSetupIfReady()
 
         } catch {
-            print("[SETUP] firmware import completed")
-            print("[SETUP] firmware valid = false")
+            diagLog("[FIRMWARE] real validation = false (exception: \(error.localizedDescription))")
             alertMessage = "Error importing firmware: \(error.localizedDescription)"
             showAlert = true
         }
