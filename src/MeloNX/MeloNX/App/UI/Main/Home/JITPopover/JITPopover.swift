@@ -122,7 +122,28 @@ struct JITPopover: View {
             Text("MeloNX could not acquire JIT with the methods currently enabled in Settings.")
         }
         .sheet(isPresented: $showDiagnostics) {
-            NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    Button("Done") {
+                        showDiagnostics = false
+                    }
+
+                    Spacer()
+
+                    Text("JIT Diagnostics")
+                        .font(.headline)
+
+                    Spacer()
+
+                    Button("Copy") {
+                        UIPasteboard.general.string = diagnosticsReport
+                        JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
+                    }
+                }
+                .padding()
+
+                Divider()
+
                 ScrollView {
                     Text(diagnosticsReport.isEmpty ? "[JIT DIAGNOSTICS]\nreport generation returned an empty string" : diagnosticsReport)
                         .font(.system(.footnote, design: .monospaced))
@@ -130,26 +151,7 @@ struct JITPopover: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
                 }
-                .navigationTitle("JIT Diagnostics")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") {
-                            showDiagnostics = false
-                        }
-                    }
-                    ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button("Copy") {
-                            UIPasteboard.general.string = diagnosticsReport
-                            JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
-                        }
-                        ShareLink(item: diagnosticsReport) {
-                            Image(systemName: "square.and.arrow.up")
-                        }
-                    }
-                }
             }
-            .presentationDetents([.medium, .large])
         }
         .onAppear {
             pulseAnimation = true
