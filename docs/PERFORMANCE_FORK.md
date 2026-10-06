@@ -1037,6 +1037,70 @@ el botón del alert — presentar un modal síncronamente durante la
 transición de cierre de otro modal puede perderse en un dispositivo
 real.
 
+**Corrección propia pendiente de este mismo commit**: el cambio de
+`NavigationView` → `iOSNav` que se describió arriba quedó únicamente en
+el working tree — nunca se agregó al `git add` antes del `commit
+--amend`, así que el commit `fc15846e8` que CI verificó en verde en
+realidad seguía usando `NavigationView` (seguro para iOS 15 igual, así
+que no invalidaba esa verificación, pero la narrativa de "usa `iOSNav`"
+no era exacta sobre lo que se había probado). Se incluye correctamente
+en el commit siguiente.
+
+## Crash real encontrado en dispositivo: `SIGABRT` / `swift_dynamicCastFailure` en `Setting.value.getter`
+
+Crash report real del 2026-10-06 07:43:35, hilo principal:
+
+```
+swift::fatalError
+swift_dynamicCastFailure
+Setting.value.getter
+specialized static JITDiagnostics.buildReport()
+specialized static JITDiagnostics.generateAndPersistReport()
+closure #2 in JITDiagnosticsView.body.getter
+```
+
+**Causa exacta**: `NativeSettingsManager`'s `@dynamicMemberLookup` tiene
+dos subscripts — uno que retorna `Setting<T>` directamente (para
+`s.stikJIT.value`) y otro que retorna `(T) -> Setting<T>` (para
+`s.stikJIT(default)`). Cuando se usa el primero, `T` solo se fija
+correctamente si el SITIO DE USO impone un contexto de tipo — por
+ejemplo `if nativeSettings.useTrollStore.value { ... }` fija `T = Bool`
+porque `if` exige `Bool`. Pero en `JITDiagnostics.buildReport()`
+(versión anterior) los accesos estaban dentro de interpolación de
+string (`"\(s.stikJIT.value)"`), que NO impone ningún tipo — acepta
+literalmente cualquier cosa. Sin ese contexto, `T` no se resuelve a
+`Bool` de forma confiable, y `Setting.value`'s
+`getValue() ?? (uddefault as! T)` termina forzando un cast de `uddefault`
+(que puede ser el `Bool` real, o el centinela `UUID()` que `Setting.init`
+guarda cuando nunca se le dio un default típado) hacia un `T` incorrecto
+— `swift_dynamicCastFailure` → `SIGABRT`.
+
+**Corrección aplicada** (`JITDiagnostics.swift`): se agrega
+`boolSetting(_:default:)`, que usa
+`NativeSettingsManager.shared.setting(forKey:default:)` — la API NO
+ambigua, que ya se usaba con éxito en otras partes del código
+(`nativeSettings.setting(forKey: "DUAL_MAPPED_JIT", default: true)` en
+`LaunchGameHandler`/`MeloNXApp`) — donde `T = Bool` se fija
+inequívocamente desde el argumento literal `default: false`, sin
+depender del sitio de uso. Se auditó TODO `JITDiagnostics.swift`
+(`methodCapabilities()`, `enabledMethodNames()`, `buildReport()`) y se
+reemplazaron los 6 accesos directos (`s.stikJIT.value`,
+`s.builtInStikJIT.value`, `s.useTrollStore.value` ×2,
+`s.ignoreJIT.value`) por `boolSetting(...)`, guardados primero en
+variables `Bool` explícitas. Se agrega también
+`rawSettingDescription(_:)` (sin ningún cast) para ver el tipo/valor
+crudo almacenado en `UserDefaults` por cada key, y breadcrumbs
+`[JITDIAG] begin/entitlements/process/settings/methodCapabilities/
+attempts/coordinator/complete` persistidos en
+`Documents/jit-diagnostics-last-step.txt` en cada paso — si
+`buildReport()` volviera a fallar, ese archivo dice exactamente en qué
+sección, sin necesitar un crash report simbolizado.
+
+**No se tocó**: `LaunchGameHandler.swift`, `JITCoordinator.swift`, el
+orden/lógica de los métodos JIT, ni `ptrace`/pairing/timeouts — por
+instrucción explícita, este commit corrige exclusivamente el crash del
+diagnóstico.
+
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -1061,3 +1125,4 @@ real.
 | `fix(jit): show diagnostics in-app when copy is empty` | `63b82ca7c` | `JITPopover.swift` | Primer intento paralelo de arreglar el mismo problema (botón de copia sin feedback) — agrega un sheet con `NavigationStack`/`ShareLink`/`.presentationDetents`. **CI falló de verdad**: las 3 APIs requieren iOS 16+, y el deployment target real del target `MeloNX` es 15.0 |
 | `fix(jit): keep diagnostics sheet compatible with deployment target` | `73480b05d` | `JITPopover.swift` | Corrige el fallo anterior quitando `NavigationStack`/`ShareLink`/`.presentationDetents`, reemplazando por un `VStack` simple con botones manuales. CI compiló en verde. Reconciliado con el commit siguiente (que usa `iOSNav`, el wrapper ya existente en el proyecto para este caso exacto, en vez de quitar la navegación por completo) |
 | `feat(jit): replace Copy-to-clipboard alert button with a real diagnostics sheet` | `fc15846e8` | `JITDiagnosticsView.swift` (nuevo), `JITCoordinator.swift`, `JITDiagnostics.swift`, `LaunchGameHandler.swift`, `JITPopover.swift`, `MeloNXTests/JITFlowTests.swift` | El botón "Copy JIT Diagnostics" del commit anterior no mostraba nada útil — un `.alert` de SwiftUI se descarta en cuanto se toca cualquier botón, sin feedback posible. Se reemplaza por "View JIT Diagnostics", que presenta un `.sheet` real con el reporte completo como texto seleccionable, Copy/Share/Close reales, "Copied" visible sin cerrar la pantalla, y respaldo en `Documents/jit-diagnostics.txt`. `JITMethodAttempt` ahora lleva detected/enabled/attempted/startTime/endTime/result/error/underlyingError/errno/timeout/pairingStatus/connectionStatus por método; `probeExecutableMemory()` hace mmap+mprotect reales con errno capturado, llamado tras cada método que dice haber adquirido JIT (verificación real, no confiar en el booleano). `beginRetry()` agrega un separador `===== JIT RETRY #N =====` al log sin borrarlo. Investigación de código confirmó 4 métodos reales (JITStreamerEB/TrollStore/StikDebug externo/Built-in StikJIT) y su orden fijo de ejecución; `builtInStikJIT`/`.stikJIT` accedidos como propiedad vs función en distintos archivos son el mismo `Setting<Bool>` subyacente, no una discrepancia |
+| `fix(jit): fix dynamic cast crash in JITDiagnostics.buildReport()` | *(pendiente de build)* | `JITDiagnostics.swift`, `JITDiagnosticsView.swift` (incluye el `iOSNav` que quedó fuera del commit anterior), `MeloNXTests/JITFlowTests.swift` | Crash report real (`SIGABRT`/`swift_dynamicCastFailure` en `Setting.value.getter`, vía `JITDiagnostics.buildReport()`): accesos `s.stikJIT.value` dentro de interpolación de string no fijan `T = Bool` (sin contexto de tipo), a diferencia de un `if`/asignación `Bool`. `Setting.value`'s `uddefault as! T` fuerza el cast y aborta. Corregido con `boolSetting(_:default:)` vía `NativeSettingsManager.setting(forKey:default:)` (API no ambigua, mismo patrón ya usado en `LaunchGameHandler`), auditando los 6 accesos directos en `methodCapabilities()`/`enabledMethodNames()`/`buildReport()`. Se agrega `rawSettingDescription(_:)` sin casts y breadcrumbs `[JITDIAG] ...` persistidos en `Documents/jit-diagnostics-last-step.txt`. No se tocó `LaunchGameHandler`/`JITCoordinator`/orden de métodos JIT, por instrucción explícita |

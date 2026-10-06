@@ -12,12 +12,16 @@ import UIKit
 /// text, so "did the copy actually work" stops being the only way to see
 /// what happened.
 ///
-/// Deliberately avoids NavigationStack/ShareLink/.presentationDetents —
-/// this project's actual build (confirmed by a real CI failure: "error:
-/// 'NavigationStack' is only available in iOS 16.0 or newer" /
-/// 'ShareLink' / 'presentationDetents', same message) targets iOS 15,
-/// not the 18.1 an earlier comment elsewhere assumed. NavigationView and
-/// a UIActivityViewController wrapper are both iOS 13+-safe.
+/// Deliberately avoids bare SwiftUI.NavigationStack/ShareLink/
+/// .presentationDetents — this project's actual build (confirmed by a
+/// real CI failure: "error: 'NavigationStack' is only available in iOS
+/// 16.0 or newer" / 'ShareLink' / 'presentationDetents', same message)
+/// targets iOS 15, not the 18.1 an earlier comment elsewhere assumed.
+/// Uses this project's own `iOSNav` wrapper (Ryujinx.swift) instead,
+/// which already picks real NavigationStack on 16+ or
+/// NavigationStackBackport on 15 — the established pattern for exactly
+/// this, already used by SetupView. A UIActivityViewController wrapper
+/// covers sharing, since ShareLink needs iOS 16.
 struct JITDiagnosticsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var report: String = "Generating diagnostics..."
@@ -25,7 +29,7 @@ struct JITDiagnosticsView: View {
     @State private var showShareSheet = false
 
     var body: some View {
-        NavigationView {
+        iOSNav {
             ScrollView {
                 Text(report)
                     .font(.system(size: 11, design: .monospaced))

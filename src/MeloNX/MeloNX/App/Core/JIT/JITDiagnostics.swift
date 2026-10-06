@@ -18,6 +18,23 @@ import UIKit
 /// (shouldLaunchGame/shouldShowPopover/shouldCheckJIT), since a free
 /// AltStore signature can't carry it at all; it's reported here purely as
 /// one more entitlement value, never as a readiness signal.
+///
+/// Real crash fixed here (SIGABRT, swift_dynamicCastFailure inside
+/// Setting.value.getter, called from this file's old buildReport()):
+/// NativeSettingsManager's @dynamicMemberLookup property-style access
+/// (`s.stikJIT.value`) needs a context that pins `T` to `Bool` -
+/// everywhere else in the codebase that access sits inside an `if` or a
+/// `Bool`-typed assignment, which does pin it. Inside a bare string
+/// interpolation (`\(s.stikJIT.value)`) there is no such context, so `T`
+/// can resolve to something other than `Bool`; `Setting.value`'s
+/// `getValue() ?? (uddefault as! T)` then force-casts a `Bool` (or the
+/// UUID() sentinel `Setting.init` stores when no typed default was ever
+/// given) to the wrong `T` and aborts. Fixed by going through
+/// `NativeSettingsManager.setting(forKey:default:)` instead, which pins
+/// `T = Bool` unambiguously from the `default: false` argument itself -
+/// the exact pattern already used safely elsewhere (e.g.
+/// `nativeSettings.setting(forKey: "DUAL_MAPPED_JIT", default: true)` in
+/// LaunchGameHandler/MeloNXApp).
 enum JITDiagnostics {
     /// One real measurement of whether this process can actually run
     /// freshly-written code right now - never inferred from a method
@@ -35,6 +52,38 @@ enum JITDiagnostics {
         let available: Bool
         let enabled: Bool
         let reasonUnavailable: String?
+    }
+
+    // MARK: - Settings access (crash fix)
+
+    /// The ONLY way this file reads a Bool toggle - explicit `T` via the
+    /// `default:` argument, never the ambiguous `s.key.value` shorthand.
+    private static func boolSetting(_ key: String, default defaultValue: Bool = false) -> Bool {
+        NativeSettingsManager.shared.setting(forKey: key, default: defaultValue).value
+    }
+
+    /// No cast of any kind - just reports whatever UserDefaults actually
+    /// holds for `key`, so a stale/incompatible type is visible instead of
+    /// crashing something else that tries to read it typed.
+    static func rawSettingDescription(_ key: String) -> String {
+        guard let raw = UserDefaults.standard.object(forKey: key) else {
+            return "<missing>"
+        }
+        return "\(type(of: raw)): \(String(describing: raw))"
+    }
+
+    // MARK: - Breadcrumbs
+
+    /// Persists the last reached step to disk on every call, not just at
+    /// the end - if buildReport() ever crashes again, this file says
+    /// exactly which section it died in without needing a symbolicated
+    /// crash report.
+    private static func breadcrumb(_ step: String) {
+        let message = "[JITDIAG] \(step)"
+        print(message)
+        JITCoordinator.shared.logDiag(message)
+        let url = URL.documentsDirectory.appendingPathComponent("jit-diagnostics-last-step.txt")
+        try? message.write(to: url, atomically: true, encoding: .utf8)
     }
 
     static func probeExecutableMemory() -> ExecMemoryProbeResult {
@@ -69,7 +118,9 @@ enum JITDiagnostics {
     /// run yet this session. Distinct from JITCoordinator.methodAttempts,
     /// which only has entries for methods actually attempted.
     static func methodCapabilities() -> [MethodCapability] {
-        let s = NativeSettingsManager.shared
+        let useTrollStore = boolSetting("useTrollStore")
+        let stikJIT = boolSetting("stikJIT")
+
         var list: [MethodCapability] = []
 
         list.append(MethodCapability(method: "JITStreamerEB (internal)", available: true, enabled: true, reasonUnavailable: nil))
@@ -77,24 +128,24 @@ enum JITDiagnostics {
         list.append(MethodCapability(
             method: "TrollStore",
             available: true,
-            enabled: s.useTrollStore.value,
-            reasonUnavailable: s.useTrollStore.value ? nil : "toggle disabled in Settings"
+            enabled: useTrollStore,
+            reasonUnavailable: useTrollStore ? nil : "toggle disabled in Settings"
         ))
 
         let stikDetected = detectStikTool() != .notFound
         list.append(MethodCapability(
             method: "StikJIT/StikDebug (external app)",
             available: stikDetected,
-            enabled: s.stikJIT.value,
+            enabled: stikJIT,
             reasonUnavailable: !stikDetected
                 ? "no StikDebug/StikJIT app installed (no URL scheme handler found)"
-                : (s.stikJIT.value ? nil : "toggle disabled in Settings")
+                : (stikJIT ? nil : "toggle disabled in Settings")
         ))
 
         list.append(MethodCapability(
             method: "Built-in StikJIT",
             available: BuiltInStikJITAvailability.isAvailable,
-            enabled: s.builtInStikJIT.value,
+            enabled: boolSetting("builtInStikJIT"),
             reasonUnavailable: BuiltInStikJITAvailability.unavailableReason().map(reasonText(for:))
         ))
 
@@ -116,10 +167,9 @@ enum JITDiagnostics {
 
     /// JITStreamerEB is always attempted first regardless of any toggle.
     static func enabledMethodNames() -> [String] {
-        let s = NativeSettingsManager.shared
         var names = ["JITStreamerEB (internal, always attempted first)"]
-        if s.useTrollStore.value { names.append("TrollStore") }
-        if s.stikJIT.value { names.append("StikDebug/StikJIT (external app)") }
+        if boolSetting("useTrollStore") { names.append("TrollStore") }
+        if boolSetting("stikJIT") { names.append("StikDebug/StikJIT (external app)") }
         if BuiltInStikJITAvailability.isAvailable { names.append("Built-in StikJIT") }
         if names.count == 1 {
             names.append("(none enabled besides the internal path)")
@@ -128,6 +178,7 @@ enum JITDiagnostics {
     }
 
     static func buildReport() -> String {
+        breadcrumb("begin")
         var lines: [String] = ["[JIT DIAGNOSTICS]", ""]
         lines.append("timestamp = \(ISO8601DateFormatter().string(from: Date()))")
         lines.append("")
@@ -138,6 +189,7 @@ enum JITDiagnostics {
         lines.append("processPID = \(getpid())")
         lines.append("")
 
+        breadcrumb("entitlements")
         lines.append("ENTITLEMENTS:")
         let increasedMemoryLimit = checkAppEntitlement("com.apple.developer.kernel.increased-memory-limit")
         lines.append("get-task-allow = \(checkAppEntitlement("get-task-allow"))")
@@ -147,6 +199,7 @@ enum JITDiagnostics {
         lines.append("hasJITEntitlement (legacy LaunchGameHandler name for increased-memory-limit; does NOT gate anything anymore) = \(increasedMemoryLimit)")
         lines.append("")
 
+        breadcrumb("process")
         lines.append("CURRENT PROCESS:")
         let probe = probeExecutableMemory()
         lines.append("jitAlreadyAvailable = \(isJITEnabled())")
@@ -158,14 +211,17 @@ enum JITDiagnostics {
         lines.append("errorDescription = \(probe.errorDescription.isEmpty ? "none" : probe.errorDescription)")
         lines.append("")
 
+        breadcrumb("settings")
         lines.append("SETTINGS:")
-        let s = NativeSettingsManager.shared
-        lines.append("stikJIT = \(s.stikJIT.value)")
-        lines.append("builtInStikJIT = \(s.builtInStikJIT.value)")
-        lines.append("useTrollStore = \(s.useTrollStore.value)")
-        lines.append("ignoreJIT = \(s.ignoreJIT.value)")
+        let settingKeys = ["stikJIT", "builtInStikJIT", "useTrollStore", "ignoreJIT"]
+        for key in settingKeys {
+            let value = boolSetting(key)
+            lines.append("\(key) = \(value)")
+            lines.append("\(key) (raw) = \(rawSettingDescription(key))")
+        }
         lines.append("")
 
+        breadcrumb("methodCapabilities")
         lines.append("METHOD DETECTION:")
         for capability in methodCapabilities() {
             lines.append("method = \(capability.method)")
@@ -182,6 +238,7 @@ enum JITDiagnostics {
         lines.append("4. Built-in StikJIT (only if available, and nothing above succeeded)")
         lines.append("")
 
+        breadcrumb("attempts")
         for attempt in JITCoordinator.shared.methodAttempts {
             lines.append("[JIT METHOD]")
             lines.append("name = \(attempt.name)")
@@ -201,6 +258,7 @@ enum JITDiagnostics {
             lines.append("")
         }
 
+        breadcrumb("coordinator")
         lines.append("COORDINATOR:")
         let state = JITCoordinator.shared.state
         lines.append("state = \(state)")
@@ -220,6 +278,7 @@ enum JITDiagnostics {
         lines.append("LOG:")
         lines.append(contentsOf: JITCoordinator.shared.diagnosticsLog)
 
+        breadcrumb("complete")
         return lines.joined(separator: "\n")
     }
 

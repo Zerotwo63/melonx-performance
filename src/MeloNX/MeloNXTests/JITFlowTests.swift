@@ -292,8 +292,38 @@ struct JITFlowTests {
         #expect(report.contains("[JIT DIAGNOSTICS]"))
         #expect(report.contains("ENTITLEMENTS:"))
         #expect(report.contains("CURRENT PROCESS:"))
+        #expect(report.contains("SETTINGS:"))
         #expect(report.contains("METHOD DETECTION:"))
         #expect(report.contains("ATTEMPT ORDER:"))
         #expect(report.contains("FINAL:"))
+    }
+
+    /// Real on-device crash this was written against: SIGABRT /
+    /// swift_dynamicCastFailure inside Setting.value.getter, reached from
+    /// the old buildReport() via bare `s.stikJIT.value`-style access with
+    /// no type context. Reaching the final #expect at all - not the crash
+    /// itself - is the actual assertion for this test.
+    @Test func settingsAccessorsDoNotCrash() {
+        _ = JITDiagnostics.methodCapabilities()
+        _ = JITDiagnostics.enabledMethodNames()
+        _ = JITDiagnostics.buildReport()
+        #expect(Bool(true))
+    }
+
+    @Test func rawSettingDescriptionHandlesMissingKeyWithoutCasting() {
+        let description = JITDiagnostics.rawSettingDescription("someKeyThatDefinitelyDoesNotExist12345")
+        #expect(description == "<missing>")
+    }
+
+    @Test func rawSettingDescriptionReportsStoredValue() {
+        let key = "jitDiagTestRawSettingKey"
+        UserDefaults.standard.set(true, forKey: key)
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+
+        // Deliberately not asserting the exact bridged type name (NSNumber
+        // vs __NSCFBoolean is a runtime/platform detail) - only that a
+        // present key is reported as present, with no cast involved.
+        let description = JITDiagnostics.rawSettingDescription(key)
+        #expect(description != "<missing>")
     }
 }
