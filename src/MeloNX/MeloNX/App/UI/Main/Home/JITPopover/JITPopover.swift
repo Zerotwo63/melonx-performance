@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct JITPopover: View {
     var onJITEnabled: () -> Void
@@ -15,6 +16,8 @@ struct JITPopover: View {
     @State private var isJIT: Bool = false
     @State private var pulseAnimation: Bool = false
     @State private var showFailedAlert: Bool = false
+    @State private var showDiagnostics: Bool = false
+    @State private var diagnosticsReport: String = ""
     
     var body: some View {
         VStack(spacing: 20) {
@@ -92,13 +95,61 @@ struct JITPopover: View {
                 startWaiting()
             }
             Button("Copy JIT Diagnostics") {
-                JITDiagnostics.copyReportToClipboard()
+                // Build exactly once, persist it in SwiftUI state, and also
+                // put the same bytes on the pasteboard. The previous version
+                // only wrote to UIPasteboard from the alert action; on the
+                // physical iPhone that action dismissed the alert but left an
+                // empty pasteboard, making the entire diagnostic path useless.
+                //
+                // Keeping a copy in-app means the report remains available
+                // even if iOS/sideloading interferes with the pasteboard.
+                let report = JITDiagnostics.buildReport()
+                diagnosticsReport = report
+                UIPasteboard.general.string = report
+                JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
+
+                // Present after the alert has finished dismissing. Trying to
+                // present another modal in the same alert transaction can be
+                // dropped by SwiftUI/UIKit on-device.
+                DispatchQueue.main.async {
+                    showDiagnostics = true
+                }
             }
             Button("Cancel", role: .cancel) {
                 presentationMode.wrappedValue.dismiss()
             }
         } message: {
             Text("MeloNX could not acquire JIT with the methods currently enabled in Settings.")
+        }
+        .sheet(isPresented: $showDiagnostics) {
+            NavigationStack {
+                ScrollView {
+                    Text(diagnosticsReport.isEmpty ? "[JIT DIAGNOSTICS]\nreport generation returned an empty string" : diagnosticsReport)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .navigationTitle("JIT Diagnostics")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") {
+                            showDiagnostics = false
+                        }
+                    }
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button("Copy") {
+                            UIPasteboard.general.string = diagnosticsReport
+                            JITCoordinator.shared.logDiag("[JIT] diagnostics copied to clipboard")
+                        }
+                        ShareLink(item: diagnosticsReport) {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
         }
         .onAppear {
             pulseAnimation = true
