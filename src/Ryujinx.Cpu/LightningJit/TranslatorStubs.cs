@@ -797,7 +797,7 @@ namespace Ryujinx.Cpu.LightningJit
             // Diagnóstico real #9: this device's chip (Apple A19 Pro) very
             // likely has TXM - this fork's OWN existing code already has a
             // dedicated workaround for it (DualMappedJitAllocator.hasTXM /
-            // BreakGetJITMapping) that RunSingleMapControl below does NOT
+            // BreakGetJITMapping) that RunSingleMapDeepDive below does NOT
             // use at all (plain mmap/mprotect). If TXM enforcement is why
             // execution never completes, this is a real, independent signal.
             NativeMemoryDiagnostics.ReportTxmStatus();
@@ -809,22 +809,20 @@ namespace Ryujinx.Cpu.LightningJit
             // anything specific to DualMappedNoWxCache.
             NativeMemoryDiagnostics.RunNativeControl();
 
-            // FASE 8E/9C: the SAME instruction bytes, mapped through a
-            // classic single mmap-RW/mprotect-RX region (no dual alias at
-            // all), called through the SAME delegate mechanism, with full
-            // before/after protection + cache-sync instrumentation.
-            NativeMemoryDiagnostics.RunSingleMapControl(code, ExpectedValue);
-
-            // FASE 9D: Test B - same single-map mechanism, but the
-            // generated code starts with `bti c`. Compared against Test A
-            // (plain, no BTI) above - if B succeeds and A does not, that
-            // is direct evidence of a BTI landing-pad requirement.
-            NativeMemoryDiagnostics.RunSingleMapBtiControl(ExpectedValue);
-
-            // FASE 9H: a THIRD, separate single-map variant with entry/
-            // before-RET native stage markers, run on its own background
-            // thread+poller so a hang here does not block anything else.
-            NativeMemoryDiagnostics.RunSingleMapStageProbe();
+            // FASE 10 (supersedes 8E/9C/9D/9H's separate call sites): the
+            // SAME instruction bytes, mapped through a classic single
+            // mmap-RW/mprotect-RX region (no dual alias at all), with
+            // full before/after protection instrumentation cross-checked
+            // via TWO independent Darwin query mechanisms, a hard gate
+            // that skips the actual call entirely if execute permission
+            // was never really confirmed (this is what used to leave the
+            // diagnostic itself hanging), and - only once that page is
+            // confirmed executable - the raw-branch, PAC, and BTI tests
+            // run in the correct order (raw/PAC before BTI), ending in a
+            // single terminal classification. See
+            // NativeMemoryDiagnostics.RunSingleMapDeepDive's doc comment
+            // for the full FASE 10A-10F sequencing.
+            NativeMemoryDiagnostics.RunSingleMapDeepDive(code, ExpectedValue);
 
             // FASE 8G: a SEPARATE stage-marker variant of this same probe,
             // launched on its own background thread so that if IT also

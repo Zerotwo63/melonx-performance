@@ -152,6 +152,17 @@ struct BootWatchdogView: View {
                 row("Single-map stage (entry/beforeRet)", "\(diagnostics.singleMapNativeEntryStage) / \(diagnostics.singleMapNativeBeforeRetStage)")
             }
 
+            Text("SINGLE-MAP EXECUTION CLASSIFICATION (FASES 10A-10F)").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("Classification", diagnostics.singleMapExecutionClassification ?? "unknown")
+                row("Actual execute permission", diagnostics.singleMapActualExecutePermission.map { "\($0)" } ?? "unknown")
+                row("Protection query disagreement", diagnostics.singleMapProtectionQueryDisagreement.map { "\($0)" } ?? "unknown")
+                row("Call skipped (not executable)", diagnostics.singleMapCallSkippedBecauseNotExecutable.map { "\($0)" } ?? "unknown")
+                row("Raw branch attempted/returned", "\(diagnostics.rawBranchAttempted) / \(diagnostics.rawBranchReturned)")
+                row("BTI call attempted/returned", "\(diagnostics.btiCallAttempted) / \(diagnostics.btiCallReturned)")
+                row("PAC call", "not implemented (\(diagnostics.pacCallSkippedReason ?? "n/a"))")
+            }
+
             Text("NativeInterface / FunctionTable").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GetFunctionAddress entered", "\(diagnostics.nativeGetFunctionAddressEntered) (calls \(diagnostics.nativeGetFunctionAddressCalls))")

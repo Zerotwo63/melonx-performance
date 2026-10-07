@@ -40,6 +40,31 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             ref uint count,
             ref uint objectName);
 
+        // FASE 10B: a SECOND, independent Darwin query mechanism
+        // (mach_vm_region_recurse, the API vmmap/task_info-style tools use
+        // under the hood) to cross-check mach_vm_region's own answer -
+        // never trusting a single query path when the whole point is to
+        // find out whether protection reporting itself can be trusted.
+        // Unlike mach_vm_region, this call takes no explicit "flavor" -
+        // the kernel always fills a vm_region_submap_info_64 (the info/
+        // infoCnt pair is purely an input capacity / output actual-size,
+        // not a flavor selector). That struct's trailing fields have
+        // grown across SDK revisions, but its FIRST TWO fields -
+        // protection, max_protection - are each a stable 4-byte vm_prot_t
+        // at offset 0/4 in every revision that has ever shipped (same
+        // guarantee already relied on for VM_REGION_BASIC_INFO_64 above),
+        // so over-provisioning the buffer/count comfortably larger than
+        // any known revision and reading only offset 0/4 avoids needing
+        // the exact trailing layout to be right.
+        [DllImport("libc")]
+        private static extern int mach_vm_region_recurse(
+            ulong target_task,
+            ref ulong address,
+            ref ulong size,
+            ref uint nestingDepth,
+            byte[] info,
+            ref uint infoCnt);
+
         [LibraryImport("libc", EntryPoint = "sys_dcache_flush", SetLastError = true)]
         private static partial void SysDcacheFlush(IntPtr start, IntPtr len);
 
@@ -341,7 +366,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
         /// design, unlike the dual-mapped case) before reading the bytes
         /// back once more. Returns IntPtr.Zero on failure.
         /// </summary>
-        private static IntPtr AllocateAndMapSingle(byte[] code, string label)
+        private static (IntPtr page, bool actualExecutePermission, bool protectionQueryDisagreement) AllocateAndMapSingle(byte[] code, string label)
         {
             // FASE 9C asked for the primary ("Plain") test's fields using
             // the EXACT bare names (e.g. "singleMapCurrentProtectionBefore",
@@ -360,7 +385,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             if (page == MapFailed)
             {
                 BootEventBridge.ReportFail($"NativeMemoryDiagnostics.AllocateAndMapSingle {label} mmap", new Exception($"mmap failed, errno={Marshal.GetLastWin32Error()}"));
-                return IntPtr.Zero;
+                return (IntPtr.Zero, false, false);
             }
 
             Marshal.Copy(code, 0, page, code.Length);
@@ -369,7 +394,20 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             ReportBoth("CurrentProtectionBefore", before.HasValue ? DescribeProtection(before.Value.current) : "unknown");
             ReportBoth("MaxProtectionBefore", before.HasValue ? DescribeProtection(before.Value.max) : "unknown");
 
-            int protectResult = mprotect(page, pageSize, PROT_READ | PROT_EXEC);
+            // FASE 10A: register the EXACT flags sent to the syscall - not
+            // deduced afterwards from what we meant to send. If a future
+            // edit accidentally changes this to PROT_READ alone, this
+            // field catches it directly instead of only showing up as a
+            // downstream "not executable" symptom.
+            const int requestedProt = PROT_READ | PROT_EXEC;
+            ReportBoth("MprotectAddress", $"0x{page:X}");
+            ReportBoth("MprotectLength", pageSize.ToString());
+            ReportBoth("MprotectRequestedProtNumeric", requestedProt.ToString());
+            ReportBoth("MprotectRequestedRead", ((requestedProt & PROT_READ) != 0).ToString());
+            ReportBoth("MprotectRequestedWrite", ((requestedProt & PROT_WRITE) != 0).ToString());
+            ReportBoth("MprotectRequestedExecute", ((requestedProt & PROT_EXEC) != 0).ToString());
+
+            int protectResult = mprotect(page, pageSize, requestedProt);
             int protectErrno = protectResult != 0 ? Marshal.GetLastWin32Error() : 0;
             ReportBoth("MprotectResult", protectResult.ToString());
             ReportBoth("MprotectErrno", protectErrno.ToString());
@@ -377,7 +415,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             if (protectResult != 0)
             {
                 BootEventBridge.ReportFail($"NativeMemoryDiagnostics.AllocateAndMapSingle {label} mprotect", new Exception($"mprotect failed, errno={protectErrno}"));
-                return IntPtr.Zero;
+                return (IntPtr.Zero, false, false);
             }
 
             // THE important check per this round: confirm via the kernel's
@@ -386,6 +424,42 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             var after = QueryProtectionRaw(page);
             ReportBoth("CurrentProtectionAfter", after.HasValue ? DescribeProtection(after.Value.current) : "unknown");
             ReportBoth("MaxProtectionAfter", after.HasValue ? DescribeProtection(after.Value.max) : "unknown");
+
+            // FASE 10B: cross-check mach_vm_region's answer against a
+            // SECOND, independent Darwin query (mach_vm_region_recurse).
+            // If the two mechanisms disagree, the query itself cannot be
+            // trusted, so treat the page as non-executable rather than
+            // believing whichever answer happens to say EXECUTE.
+            var afterRecurse = QueryProtectionViaRecurse(page);
+            ReportBoth("MachCurrentProtectionNumeric", after.HasValue ? after.Value.current.ToString() : "unknown");
+            ReportBoth("MachMaxProtectionNumeric", after.HasValue ? after.Value.max.ToString() : "unknown");
+
+            bool basicR = after.HasValue && (after.Value.current & VM_PROT_READ) != 0;
+            bool basicW = after.HasValue && (after.Value.current & VM_PROT_WRITE) != 0;
+            bool basicX = after.HasValue && (after.Value.current & VM_PROT_EXECUTE) != 0;
+            ReportBoth("MachCurrentR", basicR.ToString());
+            ReportBoth("MachCurrentW", basicW.ToString());
+            ReportBoth("MachCurrentX", basicX.ToString());
+
+            bool recurseQueryFailed = !afterRecurse.HasValue;
+            ReportBoth("MachRecurseQueryFailed", recurseQueryFailed.ToString());
+
+            bool disagreement = after.HasValue && afterRecurse.HasValue && after.Value.current != afterRecurse.Value.current;
+            ReportBoth("ProtectionQueryDisagreement", disagreement.ToString());
+            if (disagreement)
+            {
+                BootEventBridge.Report(
+                    $"NativeMemoryDiagnostics.AllocateAndMapSingle {label} protection query disagreement",
+                    $"mach_vm_region={DescribeProtection(after.Value.current)},mach_vm_region_recurse={DescribeProtection(afterRecurse.Value.current)}");
+            }
+
+            // Conservative by design: if the two independent query
+            // mechanisms disagree, neither answer is trustworthy, so treat
+            // the page as non-executable (and let the FASE 10F
+            // classification surface PROTECTION_QUERY_BUG) rather than
+            // trusting whichever one happened to say EXECUTE.
+            bool actualExecutePermission = basicX && !disagreement;
+            ReportBoth("ActualExecutePermission", actualExecutePermission.ToString());
 
             ReportBoth("DcacheFlushAttempted", "true");
             try { SysDcacheFlush(page, (IntPtr)code.Length); }
@@ -404,7 +478,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             ReportBoth("ExecAddress", $"0x{page:X}");
             ReportBoth("BytesReadBack", Convert.ToHexString(bytesReadBack));
 
-            return page;
+            return (page, actualExecutePermission, disagreement);
         }
 
         /// <summary>
@@ -439,6 +513,41 @@ namespace Ryujinx.Cpu.LightningJit.Cache
         }
 
         /// <summary>
+        /// FASE 10B: see the doc comment on the mach_vm_region_recurse
+        /// P/Invoke declaration above for why this is a safe, independent
+        /// cross-check despite the exact struct size not being pinned
+        /// down. Returns null (reported) if the recurse call itself
+        /// fails - a clean failure here is itself useful information
+        /// (never silently treated as "protection unknown == not
+        /// executable" vs "protection unknown == query itself broken").
+        /// </summary>
+        private static (int current, int max)? QueryProtectionViaRecurse(IntPtr address)
+        {
+            try
+            {
+                ulong addr = (ulong)address;
+                ulong size = 0;
+                uint nestingDepth = 0;
+                byte[] info = new byte[256]; // 64 natural_t words - see P/Invoke doc comment
+                uint infoCnt = 64;
+
+                int result = mach_vm_region_recurse(mach_task_self(), ref addr, ref size, ref nestingDepth, info, ref infoCnt);
+                if (result != 0)
+                {
+                    BootEventBridge.Report("NativeMemoryDiagnostics.QueryProtectionViaRecurse failed", $"krReturn={result}");
+                    return null;
+                }
+
+                return (BitConverter.ToInt32(info, 0), BitConverter.ToInt32(info, 4));
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("NativeMemoryDiagnostics.QueryProtectionViaRecurse", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// FASE 8E/9C: single-mapping control, Test A ("plain") - the SAME
         /// 8 bytes, written and executed from the SAME single virtual
         /// address (classic mmap RW -> write -> mprotect RX -> icache
@@ -448,18 +557,34 @@ namespace Ryujinx.Cpu.LightningJit.Cache
         /// (diagnostic only, one-time, negligible) to avoid any risk of
         /// unmapping memory that might still be referenced.
         /// </summary>
-        public static (IntPtr rwAddress, IntPtr execAddress, byte[] bytesReadBack, bool callAttempted, bool returned, uint returnValue, bool passed) RunSingleMapControl(byte[] code, uint expectedValue)
+        public static (IntPtr rwAddress, IntPtr execAddress, byte[] bytesReadBack, bool callAttempted, bool returned, uint returnValue, bool passed, bool executable, bool protectionQueryDisagreement) RunSingleMapControl(byte[] code, uint expectedValue)
         {
-            IntPtr page = AllocateAndMapSingle(code, "Plain");
+            (IntPtr page, bool executable, bool disagreement) = AllocateAndMapSingle(code, "Plain");
 
             if (page == IntPtr.Zero)
             {
                 BootEventBridge.Report("singleMapPlainAttempted", "false");
                 BootEventBridge.Report("singleMapCallAttempted", "false");
-                return (IntPtr.Zero, IntPtr.Zero, Array.Empty<byte>(), false, false, 0, false);
+                return (IntPtr.Zero, IntPtr.Zero, Array.Empty<byte>(), false, false, 0, false, false, disagreement);
             }
 
             BootEventBridge.Report("singleMapPlainAttempted", "true");
+
+            // FASE 10C: never issue the call unless the cross-checked
+            // protection query actually confirms EXECUTE - this is exactly
+            // what used to leave the diagnostic itself hanging forever
+            // when the page turned out to be READ-only despite mprotect()
+            // reporting success.
+            if (!executable)
+            {
+                BootEventBridge.Report("singleMapCallSkippedBecauseNotExecutable", "true");
+                BootEventBridge.Report("singleMapCallAttempted", "false");
+                BootEventBridge.Report("singleMapPlainReturned", "false");
+                BootEventBridge.Report("singleMapReturned", "false");
+                return (page, page, Array.Empty<byte>(), false, false, 0, false, false, disagreement);
+            }
+
+            BootEventBridge.Report("singleMapCallSkippedBecauseNotExecutable", "false");
             BootEventBridge.Report("singleMapCallAttempted", "true");
 
             try
@@ -473,7 +598,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
                 BootEventBridge.Report("singleMapReturnValue", $"0x{result:X}");
                 BootEventBridge.Report("singleMapPassed", passed.ToString());
 
-                return (page, page, Array.Empty<byte>(), true, true, result, passed);
+                return (page, page, Array.Empty<byte>(), true, true, result, passed, true, disagreement);
             }
             catch (Exception ex)
             {
@@ -481,7 +606,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
                 BootEventBridge.Report("singleMapPlainReturned", "false");
                 BootEventBridge.Report("singleMapReturned", "false");
                 BootEventBridge.Report("singleMapPassed", "false");
-                return (page, page, Array.Empty<byte>(), true, false, 0, false);
+                return (page, page, Array.Empty<byte>(), true, false, 0, false, true, disagreement);
             }
         }
 
@@ -522,15 +647,29 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             }
 
             byte[] code = writer.AsByteSpan().ToArray();
-            IntPtr page = AllocateAndMapSingle(code, "Bti");
+            (IntPtr page, bool executable, _) = AllocateAndMapSingle(code, "Bti");
 
             if (page == IntPtr.Zero)
             {
                 BootEventBridge.Report("singleMapBtiAttempted", "false");
+                BootEventBridge.Report("btiCallAttempted", "false");
                 return (false, false, 0, false);
             }
 
             BootEventBridge.Report("singleMapBtiAttempted", "true");
+
+            // FASE 10C/10E: same never-call-if-not-executable discipline
+            // as the plain test, applied here too.
+            if (!executable)
+            {
+                BootEventBridge.Report("singleMapBtiCallSkippedBecauseNotExecutable", "true");
+                BootEventBridge.Report("singleMapBtiReturned", "false");
+                BootEventBridge.Report("btiCallAttempted", "false");
+                return (true, false, 0, false);
+            }
+
+            BootEventBridge.Report("singleMapBtiCallSkippedBecauseNotExecutable", "false");
+            BootEventBridge.Report("btiCallAttempted", "true");
 
             try
             {
@@ -540,13 +679,264 @@ namespace Ryujinx.Cpu.LightningJit.Cache
 
                 BootEventBridge.Report("singleMapBtiReturned", "true");
                 BootEventBridge.Report("singleMapBtiReturnValue", $"0x{result:X}");
+                BootEventBridge.Report("btiCallReturned", "true");
+                BootEventBridge.Report("btiCallReturnValue", $"0x{result:X}");
                 return (true, true, result, passed);
             }
             catch (Exception ex)
             {
                 BootEventBridge.ReportFail("NativeMemoryDiagnostics.RunSingleMapBtiControl call", ex);
                 BootEventBridge.Report("singleMapBtiReturned", "false");
+                BootEventBridge.Report("btiCallReturned", "false");
                 return (true, false, 0, false);
+            }
+        }
+
+        private delegate uint RawBranchTrampolineDelegate();
+
+        /// <summary>
+        /// FASE 10D Test 1 ("raw branch shim"): the literal request was a
+        /// natively-compiled Obj-C/C/C++ shim taking a raw uintptr_t and
+        /// doing an unauthenticated BLR - confirmed infeasible in this
+        /// environment (see RunSingleMapDeepDive's doc comment: the
+        /// native .dylib in this repo is never rebuilt by the iOS CI, and
+        /// there is no Mac/Xcode available locally either). This is the
+        /// closest achievable equivalent with the tools actually
+        /// available: a SECOND JIT-mapped page (the "trampoline") whose
+        /// own generated code loads the FIRST JIT-mapped page's ("target")
+        /// address as a plain 64-bit immediate (Assembler.Mov(Operand,
+        /// ulong) - ordinary MOVZ/MOVK, no ptrauth instructions at all)
+        /// and performs BLR to it directly. The outer call INTO the
+        /// trampoline still goes through .NET's normal
+        /// Marshal.GetDelegateForFunctionPointer/delegate-invoke ABI (same
+        /// as every other test here), but the INNER branch from trampoline
+        /// to target happens entirely inside already-executing JIT code,
+        /// with zero CLR/ABI involvement for that specific jump - which is
+        /// exactly the same shape of indirect call DispatchLoop itself
+        /// needs to make between JIT-compiled guest functions. An entry
+        /// marker (same 1-word native-memory-write pattern as
+        /// EmitStageMarker) is written immediately on entering the
+        /// trampoline, before the BLR, so "entered the trampoline but the
+        /// BLR itself never came back" is distinguishable from "never
+        /// even got into the trampoline".
+        /// </summary>
+        public static (bool attempted, bool entered, bool returned, uint returnValue) RunRawBranchTest(byte[] targetProbeCode)
+        {
+            (IntPtr targetPage, bool targetExecutable, _) = AllocateAndMapSingle(targetProbeCode, "RawTarget");
+
+            if (targetPage == IntPtr.Zero || !targetExecutable)
+            {
+                BootEventBridge.Report("rawBranchAttempted", "false");
+                BootEventBridge.Report("rawBranchSkippedReason", targetPage == IntPtr.Zero ? "target mapping failed" : "target page not confirmed executable");
+                return (false, false, false, 0);
+            }
+
+            if (RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+            {
+                BootEventBridge.Report("rawBranchAttempted", "false");
+                BootEventBridge.Report("rawBranchSkippedReason", "not arm64");
+                return (false, false, false, 0);
+            }
+
+            IntPtr markers = Marshal.AllocHGlobal(4);
+            Marshal.WriteInt32(markers, 0, 0);
+
+            CodeWriter writer = new();
+            Assembler asm = new(writer);
+            EmitStageMarker(ref asm, markers, 0, 1);
+            asm.Mov(Reg(0), (ulong)(long)targetPage);
+            asm.Blr(Reg(0));
+            asm.Ret();
+
+            byte[] trampolineCode = writer.AsByteSpan().ToArray();
+            (IntPtr trampolinePage, bool trampolineExecutable, _) = AllocateAndMapSingle(trampolineCode, "RawTrampoline");
+
+            if (trampolinePage == IntPtr.Zero || !trampolineExecutable)
+            {
+                BootEventBridge.Report("rawBranchAttempted", "false");
+                BootEventBridge.Report("rawBranchSkippedReason", trampolinePage == IntPtr.Zero ? "trampoline mapping failed" : "trampoline page not confirmed executable");
+                Marshal.FreeHGlobal(markers);
+                return (false, false, false, 0);
+            }
+
+            BootEventBridge.Report("rawBranchAttempted", "true");
+
+            try
+            {
+                RawBranchTrampolineDelegate call = Marshal.GetDelegateForFunctionPointer<RawBranchTrampolineDelegate>(trampolinePage);
+                uint result = call();
+                bool entered = Marshal.ReadInt32(markers, 0) != 0;
+
+                BootEventBridge.Report("rawBranchEntered", entered.ToString());
+                BootEventBridge.Report("rawBranchReturned", "true");
+                BootEventBridge.Report("rawBranchReturnValue", $"0x{result:X}");
+                return (true, entered, true, result);
+            }
+            catch (Exception ex)
+            {
+                bool entered = Marshal.ReadInt32(markers, 0) != 0;
+                BootEventBridge.ReportFail("NativeMemoryDiagnostics.RunRawBranchTest call", ex);
+                BootEventBridge.Report("rawBranchEntered", entered.ToString());
+                BootEventBridge.Report("rawBranchReturned", "false");
+                return (true, entered, false, 0);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(markers);
+            }
+        }
+
+        /// <summary>
+        /// FASE 10D Test 2 ("PAC function pointer"): the literal request
+        /// was ptrauth_sign_unauthenticated + ptrauth_key_function_pointer
+        /// + ptrauth_function_pointer_type_discriminator from &lt;ptrauth.h&gt;.
+        /// Those are C/Clang compiler builtins with no C#/.NET equivalent -
+        /// not something this managed code can call at all - and the one
+        /// way to actually use them (a natively-compiled C/Obj-C shim) is
+        /// confirmed infeasible in this repo's iOS CI (see
+        /// RunSingleMapDeepDive's doc comment). The other option
+        /// considered was hand-assembling the PACIA/PACIZA sign
+        /// instructions directly, the same way BTI C was hand-derived
+        /// last round - but PACIA/PACIZA live in the much more involved
+        /// "Data-processing (1 source)" encoding group (multiple
+        /// interacting opcode/key/zero-modifier fields), unlike BTI's
+        /// single documented HINT-space immediate, and getting ONE bit
+        /// wrong there is architecturally a silent-wrong-signature or a
+        /// trap - either way indistinguishable from the open-ended "hang"
+        /// this entire investigation exists to eliminate, with no signal/
+        /// exception handler installed to catch it safely (FASE 9G was
+        /// deferred for the identical reason). Rather than fabricate a
+        /// result or risk reintroducing an unverifiable hang, this is
+        /// reported as explicitly NOT attempted, with the reason on record.
+        /// </summary>
+        public static void ReportPacTestNotImplemented()
+        {
+            BootEventBridge.Report("pacCallAttempted", "false");
+            BootEventBridge.Report("pacPointerRaw", "n/a");
+            BootEventBridge.Report("pacPointerSigned", "n/a");
+            BootEventBridge.Report("pacCallReturned", "false");
+            BootEventBridge.Report(
+                "pacCallSkippedReason",
+                "ptrauth.h has no C#/.NET equivalent and requires a natively-compiled shim, which this repo's iOS CI does not build; hand-assembling PACIA/PACIZA was rejected for insufficient encoding-verification confidence (unlike BTI C's single documented HINT immediate)");
+        }
+
+        /// <summary>
+        /// FASE 10F: folds every FASE 10A-10E signal collected this round
+        /// into exactly one of the requested terminal classifications.
+        /// Pure read of already-reported values plus the parameters
+        /// passed in - no new measurement happens here.
+        /// </summary>
+        public static string ClassifySingleMapExecution(
+            bool protectionQueryDisagreement,
+            bool actualExecutePermission,
+            bool callSkippedBecauseNotExecutable,
+            bool rawBranchReturned,
+            bool pacCallReturned,
+            bool btiCallReturned)
+        {
+            string classification;
+
+            if (protectionQueryDisagreement)
+            {
+                classification = "PROTECTION_QUERY_BUG";
+            }
+            else if (!actualExecutePermission || callSkippedBecauseNotExecutable)
+            {
+                classification = "NON_EXECUTABLE_MAPPING";
+            }
+            else if (rawBranchReturned)
+            {
+                classification = "RAW_EXECUTION_WORKS";
+            }
+            else if (pacCallReturned)
+            {
+                classification = "PAC_REQUIRED";
+            }
+            else if (btiCallReturned)
+            {
+                classification = "BTI_REQUIRED";
+            }
+            else
+            {
+                classification = "UNKNOWN_EXECUTION_FAILURE";
+            }
+
+            BootEventBridge.Report("classification", classification);
+            return classification;
+        }
+
+        /// <summary>
+        /// FASE 10 orchestrator: runs the Plain single-map control (10A-
+        /// 10C instrumented), then - ONLY if that page was confirmed
+        /// really executable - the raw-branch test (10D Test 1), the PAC
+        /// not-implemented marker (10D Test 2), and finally the BTI test
+        /// (10E, deliberately run LAST, never before the raw/PAC
+        /// classification), then reports the FASE 10F classification.
+        /// Replaces the previous round's three separate call sites
+        /// (RunSingleMapControl / RunSingleMapBtiControl /
+        /// RunSingleMapStageProbe) with a single, correctly-ordered entry
+        /// point so TranslatorStubs.cs does not need to encode this
+        /// ordering itself.
+        ///
+        /// Infeasibility note (applies to every "native shim" mention in
+        /// this file): libarmeilleure-jitsupport.dylib / support.c exist
+        /// in this repo but are referenced ONLY by
+        /// distribution/macos/create_macos_build_*.sh - never by
+        /// MeloNX.xcodeproj or the iOS CI workflow - so a real native C
+        /// shim compiled fresh into the iOS IPA is not achievable without
+        /// a Mac/Xcode, neither of which is available in this environment.
+        /// </summary>
+        public static void RunSingleMapDeepDive(byte[] code, uint expectedValue)
+        {
+            var plain = RunSingleMapControl(code, expectedValue);
+
+            bool rawBranchReturned = false;
+            bool btiCallReturned = false;
+
+            if (plain.executable)
+            {
+                var raw = RunRawBranchTest(code);
+                rawBranchReturned = raw.returned;
+
+                ReportPacTestNotImplemented();
+
+                // FASE 10E: BTI only after raw/PAC are classified, never before.
+                var bti = RunSingleMapBtiControl(expectedValue);
+                btiCallReturned = bti.returned;
+            }
+            else
+            {
+                // Still report the skip explicitly for each test this
+                // round would otherwise have run, so the report never
+                // shows blank/missing fields without an explanation.
+                BootEventBridge.Report("rawBranchAttempted", "false");
+                BootEventBridge.Report("rawBranchSkippedReason", "single-map plain page not confirmed executable");
+                ReportPacTestNotImplemented();
+                BootEventBridge.Report("singleMapBtiAttempted", "false");
+                BootEventBridge.Report("btiCallAttempted", "false");
+            }
+
+            // singleMapProtectionQueryDisagreement / ActualExecutePermission
+            // were already reported per-call (bare names, "Plain" label)
+            // by AllocateAndMapSingle - re-use the same authoritative
+            // values here, never by re-querying.
+            ClassifySingleMapExecution(
+                protectionQueryDisagreement: plain.protectionQueryDisagreement,
+                actualExecutePermission: plain.executable,
+                callSkippedBecauseNotExecutable: !plain.executable,
+                rawBranchReturned: rawBranchReturned,
+                pacCallReturned: false,
+                btiCallReturned: btiCallReturned);
+
+            // Only run the background stage-marker probe when the plain
+            // page was confirmed executable - it is gated identically
+            // inside RunSingleMapStageProbe itself (its own
+            // AllocateAndMapSingle call re-checks independently), this
+            // call site just avoids spawning threads for a page we
+            // already know will be skipped.
+            if (plain.executable)
+            {
+                RunSingleMapStageProbe();
             }
         }
 
@@ -583,10 +973,17 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             }
 
             byte[] code = writer.AsByteSpan().ToArray();
-            IntPtr page = AllocateAndMapSingle(code, "StageProbe");
+            (IntPtr page, bool executable, _) = AllocateAndMapSingle(code, "StageProbe");
 
             if (page == IntPtr.Zero)
             {
+                Marshal.FreeHGlobal(markers);
+                return;
+            }
+
+            if (!executable)
+            {
+                BootEventBridge.Report("singleMapStageProbeCallSkippedBecauseNotExecutable", "true");
                 Marshal.FreeHGlobal(markers);
                 return;
             }

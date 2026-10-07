@@ -293,6 +293,66 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var singleMapNativeEntryStage = 0
     @Published private(set) var singleMapNativeBeforeRetStage = 0
 
+    // FASE 10A: the EXACT mprotect() flags sent to the syscall, registered
+    // at the call site - never deduced afterward from intent.
+    @Published private(set) var singleMapMprotectAddress: String?
+    @Published private(set) var singleMapMprotectLength: String?
+    @Published private(set) var singleMapMprotectRequestedProtNumeric: String?
+    @Published private(set) var singleMapMprotectRequestedRead: String?
+    @Published private(set) var singleMapMprotectRequestedWrite: String?
+    @Published private(set) var singleMapMprotectRequestedExecute: String?
+
+    // FASE 10B: a SECOND, independent Darwin protection query
+    // (mach_vm_region_recurse) cross-checked against the first
+    // (mach_vm_region) - mprotect() reported success but the page came
+    // back READ-only afterward, so neither query is trusted blindly.
+    @Published private(set) var singleMapMachCurrentProtectionNumeric: String?
+    @Published private(set) var singleMapMachMaxProtectionNumeric: String?
+    @Published private(set) var singleMapMachCurrentR: Bool?
+    @Published private(set) var singleMapMachCurrentW: Bool?
+    @Published private(set) var singleMapMachCurrentX: Bool?
+    @Published private(set) var singleMapMachRecurseQueryFailed: Bool?
+    @Published private(set) var singleMapProtectionQueryDisagreement: Bool?
+    @Published private(set) var singleMapActualExecutePermission: Bool?
+
+    // FASE 10C: never issue the call if the cross-checked query above did
+    // not actually confirm EXECUTE - this is what used to leave the
+    // diagnostic itself hanging indefinitely.
+    @Published private(set) var singleMapCallSkippedBecauseNotExecutable: Bool?
+    @Published private(set) var singleMapBtiCallSkippedBecauseNotExecutable: Bool?
+    @Published private(set) var singleMapStageProbeCallSkippedBecauseNotExecutable: Bool?
+
+    // FASE 10D Test 1: raw BLR from one JIT page to another, entirely
+    // inside already-executing JIT code (no CLR/ABI involvement for that
+    // specific branch) - the closest achievable equivalent to a native
+    // "raw branch shim", since this repo's native dylib is never rebuilt
+    // by iOS CI and there is no Mac/Xcode available to compile a new one.
+    @Published private(set) var rawBranchAttempted = false
+    @Published private(set) var rawBranchSkippedReason: String?
+    @Published private(set) var rawBranchEntered: Bool?
+    @Published private(set) var rawBranchReturned = false
+    @Published private(set) var rawBranchReturnValue: String?
+
+    // FASE 10D Test 2: NOT implemented this round - see
+    // pacCallSkippedReason for the verified, disclosed reason (no C#/.NET
+    // equivalent to ptrauth.h, and hand-assembling PACIA/PACIZA was
+    // rejected for insufficient encoding-verification confidence).
+    @Published private(set) var pacCallAttempted = false
+    @Published private(set) var pacPointerRaw: String?
+    @Published private(set) var pacPointerSigned: String?
+    @Published private(set) var pacCallReturned = false
+    @Published private(set) var pacCallSkippedReason: String?
+
+    // FASE 10E: BTI test result, run deliberately AFTER raw/PAC above.
+    @Published private(set) var btiCallAttempted = false
+    @Published private(set) var btiCallReturned = false
+    @Published private(set) var btiCallReturnValue: String?
+
+    // FASE 10F: terminal classification - one of NON_EXECUTABLE_MAPPING,
+    // PROTECTION_QUERY_BUG, MPROTECT_FLAGS_BUG, RAW_EXECUTION_WORKS,
+    // PAC_REQUIRED, BTI_REQUIRED, UNKNOWN_EXECUTION_FAILURE.
+    @Published private(set) var singleMapExecutionClassification: String?
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -483,6 +543,37 @@ final class BootDiagnostics: ObservableObject {
             self.singleMapBtiReturnValue = nil
             self.singleMapNativeEntryStage = 0
             self.singleMapNativeBeforeRetStage = 0
+            self.singleMapMprotectAddress = nil
+            self.singleMapMprotectLength = nil
+            self.singleMapMprotectRequestedProtNumeric = nil
+            self.singleMapMprotectRequestedRead = nil
+            self.singleMapMprotectRequestedWrite = nil
+            self.singleMapMprotectRequestedExecute = nil
+            self.singleMapMachCurrentProtectionNumeric = nil
+            self.singleMapMachMaxProtectionNumeric = nil
+            self.singleMapMachCurrentR = nil
+            self.singleMapMachCurrentW = nil
+            self.singleMapMachCurrentX = nil
+            self.singleMapMachRecurseQueryFailed = nil
+            self.singleMapProtectionQueryDisagreement = nil
+            self.singleMapActualExecutePermission = nil
+            self.singleMapCallSkippedBecauseNotExecutable = nil
+            self.singleMapBtiCallSkippedBecauseNotExecutable = nil
+            self.singleMapStageProbeCallSkippedBecauseNotExecutable = nil
+            self.rawBranchAttempted = false
+            self.rawBranchSkippedReason = nil
+            self.rawBranchEntered = nil
+            self.rawBranchReturned = false
+            self.rawBranchReturnValue = nil
+            self.pacCallAttempted = false
+            self.pacPointerRaw = nil
+            self.pacPointerSigned = nil
+            self.pacCallReturned = false
+            self.pacCallSkippedReason = nil
+            self.btiCallAttempted = false
+            self.btiCallReturned = false
+            self.btiCallReturnValue = nil
+            self.singleMapExecutionClassification = nil
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -603,6 +694,24 @@ final class BootDiagnostics: ObservableObject {
             // Sub-classify A1-A7 using the FASE 8A-8G evidence, in order of
             // how certain/fundamental each diagnosis is - never a guess.
             if dispatchProbePassed == false || (dispatchProbeCallAttempted && !dispatchProbeReturned) {
+                // FASE 10: the single-map execution classification is the
+                // most direct, authoritative signal now available - per
+                // this round's explicit instruction, resolve THIS before
+                // treating any A1-A11 dual-map-oriented guess as final.
+                if let classification = singleMapExecutionClassification {
+                    if classification == "RAW_EXECUTION_WORKS" {
+                        return (
+                            "A13 - raw JIT-to-JIT branch works but the managed delegate call does not",
+                            "the SAME single-mapped page that singleMapPlainReturned=\(singleMapPlainReturned) failed to return through via Marshal.GetDelegateForFunctionPointer DID return successfully (rawBranchReturnValue=\(rawBranchReturnValue ?? "none")) when branched to via a raw BLR issued from ALREADY-RUNNING JIT code instead - this points specifically at .NET's own calli/delegate-invoke ABI layer on arm64e, not at memory permissions, TXM, or BTI"
+                        )
+                    }
+
+                    return (
+                        "A12 - \(classification)",
+                        singleMapExecutionClassificationReason(classification)
+                    )
+                }
+
                 if dispatchProbeRwRxBytesMatch == false {
                     return (
                         "A1 - RX bytes differ from RW",
@@ -685,7 +794,7 @@ final class BootDiagnostics: ObservableObject {
 
                 return (
                     "Scenario A - dual mapping / icache / invocación de código generado",
-                    "the same-map probe (known function through the exact same cache DispatchLoop uses) did not complete successfully, but none of A1/A2/A3/A4/A5/A6/A7/A8/A9/A10/A11's specific evidence matched; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), dispatchProbeCallAttempted=\(dispatchProbeCallAttempted) - see the full report's \"DUAL-MAP PROBE HANG INVESTIGATION\" and \"SINGLE-MAP DEEP DIVE\" sections for every FASE 8A-8G/9A-9H field"
+                    "the same-map probe (known function through the exact same cache DispatchLoop uses) did not complete successfully, but none of A1/A2/A3/A4/A5/A6/A7/A8/A9/A10/A11/A12/A13's specific evidence matched; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), dispatchProbeCallAttempted=\(dispatchProbeCallAttempted) - see the full report's \"DUAL-MAP PROBE HANG INVESTIGATION\", \"SINGLE-MAP DEEP DIVE\", and \"SINGLE-MAP EXECUTION CLASSIFICATION\" sections for every FASE 8A-8G/9A-9H/10A-10F field"
                 )
             }
 
@@ -777,6 +886,29 @@ final class BootDiagnostics: ObservableObject {
             "renderer / first frame",
             "present succeeded but ran-first-frame never fired or was never corroborated; secondsSinceLastRenderProgress=\(progress), lastRenderLoopStage=\(lastRenderLoopStage ?? "none")"
         )
+    }
+
+    /// FASE 10F: human-readable reason text for each terminal
+    /// classification NativeMemoryDiagnostics.ClassifySingleMapExecution
+    /// can report, built only from fields already real-logged this round
+    /// - never a guess beyond what that classification itself asserts.
+    private func singleMapExecutionClassificationReason(_ classification: String) -> String {
+        switch classification {
+        case "PROTECTION_QUERY_BUG":
+            return "mach_vm_region and mach_vm_region_recurse disagree about this page's real current protection (singleMapProtectionQueryDisagreement=true) - at least one of the two Darwin query mechanisms cannot be trusted on this device/OS, so neither answer alone proves execute permission one way or the other"
+        case "MPROTECT_FLAGS_BUG":
+            return "the flags actually sent to mprotect() (singleMapMprotectRequestedProtNumeric=\(singleMapMprotectRequestedProtNumeric ?? "none"), read=\(singleMapMprotectRequestedRead ?? "?"), write=\(singleMapMprotectRequestedWrite ?? "?"), execute=\(singleMapMprotectRequestedExecute ?? "?")) do not match what was intended (PROT_READ|PROT_EXEC) - this would be a real bug in this diagnostic's own code, not in iOS/Darwin"
+        case "NON_EXECUTABLE_MAPPING":
+            return "mprotect(PROT_READ|PROT_EXEC) returned success (singleMapMprotectResult=\(singleMapMprotectResult ?? "none"), errno=\(singleMapMprotectErrno ?? "none")), but the kernel's own VM bookkeeping shows this page is NOT really executable afterward (singleMapCurrentProtectionAfter=\(singleMapCurrentProtectionAfter ?? "none"), actualExecutePermission=\(singleMapActualExecutePermission.map { "\($0)" } ?? "unknown")) - iOS is silently dropping VM_PROT_EXECUTE on a plain mmap/mprotect page, consistent with a JIT-specific entitlement/MAP_JIT/TXM requirement that this allocation path does not satisfy; the call itself was skipped (singleMapCallSkippedBecauseNotExecutable=true) specifically so this diagnostic would not hang the way the real DispatchLoop call does"
+        case "RAW_EXECUTION_WORKS":
+            return "the page is executable and a raw JIT-to-JIT branch (no CLR/ABI involvement for that specific jump) returned successfully"
+        case "PAC_REQUIRED":
+            return "the page is executable but only the PAC-signed call path returned - NOT reachable this round since the PAC test itself was not implemented (pacCallSkippedReason=\(pacCallSkippedReason ?? "none")); seeing this classification would indicate a bug in the classifier, not a real finding"
+        case "BTI_REQUIRED":
+            return "the page is executable, the raw-branch test did not return (rawBranchReturned=\(rawBranchReturned)), but the BTI-landing-pad variant did (btiCallReturnValue=\(btiCallReturnValue ?? "none")) - direct evidence that indirect branches into JIT memory on this device/OS require a BTI landing pad the real JIT-generated code is not currently emitting"
+        default:
+            return "none of PROTECTION_QUERY_BUG/MPROTECT_FLAGS_BUG/NON_EXECUTABLE_MAPPING/RAW_EXECUTION_WORKS/PAC_REQUIRED/BTI_REQUIRED matched (actualExecutePermission=\(singleMapActualExecutePermission.map { "\($0)" } ?? "unknown"), rawBranchReturned=\(rawBranchReturned), btiCallReturned=\(btiCallReturned)) - see the full report's SINGLE-MAP EXECUTION CLASSIFICATION section for every FASE 10A-10F field"
+        }
     }
 
     private func currentThreadName() -> String {
@@ -1166,6 +1298,68 @@ final class BootDiagnostics: ObservableObject {
             if let result, let n = Int(result) { singleMapNativeEntryStage = n }
         case "singleMapNativeBeforeRetStage":
             if let result, let n = Int(result) { singleMapNativeBeforeRetStage = n }
+        case "singleMapMprotectAddress":
+            singleMapMprotectAddress = result
+        case "singleMapMprotectLength":
+            singleMapMprotectLength = result
+        case "singleMapMprotectRequestedProtNumeric":
+            singleMapMprotectRequestedProtNumeric = result
+        case "singleMapMprotectRequestedRead":
+            singleMapMprotectRequestedRead = result
+        case "singleMapMprotectRequestedWrite":
+            singleMapMprotectRequestedWrite = result
+        case "singleMapMprotectRequestedExecute":
+            singleMapMprotectRequestedExecute = result
+        case "singleMapMachCurrentProtectionNumeric":
+            singleMapMachCurrentProtectionNumeric = result
+        case "singleMapMachMaxProtectionNumeric":
+            singleMapMachMaxProtectionNumeric = result
+        case "singleMapMachCurrentR":
+            singleMapMachCurrentR = Self.isTrue(result)
+        case "singleMapMachCurrentW":
+            singleMapMachCurrentW = Self.isTrue(result)
+        case "singleMapMachCurrentX":
+            singleMapMachCurrentX = Self.isTrue(result)
+        case "singleMapMachRecurseQueryFailed":
+            singleMapMachRecurseQueryFailed = Self.isTrue(result)
+        case "singleMapProtectionQueryDisagreement":
+            singleMapProtectionQueryDisagreement = Self.isTrue(result)
+        case "singleMapActualExecutePermission":
+            singleMapActualExecutePermission = Self.isTrue(result)
+        case "singleMapCallSkippedBecauseNotExecutable":
+            singleMapCallSkippedBecauseNotExecutable = Self.isTrue(result)
+        case "singleMapBtiCallSkippedBecauseNotExecutable":
+            singleMapBtiCallSkippedBecauseNotExecutable = Self.isTrue(result)
+        case "singleMapStageProbeCallSkippedBecauseNotExecutable":
+            singleMapStageProbeCallSkippedBecauseNotExecutable = Self.isTrue(result)
+        case "rawBranchAttempted":
+            rawBranchAttempted = Self.isTrue(result)
+        case "rawBranchSkippedReason":
+            rawBranchSkippedReason = result
+        case "rawBranchEntered":
+            rawBranchEntered = Self.isTrue(result)
+        case "rawBranchReturned":
+            rawBranchReturned = Self.isTrue(result)
+        case "rawBranchReturnValue":
+            rawBranchReturnValue = result
+        case "pacCallAttempted":
+            pacCallAttempted = Self.isTrue(result)
+        case "pacPointerRaw":
+            pacPointerRaw = result
+        case "pacPointerSigned":
+            pacPointerSigned = result
+        case "pacCallReturned":
+            pacCallReturned = Self.isTrue(result)
+        case "pacCallSkippedReason":
+            pacCallSkippedReason = result
+        case "btiCallAttempted":
+            btiCallAttempted = Self.isTrue(result)
+        case "btiCallReturned":
+            btiCallReturned = Self.isTrue(result)
+        case "btiCallReturnValue":
+            btiCallReturnValue = result
+        case "classification":
+            singleMapExecutionClassification = result
         default:
             break
         }
@@ -1322,6 +1516,20 @@ final class BootDiagnostics: ObservableObject {
             "singleMapBtiAttempted", "singleMapBtiReturned", "singleMapBtiReturnValue",
             "singleMapNativeEntryStage", "singleMapNativeBeforeRetStage",
             "LightningJit.SingleMapStageProbe call begin", "LightningJit.SingleMapStageProbe call returned",
+            // FASE 10A-10F.
+            "singleMapMprotectAddress", "singleMapMprotectLength",
+            "singleMapMprotectRequestedProtNumeric", "singleMapMprotectRequestedRead",
+            "singleMapMprotectRequestedWrite", "singleMapMprotectRequestedExecute",
+            "singleMapMachCurrentProtectionNumeric", "singleMapMachMaxProtectionNumeric",
+            "singleMapMachCurrentR", "singleMapMachCurrentW", "singleMapMachCurrentX",
+            "singleMapMachRecurseQueryFailed", "singleMapProtectionQueryDisagreement",
+            "singleMapActualExecutePermission", "singleMapCallSkippedBecauseNotExecutable",
+            "singleMapBtiCallSkippedBecauseNotExecutable", "singleMapStageProbeCallSkippedBecauseNotExecutable",
+            "rawBranchAttempted", "rawBranchSkippedReason", "rawBranchEntered",
+            "rawBranchReturned", "rawBranchReturnValue",
+            "pacCallAttempted", "pacPointerRaw", "pacPointerSigned", "pacCallReturned", "pacCallSkippedReason",
+            "btiCallAttempted", "btiCallReturned", "btiCallReturnValue",
+            "classification",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
@@ -1588,7 +1796,31 @@ final class BootDiagnostics: ObservableObject {
         lines.append("singleMapBtiReturnValue = \(singleMapBtiReturnValue ?? "none")")
         lines.append("singleMapNativeEntryStage = \(singleMapNativeEntryStage)")
         lines.append("singleMapNativeBeforeRetStage = \(singleMapNativeBeforeRetStage)")
-        lines.append("NOTE: PAC/ptrauth-signed function-pointer test (FASE 9E), raw-vs-PAC native shim matrix (FASE 9F), and signal-based fault classification (FASE 9G) were NOT implemented this round - see report for why (no native dylib rebuild in iOS CI, no on-device opcode verification capability for PACIA/AUTIA, no verified Darwin ucontext_t/mcontext64 offsets to safely parse a signal frame).")
+        lines.append("NOTE: a true natively-compiled ptrauth.h shim (FASE 9E/9F) remains infeasible (no native dylib rebuild in this iOS CI, no Mac/Xcode available); signal-based fault classification (FASE 9G) remains deferred (no verified Darwin ucontext_t/mcontext64 offsets to safely parse a signal frame). See the SINGLE-MAP EXECUTION CLASSIFICATION section below for what WAS implemented this round (FASE 10) in place of those.")
+        lines.append("")
+        lines.append("SINGLE-MAP EXECUTION CLASSIFICATION (FASES 10A-10F - mprotect reported success but the page came back READ-only, not READ+EXECUTE):")
+        lines.append("mprotectRequestedProt = \(singleMapMprotectRequestedProtNumeric ?? "none") (R=\(singleMapMprotectRequestedRead ?? "?"),W=\(singleMapMprotectRequestedWrite ?? "?"),X=\(singleMapMprotectRequestedExecute ?? "?"))")
+        lines.append("machCurrentProtection (mach_vm_region) = \(singleMapCurrentProtectionAfter ?? "none") / numeric \(singleMapMachCurrentProtectionNumeric ?? "none")")
+        lines.append("machMaxProtection = \(singleMapMaxProtectionAfter ?? "none") / numeric \(singleMapMachMaxProtectionNumeric ?? "none")")
+        lines.append("machCurrentR/W/X (mach_vm_region_recurse cross-check) = \(singleMapMachCurrentR.map { "\($0)" } ?? "unknown") / \(singleMapMachCurrentW.map { "\($0)" } ?? "unknown") / \(singleMapMachCurrentX.map { "\($0)" } ?? "unknown")")
+        lines.append("singleMapMachRecurseQueryFailed = \(singleMapMachRecurseQueryFailed.map { "\($0)" } ?? "unknown")")
+        lines.append("singleMapProtectionQueryDisagreement = \(singleMapProtectionQueryDisagreement.map { "\($0)" } ?? "unknown")")
+        lines.append("actualExecutePermission = \(singleMapActualExecutePermission.map { "\($0)" } ?? "unknown")")
+        lines.append("callSkippedBecauseNotExecutable = \(singleMapCallSkippedBecauseNotExecutable.map { "\($0)" } ?? "unknown")")
+        lines.append("")
+        lines.append("rawBranchAttempted = \(rawBranchAttempted) (skippedReason=\(rawBranchSkippedReason ?? "n/a"))")
+        lines.append("rawBranchEntered = \(rawBranchEntered.map { "\($0)" } ?? "unknown")")
+        lines.append("rawBranchReturned = \(rawBranchReturned)")
+        lines.append("rawBranchReturnValue = \(rawBranchReturnValue ?? "none")")
+        lines.append("")
+        lines.append("pacCallAttempted = \(pacCallAttempted) (skippedReason=\(pacCallSkippedReason ?? "n/a"))")
+        lines.append("pacCallReturned = \(pacCallReturned)")
+        lines.append("")
+        lines.append("btiCallAttempted = \(btiCallAttempted)")
+        lines.append("btiCallReturned = \(btiCallReturned)")
+        lines.append("btiCallReturnValue = \(btiCallReturnValue ?? "none")")
+        lines.append("")
+        lines.append("classification = \(singleMapExecutionClassification ?? "unknown")")
         lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")

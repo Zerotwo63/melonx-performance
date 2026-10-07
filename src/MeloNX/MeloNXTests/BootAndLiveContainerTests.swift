@@ -1256,6 +1256,97 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.singleMapNativeBeforeRetStage == 2)
     }
 
+    @Test func fase10aMprotectAuditFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapMprotectAddress", result: "0xAAAA")
+        BootDiagnostics.shared.log("singleMapMprotectLength", result: "16384")
+        BootDiagnostics.shared.log("singleMapMprotectRequestedProtNumeric", result: "5")
+        BootDiagnostics.shared.log("singleMapMprotectRequestedRead", result: "true")
+        BootDiagnostics.shared.log("singleMapMprotectRequestedWrite", result: "false")
+        BootDiagnostics.shared.log("singleMapMprotectRequestedExecute", result: "true")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapMprotectAddress == "0xAAAA")
+        #expect(BootDiagnostics.shared.singleMapMprotectRequestedProtNumeric == "5")
+        #expect(BootDiagnostics.shared.singleMapMprotectRequestedRead == "true")
+        #expect(BootDiagnostics.shared.singleMapMprotectRequestedExecute == "true")
+    }
+
+    @Test func fase10bMachCrossCheckFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapMachCurrentProtectionNumeric", result: "1")
+        BootDiagnostics.shared.log("singleMapMachMaxProtectionNumeric", result: "3")
+        BootDiagnostics.shared.log("singleMapMachCurrentR", result: "True")
+        BootDiagnostics.shared.log("singleMapMachCurrentW", result: "False")
+        BootDiagnostics.shared.log("singleMapMachCurrentX", result: "False")
+        BootDiagnostics.shared.log("singleMapMachRecurseQueryFailed", result: "false")
+        BootDiagnostics.shared.log("singleMapProtectionQueryDisagreement", result: "false")
+        BootDiagnostics.shared.log("singleMapActualExecutePermission", result: "False")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapMachCurrentProtectionNumeric == "1")
+        #expect(BootDiagnostics.shared.singleMapMachCurrentR == true)
+        #expect(BootDiagnostics.shared.singleMapMachCurrentX == false)
+        #expect(BootDiagnostics.shared.singleMapProtectionQueryDisagreement == false)
+        #expect(BootDiagnostics.shared.singleMapActualExecutePermission == false)
+    }
+
+    @Test func fase10cCallSkipFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapCallSkippedBecauseNotExecutable", result: "true")
+        BootDiagnostics.shared.log("singleMapBtiCallSkippedBecauseNotExecutable", result: "true")
+        BootDiagnostics.shared.log("singleMapStageProbeCallSkippedBecauseNotExecutable", result: "true")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapCallSkippedBecauseNotExecutable == true)
+        #expect(BootDiagnostics.shared.singleMapBtiCallSkippedBecauseNotExecutable == true)
+        #expect(BootDiagnostics.shared.singleMapStageProbeCallSkippedBecauseNotExecutable == true)
+    }
+
+    @Test func fase10dRawBranchAndPacFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("rawBranchAttempted", result: "true")
+        BootDiagnostics.shared.log("rawBranchEntered", result: "true")
+        BootDiagnostics.shared.log("rawBranchReturned", result: "true")
+        BootDiagnostics.shared.log("rawBranchReturnValue", result: "0x5678")
+        BootDiagnostics.shared.log("pacCallAttempted", result: "false")
+        BootDiagnostics.shared.log("pacCallSkippedReason", result: "no ptrauth.h equivalent in C#")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.rawBranchAttempted)
+        #expect(BootDiagnostics.shared.rawBranchEntered == true)
+        #expect(BootDiagnostics.shared.rawBranchReturned)
+        #expect(BootDiagnostics.shared.rawBranchReturnValue == "0x5678")
+        #expect(BootDiagnostics.shared.pacCallAttempted == false)
+        #expect(BootDiagnostics.shared.pacCallSkippedReason == "no ptrauth.h equivalent in C#")
+    }
+
+    @Test func fase10eBtiCallFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("btiCallAttempted", result: "true")
+        BootDiagnostics.shared.log("btiCallReturned", result: "true")
+        BootDiagnostics.shared.log("btiCallReturnValue", result: "0x5678")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.btiCallAttempted)
+        #expect(BootDiagnostics.shared.btiCallReturned)
+        #expect(BootDiagnostics.shared.btiCallReturnValue == "0x5678")
+    }
+
+    @Test func fase10fClassificationFieldTracks() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("classification", result: "NON_EXECUTABLE_MAPPING")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapExecutionClassification == "NON_EXECUTABLE_MAPPING")
+    }
+
     // MARK: - A1-A7 classification
 
     @Test func classifiesA1WhenRwRxBytesDiffer() async throws {
@@ -1377,6 +1468,37 @@ struct BootAndLiveContainerTests {
         #expect(stage.hasPrefix("A11"))
     }
 
+    @Test func classifiesA12WhenSingleMapExecutionClassificationIsConclusive() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("classification", result: "NON_EXECUTABLE_MAPPING")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, reason) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A12"))
+        #expect(reason.contains("NOT really executable") || reason.contains("not really executable"))
+    }
+
+    @Test func classifiesA13WhenRawBranchWorksButDelegateCallDoesNot() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("rawBranchReturned", result: "true")
+        BootDiagnostics.shared.log("rawBranchReturnValue", result: "0x5678")
+        BootDiagnostics.shared.log("classification", result: "RAW_EXECUTION_WORKS")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, reason) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A13"))
+        #expect(reason.contains("calli/delegate-invoke"))
+    }
+
     @Test func beginBootResetsFase8Fields() async throws {
         BootDiagnostics.shared.beginBoot()
         BootDiagnostics.shared.log("dispatchProbeBytesRx", result: "AA")
@@ -1428,6 +1550,49 @@ struct BootAndLiveContainerTests {
         #expect(report.contains("singleMapPlainAttempted"))
         #expect(report.contains("singleMapBtiAttempted"))
         #expect(report.contains("singleMapNativeEntryStage ="))
-        #expect(report.contains("NOT implemented this round"))
+        #expect(report.contains("remains infeasible"))
+        #expect(report.contains("remains deferred"))
+    }
+
+    @Test func buildReportIncludesFase10Section() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("SINGLE-MAP EXECUTION CLASSIFICATION (FASES 10A-10F"))
+        #expect(report.contains("mprotectRequestedProt ="))
+        #expect(report.contains("machCurrentProtection"))
+        #expect(report.contains("actualExecutePermission ="))
+        #expect(report.contains("callSkippedBecauseNotExecutable ="))
+        #expect(report.contains("rawBranchAttempted ="))
+        #expect(report.contains("pacCallAttempted ="))
+        #expect(report.contains("btiCallAttempted ="))
+        #expect(report.contains("classification ="))
+    }
+
+    @Test func beginBootResetsFase10Fields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapMprotectRequestedExecute", result: "true")
+        BootDiagnostics.shared.log("singleMapActualExecutePermission", result: "False")
+        BootDiagnostics.shared.log("singleMapProtectionQueryDisagreement", result: "True")
+        BootDiagnostics.shared.log("rawBranchAttempted", result: "true")
+        BootDiagnostics.shared.log("rawBranchReturned", result: "true")
+        BootDiagnostics.shared.log("pacCallAttempted", result: "false")
+        BootDiagnostics.shared.log("btiCallAttempted", result: "true")
+        BootDiagnostics.shared.log("classification", result: "NON_EXECUTABLE_MAPPING")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.singleMapExecutionClassification == "NON_EXECUTABLE_MAPPING")
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapMprotectRequestedExecute == nil)
+        #expect(BootDiagnostics.shared.singleMapActualExecutePermission == nil)
+        #expect(BootDiagnostics.shared.singleMapProtectionQueryDisagreement == nil)
+        #expect(BootDiagnostics.shared.rawBranchAttempted == false)
+        #expect(BootDiagnostics.shared.rawBranchReturned == false)
+        #expect(BootDiagnostics.shared.pacCallAttempted == false)
+        #expect(BootDiagnostics.shared.btiCallAttempted == false)
+        #expect(BootDiagnostics.shared.singleMapExecutionClassification == nil)
     }
 }
