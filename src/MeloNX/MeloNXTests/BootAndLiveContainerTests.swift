@@ -141,6 +141,73 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.failureReason == "returned false")
     }
 
+    /// Regression test for the confirmed bug found while investigating
+    /// why a real C# exception (already captured by ReportBootFailure)
+    /// never reached a device report: fail() had no "first reason wins"
+    /// protection, so Ryujinx.swift's generic
+    /// `executionError(code: -1)` wrapper - which always fires moments
+    /// AFTER the real exception, once mainRyu's return code propagates
+    /// back - unconditionally overwrote it. The real exception's stage/
+    /// reason must win and stay.
+    @Test func bootDiagnosticsFailKeepsFirstRealReasonNotGenericWrapper() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.fail(stage: "main_ryujinx_sdl", reason: "System.IO.FileNotFoundException: could not find prod.keys")
+        BootDiagnostics.shared.fail(stage: "managed thread", reason: "executionError(code: -1)")
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        #expect(BootDiagnostics.shared.failureStage == "main_ryujinx_sdl")
+        #expect(BootDiagnostics.shared.failureReason == "System.IO.FileNotFoundException: could not find prod.keys")
+    }
+
+    @Test func mainDiagnosticFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("mainEntered", result: "true")
+        BootDiagnostics.shared.log("argsParsed", result: "true")
+        BootDiagnostics.shared.log("configurationInitialized", result: "true")
+        BootDiagnostics.shared.log("vfsInitialized", result: "true")
+        BootDiagnostics.shared.log("libHacInitialized", result: "true")
+        BootDiagnostics.shared.log("applicationLoadStarted", result: "true")
+        BootDiagnostics.shared.log("deviceInitializationStarted", result: "false")
+        BootDiagnostics.shared.log("guestInitializationStarted", result: "false")
+        BootDiagnostics.shared.log("[MAIN] stage", result: "LibHacHorizonManager constructed")
+        BootDiagnostics.shared.log("mainReturnCode", result: "-1")
+        BootDiagnostics.shared.log("mainExceptionType", result: "System.InvalidOperationException")
+        BootDiagnostics.shared.log("mainExceptionMessage", result: "something failed")
+        BootDiagnostics.shared.log("mainExceptionHResult", result: "0x80131509")
+        BootDiagnostics.shared.log("mainExceptionStack", result: "at Program.LoadInner()")
+        BootDiagnostics.shared.log("innerException", result: "none")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.mainEntered == true)
+        #expect(BootDiagnostics.shared.argsParsed == true)
+        #expect(BootDiagnostics.shared.configurationInitialized == true)
+        #expect(BootDiagnostics.shared.vfsInitialized == true)
+        #expect(BootDiagnostics.shared.libHacInitialized == true)
+        #expect(BootDiagnostics.shared.applicationLoadStarted == true)
+        #expect(BootDiagnostics.shared.deviceInitializationStarted == false)
+        #expect(BootDiagnostics.shared.guestInitializationStarted == false)
+        #expect(BootDiagnostics.shared.lastMainStage == "LibHacHorizonManager constructed")
+        #expect(BootDiagnostics.shared.mainReturnCode == -1)
+        #expect(BootDiagnostics.shared.mainExceptionType == "System.InvalidOperationException")
+        #expect(BootDiagnostics.shared.mainExceptionMessage == "something failed")
+        #expect(BootDiagnostics.shared.mainExceptionHResult == "0x80131509")
+        #expect(BootDiagnostics.shared.mainExceptionStack == "at Program.LoadInner()")
+    }
+
+    @Test func buildReportIncludesMainSection() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("MAIN:"))
+        #expect(report.contains("mainEntered ="))
+        #expect(report.contains("mainExceptionType ="))
+        #expect(report.contains("mainExceptionHResult ="))
+        #expect(report.contains("libHacInitialized ="))
+        #expect(report.contains("guestInitializationStarted ="))
+    }
+
     @Test func bootDiagnosticsReportIncludesKeyFields() {
         BootDiagnostics.shared.beginBoot()
         let report = BootDiagnostics.shared.buildReport()

@@ -234,6 +234,9 @@ namespace Ryujinx.Headless.SDL2
 
             string[] args = new string[argCount];
 
+            BootEventBridge.Report("mainEntered", "true");
+            BootEventBridge.Report("[MAIN] stage", "entered");
+
             try
             {
                 ReportBootEvent("managed entry reached");
@@ -244,17 +247,56 @@ namespace Ryujinx.Headless.SDL2
                     Console.WriteLine(args[i]);
                 }
                 ReportBootEvent("args received", $"{argCount} args");
+                BootEventBridge.Report("argsParsed", "true");
+                BootEventBridge.Report("[MAIN] stage", "args received");
 
                 Main(args);
             }
             catch (Exception e)
             {
+                // Dedicated, never-overwritten fields (see
+                // ReportMainException's doc comment for why the existing
+                // ReportBootFailure/fail() path alone was not enough to
+                // actually SEE this on a real device, despite already
+                // capturing the full exception).
+                ReportMainException("main_ryujinx_sdl", e);
                 ReportBootFailure("main_ryujinx_sdl", e);
                 Console.WriteLine(e.ToString());
+                BootEventBridge.Report("mainReturnCode", "-1");
                 return -1;
             }
 
+            BootEventBridge.Report("mainReturnCode", "0");
             return 0;
+        }
+
+        /// <summary>
+        /// Objective: "[MAIN] exceptionType/exceptionMessage/exceptionHResult/
+        /// innerException/stackTrace" - requested explicitly because the
+        /// existing ReportBootFailure (which already captures the FULL
+        /// exception chain, type, message, and stack trace - see its own
+        /// body) was never actually visible on a real device report: its
+        /// value reaches BootDiagnostics.fail(stage:reason:) on the Swift
+        /// side, which OVERWRITES failureStage/failureReason with no
+        /// "first reason wins" protection - and Ryujinx.swift's own
+        /// wrapper (`throw RyujinxError.executionError(code: result)`,
+        /// evaluated right after this returns -1) calls fail() a SECOND
+        /// time with a generic "executionError(code: -1)" message,
+        /// unconditionally overwriting the real exception this method
+        /// already reported first. Reporting these under separate,
+        /// dedicated event names - routed to dedicated, never-overwritten
+        /// BootDiagnostics fields, not the shared failureStage/
+        /// failureReason - sidesteps that overwrite entirely rather than
+        /// relying on fixing the ordering of two independent call sites.
+        /// </summary>
+        private static void ReportMainException(string stage, Exception e)
+        {
+            BootEventBridge.Report("mainExceptionType", e.GetType().FullName);
+            BootEventBridge.Report("mainExceptionMessage", e.Message);
+            BootEventBridge.Report("mainExceptionHResult", $"0x{e.HResult:X8}");
+            BootEventBridge.Report("mainExceptionStack", e.StackTrace ?? "<no stack trace>");
+            BootEventBridge.Report("innerException", e.InnerException?.ToString() ?? "none");
+            BootEventBridge.Report("[MAIN] stage", $"exception at {stage}: {e.GetType().Name}: {e.Message}");
         }
 
         [UnmanagedCallersOnly(EntryPoint = "set_native_window")]
@@ -1594,6 +1636,7 @@ namespace Ryujinx.Headless.SDL2
             }
             catch (Exception ex)
             {
+                ReportMainException("Program.Load", ex);
                 ReportBootFailure("Program.Load", ex);
                 throw;
             }
@@ -1601,26 +1644,46 @@ namespace Ryujinx.Headless.SDL2
 
         static void LoadInner(Options option)
         {
-            // PROCESS-WIDE state, not per-game-session state: this used
-            // to unconditionally construct a brand new LibHacHorizonManager
-            // (a fresh LibHac.Horizon kernel instance, re-registering the
-            // FS/ARP/BCAT servers against the SAME _virtualFileSystem)
-            // on EVERY game launch, silently abandoning the PREVIOUS
-            // instance with no disposal - the exact same class of bug
-            // already found and fixed in LightningJit's Translator/
-            // DualMappedNoWxCache (process-wide singleton wrongly treated
-            // as per-session state). Initialize() (the "initialize"
-            // native export, called once at app startup) already does
-            // this exact setup with this exact guard - reuse it instead
-            // of duplicating and leaking it on every single game launch.
-            if (_libHacHorizonManager == null)
-            {
-                _libHacHorizonManager = new LibHacHorizonManager();
-                _libHacHorizonManager.InitializeFsServer(_virtualFileSystem);
-                _libHacHorizonManager.InitializeArpServer();
-                _libHacHorizonManager.InitializeBcatServer();
-                _libHacHorizonManager.InitializeSystemClients();
-            }
+            BootEventBridge.Report("[MAIN] stage", "LoadInner entered");
+
+            // REVERTED (regression found and confirmed by diff against
+            // b11a4596f - "diff causal"): this round's audit guarded
+            // this block behind `if (_libHacHorizonManager == null)`,
+            // reasoning that Initialize() (the "initialize" native
+            // export, called once at app startup from Swift's
+            // AppModeRouterView) already does this exact setup, so
+            // repeating it here on every LoadInner() call was a leak.
+            // That reasoning was correct in isolation, but this is the
+            // ONLY change in b11a4596f that touches any code reachable
+            // between "Program.Main entered" and ExecutionEntrypoint()
+            // - and the regression report shows mainRyu returning -1
+            // ~20ms after entry, with NONE of ExecutionEntrypoint's own
+            // stage markers ("window initialize begin" etc.) present,
+            // meaning the failure is upstream of it, inside Load()/
+            // LoadInner() - i.e. inside or immediately after exactly
+            // this block. Unconditionally re-running
+            // InitializeFsServer/InitializeArpServer/InitializeBcatServer/
+            // InitializeSystemClients here is what every previously-
+            // working build did; reverting to that exact behavior is
+            // the safest, most targeted fix available without a real
+            // device to capture the actual exception type/message this
+            // guard was producing (now instrumented below and in
+            // MainExternal's catch block specifically so a future
+            // regression like this one is never silently a bare "-1"
+            // again). The real per-game leak this guard was trying to
+            // fix (constructing a new LibHac.Horizon kernel instance
+            // each launch) remains a known, lower-priority issue -
+            // documented, not silently reintroduced without a trace.
+            _libHacHorizonManager = new LibHacHorizonManager();
+            BootEventBridge.Report("[MAIN] stage", "LibHacHorizonManager constructed");
+            _libHacHorizonManager.InitializeFsServer(_virtualFileSystem);
+            BootEventBridge.Report("[MAIN] stage", "LibHac FS server initialized");
+            _libHacHorizonManager.InitializeArpServer();
+            BootEventBridge.Report("[MAIN] stage", "LibHac ARP server initialized");
+            _libHacHorizonManager.InitializeBcatServer();
+            BootEventBridge.Report("[MAIN] stage", "LibHac BCAT server initialized");
+            _libHacHorizonManager.InitializeSystemClients();
+            BootEventBridge.Report("libHacInitialized", "true");
 
             // _contentManager = new ContentManager(_virtualFileSystem);
 
@@ -1787,9 +1850,14 @@ namespace Ryujinx.Headless.SDL2
 
             DriverUtilities.InitDriverConfig(option.BackendThreading == BackendThreading.Off);
             _virtualFileSystem.ReloadKeySet();
+            BootEventBridge.Report("vfsInitialized", "true");
+            BootEventBridge.Report("[MAIN] stage", "VFS key set reloaded");
             ReportBootEvent("configuration initialized");
+            BootEventBridge.Report("configurationInitialized", "true");
             while (true)
             {
+                BootEventBridge.Report("applicationLoadStarted", "true");
+                BootEventBridge.Report("[MAIN] stage", "LoadApplication begin");
                 LoadApplication(option);
 
                 if (_userChannelPersistence.PreviousIndex == -1 || !_userChannelPersistence.ShouldRestart)
@@ -2048,6 +2116,8 @@ namespace Ryujinx.Headless.SDL2
             ReportBootEvent("renderer = " + (OperatingSystem.IsIOS() ? "MoltenVK (Vulkan)" : options.GraphicsBackend.ToString()));
 
             ReportBootEvent("GPU initialization begin");
+            BootEventBridge.Report("deviceInitializationStarted", "true");
+            BootEventBridge.Report("[MAIN] stage", "GPU/device initialization begin");
             WindowBase window = CreateWindow(options);
 
             if (window is MoltenVKWindow mvulkanWindow) {
@@ -2091,6 +2161,8 @@ namespace Ryujinx.Headless.SDL2
 
 
             ReportBootEvent("game load begin");
+            BootEventBridge.Report("guestInitializationStarted", "true");
+            BootEventBridge.Report("[MAIN] stage", "guest/game load begin");
 
             try
             {

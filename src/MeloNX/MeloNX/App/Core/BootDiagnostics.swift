@@ -36,6 +36,29 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var failureStage: String?
     @Published private(set) var failureReason: String?
 
+    // MAIN: (regression round) - mainRyu/Program.Main's own stage trace,
+    // separate from failureStage/failureReason specifically because
+    // those get overwritten by whichever fail() call lands LAST (see
+    // fail()'s doc comment for the confirmed bug this caused) - these
+    // dedicated fields are populated only from ReportMainException/the
+    // explicit "[MAIN] stage"/mainEntered/etc. events in Program.cs, and
+    // are never touched by the generic failureStage/failureReason path.
+    @Published private(set) var mainEntered: Bool?
+    @Published private(set) var lastMainStage: String?
+    @Published private(set) var mainReturnCode: Int?
+    @Published private(set) var mainExceptionType: String?
+    @Published private(set) var mainExceptionMessage: String?
+    @Published private(set) var mainExceptionHResult: String?
+    @Published private(set) var mainExceptionStack: String?
+    @Published private(set) var mainInnerException: String?
+    @Published private(set) var argsParsed: Bool?
+    @Published private(set) var configurationInitialized: Bool?
+    @Published private(set) var vfsInitialized: Bool?
+    @Published private(set) var libHacInitialized: Bool?
+    @Published private(set) var applicationLoadStarted: Bool?
+    @Published private(set) var deviceInitializationStarted: Bool?
+    @Published private(set) var guestInitializationStarted: Bool?
+
     @Published private(set) var environment: String?
     @Published private(set) var jitVerified: Bool?
     @Published private(set) var dualMappedJIT: Bool?
@@ -431,6 +454,21 @@ final class BootDiagnostics: ObservableObject {
             self.lastStage = "idle"
             self.failureStage = nil
             self.failureReason = nil
+            self.mainEntered = nil
+            self.lastMainStage = nil
+            self.mainReturnCode = nil
+            self.mainExceptionType = nil
+            self.mainExceptionMessage = nil
+            self.mainExceptionHResult = nil
+            self.mainExceptionStack = nil
+            self.mainInnerException = nil
+            self.argsParsed = nil
+            self.configurationInitialized = nil
+            self.vfsInitialized = nil
+            self.libHacInitialized = nil
+            self.applicationLoadStarted = nil
+            self.deviceInitializationStarted = nil
+            self.guestInitializationStarted = nil
             self.environment = nil
             self.jitVerified = nil
             self.dualMappedJIT = nil
@@ -694,8 +732,23 @@ final class BootDiagnostics: ObservableObject {
         log("boot snapshot @\(label)", result: summary)
     }
 
+    /// Real bug found and fixed while chasing why a confirmed-captured
+    /// C# exception (mainExceptionType/mainExceptionMessage/etc. - see
+    /// ReportMainException in Program.cs) never showed up in a device
+    /// report: this previously had NO "first reason wins" protection
+    /// (unlike JITCoordinator.recordFailure, which does). Program.cs's
+    /// ReportBootFailure("main_ryujinx_sdl", ex) calls this with the
+    /// REAL exception first; moments later, once mainRyu's -1 return
+    /// propagates back to Ryujinx.swift's own catch block, `throw
+    /// RyujinxError.executionError(code: result)` calls this AGAIN with
+    /// a generic "executionError(code: -1)" - which unconditionally
+    /// overwrote the real exception's stage/reason, since both calls
+    /// dispatch async to the main thread and whichever runs SECOND wins
+    /// with a plain assignment. The real exception was always being
+    /// captured; it was being silently clobbered one call later.
     func fail(stage: String, reason: String) {
         DispatchQueue.main.async {
+            guard self.failureStage == nil else { return }
             self.failureStage = stage
             self.failureReason = reason
         }
@@ -1000,6 +1053,36 @@ final class BootDiagnostics: ObservableObject {
 
     private func applyKnownStage(_ stage: String, result: String?) {
         switch stage {
+        case "mainEntered":
+            mainEntered = Self.isTrue(result)
+        case "[MAIN] stage":
+            lastMainStage = result
+        case "mainReturnCode":
+            if let result, let n = Int(result) { mainReturnCode = n }
+        case "mainExceptionType":
+            mainExceptionType = result
+        case "mainExceptionMessage":
+            mainExceptionMessage = result
+        case "mainExceptionHResult":
+            mainExceptionHResult = result
+        case "mainExceptionStack":
+            mainExceptionStack = result
+        case "innerException":
+            mainInnerException = result
+        case "argsParsed":
+            argsParsed = Self.isTrue(result)
+        case "configurationInitialized":
+            configurationInitialized = Self.isTrue(result)
+        case "vfsInitialized":
+            vfsInitialized = Self.isTrue(result)
+        case "libHacInitialized":
+            libHacInitialized = Self.isTrue(result)
+        case "applicationLoadStarted":
+            applicationLoadStarted = Self.isTrue(result)
+        case "deviceInitializationStarted":
+            deviceInitializationStarted = Self.isTrue(result)
+        case "guestInitializationStarted":
+            guestInitializationStarted = Self.isTrue(result)
         case "environment":
             environment = result
         case "JIT verification result":
@@ -1726,6 +1809,23 @@ final class BootDiagnostics: ObservableObject {
 
     func buildReport() -> String {
         var lines: [String] = ["[GAME BOOT DIAGNOSTICS]", ""]
+        lines.append("MAIN:")
+        lines.append("mainEntered = \(mainEntered.map { "\($0)" } ?? "unknown")")
+        lines.append("lastMainStage = \(lastMainStage ?? "none")")
+        lines.append("mainReturnCode = \(mainReturnCode.map { "\($0)" } ?? "unknown")")
+        lines.append("mainExceptionType = \(mainExceptionType ?? "none")")
+        lines.append("mainExceptionMessage = \(mainExceptionMessage ?? "none")")
+        lines.append("mainExceptionHResult = \(mainExceptionHResult ?? "none")")
+        lines.append("mainExceptionStack = \(mainExceptionStack ?? "none")")
+        lines.append("innerException = \(mainInnerException ?? "none")")
+        lines.append("argsParsed = \(argsParsed.map { "\($0)" } ?? "unknown")")
+        lines.append("configurationInitialized = \(configurationInitialized.map { "\($0)" } ?? "unknown")")
+        lines.append("vfsInitialized = \(vfsInitialized.map { "\($0)" } ?? "unknown")")
+        lines.append("libHacInitialized = \(libHacInitialized.map { "\($0)" } ?? "unknown")")
+        lines.append("applicationLoadStarted = \(applicationLoadStarted.map { "\($0)" } ?? "unknown")")
+        lines.append("deviceInitializationStarted = \(deviceInitializationStarted.map { "\($0)" } ?? "unknown")")
+        lines.append("guestInitializationStarted = \(guestInitializationStarted.map { "\($0)" } ?? "unknown")")
+        lines.append("")
         lines.append("environment = \(environment ?? "unknown")")
         lines.append("jitVerified = \(jitVerified.map { "\($0)" } ?? "unknown")")
         lines.append("dualMappedJIT = \(dualMappedJIT.map { "\($0)" } ?? "unknown")")
