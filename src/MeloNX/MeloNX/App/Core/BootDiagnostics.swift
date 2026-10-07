@@ -59,6 +59,27 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var deviceInitializationStarted: Bool?
     @Published private(set) var guestInitializationStarted: Bool?
 
+    // ARGS: (regression round) - CommandLineParser's own view of what
+    // happened, separate from argsReceived (we got raw strings from
+    // Swift) and separate from mainExceptionType/etc. (a Program.Main-
+    // level exception, which a NotParsed result does NOT throw - the
+    // PlatformNotSupportedException only happened because the OLD code
+    // tried to auto-render HelpText for the failed parse, now removed).
+    // The individual "[ARGS] 0".."[ARGS] N" argument values and
+    // "[ARGS] error[N].*" parser error details are NOT tracked as
+    // dedicated fields here (39+ values would not scale as named
+    // properties) - they already reach the console/persisted log and
+    // this object's own `stages` array via the existing generic log()
+    // path, searchable by the "[ARGS]" prefix.
+    @Published private(set) var argsReceived: Bool?
+    @Published private(set) var argsCount: Int?
+    @Published private(set) var argsParseAttempted: Bool?
+    @Published private(set) var argsParseSucceeded: Bool?
+    @Published private(set) var parserErrorCount: Int?
+    @Published private(set) var firstParserErrorType: String?
+    @Published private(set) var firstParserErrorToken: String?
+    @Published private(set) var firstParserErrorName: String?
+
     @Published private(set) var environment: String?
     @Published private(set) var jitVerified: Bool?
     @Published private(set) var dualMappedJIT: Bool?
@@ -469,6 +490,14 @@ final class BootDiagnostics: ObservableObject {
             self.applicationLoadStarted = nil
             self.deviceInitializationStarted = nil
             self.guestInitializationStarted = nil
+            self.argsReceived = nil
+            self.argsCount = nil
+            self.argsParseAttempted = nil
+            self.argsParseSucceeded = nil
+            self.parserErrorCount = nil
+            self.firstParserErrorType = nil
+            self.firstParserErrorToken = nil
+            self.firstParserErrorName = nil
             self.environment = nil
             self.jitVerified = nil
             self.dualMappedJIT = nil
@@ -1083,6 +1112,22 @@ final class BootDiagnostics: ObservableObject {
             deviceInitializationStarted = Self.isTrue(result)
         case "guestInitializationStarted":
             guestInitializationStarted = Self.isTrue(result)
+        case "argsReceived":
+            argsReceived = Self.isTrue(result)
+        case "argsCount":
+            if let result, let n = Int(result) { argsCount = n }
+        case "argsParseAttempted":
+            argsParseAttempted = Self.isTrue(result)
+        case "argsParseSucceeded":
+            argsParseSucceeded = Self.isTrue(result)
+        case "parserErrorCount":
+            if let result, let n = Int(result) { parserErrorCount = n }
+        case "firstParserErrorType":
+            firstParserErrorType = result
+        case "firstParserErrorToken":
+            firstParserErrorToken = result
+        case "firstParserErrorName":
+            firstParserErrorName = result
         case "environment":
             environment = result
         case "JIT verification result":
@@ -1825,6 +1870,17 @@ final class BootDiagnostics: ObservableObject {
         lines.append("applicationLoadStarted = \(applicationLoadStarted.map { "\($0)" } ?? "unknown")")
         lines.append("deviceInitializationStarted = \(deviceInitializationStarted.map { "\($0)" } ?? "unknown")")
         lines.append("guestInitializationStarted = \(guestInitializationStarted.map { "\($0)" } ?? "unknown")")
+        lines.append("")
+        lines.append("ARGS:")
+        lines.append("argsReceived = \(argsReceived.map { "\($0)" } ?? "unknown")")
+        lines.append("argsCount = \(argsCount.map { "\($0)" } ?? "unknown")")
+        lines.append("argsParseAttempted = \(argsParseAttempted.map { "\($0)" } ?? "unknown")")
+        lines.append("argsParseSucceeded = \(argsParseSucceeded.map { "\($0)" } ?? "unknown")")
+        lines.append("parserErrorCount = \(parserErrorCount.map { "\($0)" } ?? "unknown")")
+        lines.append("firstParserErrorType = \(firstParserErrorType ?? "none")")
+        lines.append("firstParserErrorToken = \(firstParserErrorToken ?? "none")")
+        lines.append("firstParserErrorName = \(firstParserErrorName ?? "none")")
+        lines.append("NOTE: individual [ARGS] N argument values and [ARGS] error[N].* details are not duplicated as named fields here - search this report's own stage list / the persisted log for the \"[ARGS]\" prefix.")
         lines.append("")
         lines.append("environment = \(environment ?? "unknown")")
         lines.append("jitVerified = \(jitVerified.map { "\($0)" } ?? "unknown")")

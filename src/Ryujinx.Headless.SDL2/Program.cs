@@ -247,8 +247,20 @@ namespace Ryujinx.Headless.SDL2
                     Console.WriteLine(args[i]);
                 }
                 ReportBootEvent("args received", $"{argCount} args");
-                BootEventBridge.Report("argsParsed", "true");
+
+                // "argsReceived" (we got the raw strings from Swift) is
+                // NOT the same claim as "argsParsed" (CommandLineParser
+                // actually accepted them) - the previous round reported
+                // the latter here, which was simply false whenever the
+                // parser took the NotParsed branch. argsParsed is now set
+                // ONLY inside .WithParsed (see Main() below).
+                BootEventBridge.Report("argsReceived", "true");
+                BootEventBridge.Report("argsCount", argCount.ToString());
                 BootEventBridge.Report("[MAIN] stage", "args received");
+                for (int i = 0; i < argCount; i++)
+                {
+                    BootEventBridge.Report($"[ARGS] {i}", args[i]);
+                }
 
                 Main(args);
             }
@@ -565,7 +577,7 @@ namespace Ryujinx.Headless.SDL2
                     ControllerOptions options = null;
                     Parser.Default.ParseArguments<ControllerOptions>(args)
                     .WithParsed(option => options = option)
-                    .WithNotParsed(errors => errors.Output());
+                    .WithNotParsed(errors => ReportParserErrors(errors));
                     return options;
                 }
                 catch (Exception e)
@@ -733,9 +745,103 @@ namespace Ryujinx.Headless.SDL2
                 MVKInitialization.InitializeResolver();
             }
 
+            BootEventBridge.Report("argsParseAttempted", "true");
+            BootEventBridge.Report("[MAIN] stage", "ParseArguments begin");
+
             Parser.Default.ParseArguments<Options>(args)
-            .WithParsed(Load)
-            .WithNotParsed(errors => errors.Output());
+            .WithParsed(opts =>
+            {
+                // argsParsed/argsParseSucceeded can ONLY become true here -
+                // inside WithParsed, after CommandLineParser itself
+                // accepted every argument. The previous round reported
+                // argsParsed=true unconditionally right after receiving
+                // the raw strings, which was simply wrong whenever the
+                // parser actually took the NotParsed branch below.
+                BootEventBridge.Report("argsParsed", "true");
+                BootEventBridge.Report("argsParseSucceeded", "true");
+                BootEventBridge.Report("[MAIN] stage", "ParseArguments succeeded");
+                Load(opts);
+            })
+            .WithNotParsed(errors =>
+            {
+                BootEventBridge.Report("argsParsed", "false");
+                BootEventBridge.Report("argsParseSucceeded", "false");
+                BootEventBridge.Report("[MAIN] stage", "ParseArguments failed (NotParsed)");
+                ReportParserErrors(errors);
+                // Deliberately NOT calling errors.Output() (the previous
+                // behavior here) - CONFIRMED root cause of the real
+                // crash (device stack trace): CommandLine.Parser.
+                // DisplayHelp -> CommandLine.Text.HelpText.AutoBuild ->
+                // HelpText..ctor -> System.ConsolePal.get_WindowWidth(),
+                // which throws PlatformNotSupportedException on iOS
+                // (there is no console window to measure). Whatever
+                // argument(s) actually failed to parse are now fully
+                // reported above, via ReportParserErrors, before this
+                // comment is even reached - a parse failure must produce
+                // a clear diagnostic, never a crash trying to render
+                // help text for a terminal that does not exist here.
+            });
+        }
+
+        /// <summary>
+        /// Reports every CommandLine.Error from a failed ParseArguments
+        /// call under "[ARGS] error[N].*" - using reflection over each
+        /// concrete error's OWN properties (beyond the Error base class)
+        /// rather than hand-matching every CommandLineParser 2.9.1 error
+        /// subtype (BadFormatTokenError/UnknownOptionError/
+        /// MissingRequiredOptionError/etc.) by name, since getting even
+        /// one of those exact property names wrong would be a compile
+        /// error with no local way to verify against the real package
+        /// (not restored in this environment). Error.Tag (the type
+        /// discriminator central to how this library works at all) is
+        /// the one property assumed with high confidence; everything
+        /// else is discovered at runtime, so this works correctly
+        /// regardless of exactly which error subtype is involved.
+        /// </summary>
+        private static void ReportParserErrors(IEnumerable<CommandLine.Error> errors)
+        {
+            var errorList = errors.ToList();
+            BootEventBridge.Report("parserErrorCount", errorList.Count.ToString());
+
+            for (int i = 0; i < errorList.Count; i++)
+            {
+                CommandLine.Error error = errorList[i];
+                string typeName = error.GetType().Name;
+                string tag = error.Tag.ToString();
+
+                var detailParts = new List<string>();
+                foreach (var prop in error.GetType().GetProperties())
+                {
+                    if (prop.DeclaringType == typeof(CommandLine.Error))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        object value = prop.GetValue(error);
+                        detailParts.Add($"{prop.Name}={value}");
+                    }
+                    catch (Exception ex)
+                    {
+                        detailParts.Add($"{prop.Name}=<unreadable: {ex.Message}>");
+                    }
+                }
+                string details = string.Join("; ", detailParts);
+
+                BootEventBridge.Report($"[ARGS] error[{i}].type", typeName);
+                BootEventBridge.Report($"[ARGS] error[{i}].tag", tag);
+                BootEventBridge.Report($"[ARGS] error[{i}].details", details);
+
+                if (i == 0)
+                {
+                    BootEventBridge.Report("firstParserErrorType", typeName);
+                    BootEventBridge.Report("firstParserErrorToken", details);
+                    BootEventBridge.Report("firstParserErrorName", tag);
+                }
+
+                Console.WriteLine($"[ARGS] error[{i}] = {typeName} (tag={tag}): {details}");
+            }
         }
     
         [UnmanagedCallersOnly(EntryPoint = "install_firmware")]

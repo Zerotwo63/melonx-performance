@@ -208,6 +208,47 @@ struct BootAndLiveContainerTests {
         #expect(report.contains("guestInitializationStarted ="))
     }
 
+    /// Regression test for the confirmed PlatformNotSupportedException
+    /// (CommandLine.Text.HelpText -> System.ConsolePal.get_WindowWidth()
+    /// on iOS) - this covers the Swift-side half: argsParsed/
+    /// argsParseSucceeded must only ever be reported true from inside
+    /// Program.cs's WithParsed callback, never merely from "args
+    /// received", and a failed parse's error details must be visible.
+    @Test func argsFieldsDistinguishReceivedFromParsed() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("argsReceived", result: "true")
+        BootDiagnostics.shared.log("argsCount", result: "39")
+        BootDiagnostics.shared.log("argsParseAttempted", result: "true")
+        BootDiagnostics.shared.log("argsParseSucceeded", result: "false")
+        BootDiagnostics.shared.log("parserErrorCount", result: "1")
+        BootDiagnostics.shared.log("firstParserErrorType", result: "BadFormatConversionError")
+        BootDiagnostics.shared.log("firstParserErrorToken", result: "NameInfo=scaling-filter-level")
+        BootDiagnostics.shared.log("firstParserErrorName", result: "BadFormatConversionError")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.argsReceived == true)
+        #expect(BootDiagnostics.shared.argsCount == 39)
+        #expect(BootDiagnostics.shared.argsParseAttempted == true)
+        // The critical assertion: receiving args is NOT the same claim
+        // as the parser accepting them - this must be false here, not
+        // silently true the way the previous round incorrectly reported it.
+        #expect(BootDiagnostics.shared.argsParseSucceeded == false)
+        #expect(BootDiagnostics.shared.parserErrorCount == 1)
+        #expect(BootDiagnostics.shared.firstParserErrorType == "BadFormatConversionError")
+    }
+
+    @Test func buildReportIncludesArgsSection() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("ARGS:"))
+        #expect(report.contains("argsReceived ="))
+        #expect(report.contains("argsParseSucceeded ="))
+        #expect(report.contains("parserErrorCount ="))
+        #expect(report.contains("firstParserErrorType ="))
+    }
+
     @Test func bootDiagnosticsReportIncludesKeyFields() {
         BootDiagnostics.shared.beginBoot()
         let report = BootDiagnostics.shared.buildReport()

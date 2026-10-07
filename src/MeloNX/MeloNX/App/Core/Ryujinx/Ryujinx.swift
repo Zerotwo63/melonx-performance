@@ -510,7 +510,14 @@ class Ryujinx : ObservableObject {
         // is only passed when the user actually picked something else.
         if config.scalingFilter != .bilinear {
             args.append(contentsOf: ["--scaling-filter", config.scalingFilter.rawValue])
-            args.append(contentsOf: ["--scaling-filter-level", String(config.scalingFilterLevel)])
+            // CONFIRMED real bug, found by code inspection (Options.cs:
+            // `public int ScalingFilterLevel { get; set; }`): scalingFilterLevel
+            // is a Swift Double, and String(Double) always includes a
+            // decimal point ("80.0"), which CommandLineParser cannot
+            // parse into an int - this would push the parser into its
+            // NotParsed branch whenever FSR is actually selected.
+            // Int(...) truncates to a real whole-number string ("80").
+            args.append(contentsOf: ["--scaling-filter-level", String(Int(config.scalingFilterLevel))])
         }
 
         if config.expandRam {
