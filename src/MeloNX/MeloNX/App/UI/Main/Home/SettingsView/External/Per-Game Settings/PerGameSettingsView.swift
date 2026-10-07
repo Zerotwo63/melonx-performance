@@ -311,6 +311,51 @@ struct PerGameSettingsView: View {
                 }
             }
             
+            // Upscaling card — real, already-existing core option
+            // (--scaling-filter / --scaling-filter-level, see
+            // Ryujinx.buildCommandLineArgs). FSR Sharpness only shown when
+            // FSR is actually selected, since it has no effect otherwise.
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        labelWithIcon("Upscaling", iconName: "arrow.up.left.and.arrow.down.right")
+                            .font(.headline)
+                        Spacer()
+                    }
+
+                    Picker("Upscaling", selection: configBinding(\.scalingFilter)) {
+                        ForEach(ScalingFilter.allCases, id: \.self) { filter in
+                            Text(filter.displayName).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if configBinding(\.scalingFilter).wrappedValue == .fsr {
+                        VStack(spacing: 8) {
+                            Slider(value: configBinding(\.scalingFilterLevel), in: 0...100, step: 1)
+
+                            HStack {
+                                Text("Sharper")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+
+                                Spacer()
+
+                                Text("FSR Sharpness: \(Int(configBinding(\.scalingFilterLevel).wrappedValue))")
+                                    .font(.subheadline)
+                                    .foregroundColor(.blue)
+
+                                Spacer()
+
+                                Text("Softer")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Anisotropic filtering card
             SettingsCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -362,7 +407,9 @@ struct PerGameSettingsView: View {
             SettingsCard {
                 VStack(spacing: 4) {
                     PerSettingsToggle(isOn: configBinding(\.enableShaderCache), icon: "memorychip", label: "Shader Cache")
-                    
+
+                    ShaderCacheStatusRow(titleId: titleId)
+
                     Divider()
                     
                     PerSettingsToggle(isOn: configBinding(\.disablevsync).reversed, icon: "arrow.triangle.2.circlepath", label: "VSync")

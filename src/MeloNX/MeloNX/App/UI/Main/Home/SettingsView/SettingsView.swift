@@ -28,6 +28,7 @@ struct SettingsViewNew: View {
     @Environment(\.horizontalSizeClass) var horizontalSizeClass: UserInterfaceSizeClass?
     
     @State private var selectedCategory: SettingsCategory = .graphics
+    @State private var metalFXCapability = MetalFXCapabilityInspector.current()
     @State private var showResolutionInfo = false
     @State private var showAnisotropicInfo = false
     @State private var showControllerInfo = false
@@ -465,6 +466,14 @@ struct SettingsViewNew: View {
                         maxLabel: "3.0x"
                     )
                 }
+
+                if let capability = metalFXCapability {
+                    Text(capability.supportsSpatialScaling
+                        ? "This device supports MetalFX spatial upscaling, not yet used by the renderer."
+                        : "This device does not support MetalFX upscaling.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
             .contextMenu {
                 Button("Allow Any Resolution Scale" + (nativeSettingsManager.allowCustomResValue.value ? "  ✓" : "")) {
@@ -884,7 +893,16 @@ struct SettingsViewNew: View {
                 
                 SettingsToggle(isOn: nativeSettingsManager.mainThreadWatchdog(true).projectedValue, icon: "clock.badge.exclamationmark", label: "Enables Main Thread Watchdog", infoMessage: "Meant to help troubleshooting.\n\nLeave ON if unsure.")
                 Divider()
-                
+
+                SettingsToggle(isOn: nativeSettingsManager.memoryGuard(true).projectedValue, icon: "memorychip", label: "Memory Pressure Guard", infoMessage: "Watches for real system memory pressure in the background. Currently observation-only — it logs pressure changes and doesn't take any action yet.\n\nLeave ON if unsure.")
+                Divider()
+
+                SettingsToggle(isOn: nativeSettingsManager.thermalGovernor(true).projectedValue, icon: "thermometer.medium", label: "Thermal Governor", infoMessage: "Watches the device's real thermal state in the background. Currently observation-only — it logs thermal changes and doesn't throttle anything yet.\n\nLeave ON if unsure.")
+                Divider()
+
+                SettingsToggle(isOn: nativeSettingsManager.autoPerformance(false).projectedValue, icon: "speedometer", label: "Auto Performance", infoMessage: "When the device gets hot or low on memory, temporarily lowers the current game's resolution scale and restores it once things settle. Your saved per-game settings are never changed — this only affects the live session.\n\nOff by default.")
+                Divider()
+
                 Button {
                     inSetup = true
                 } label: {
@@ -1009,6 +1027,7 @@ struct SettingsViewNew: View {
             networkConfigCard
             uiTogglesCard
             jitAndMiscCard
+            SaveDataBackupCard()
         }
     }
     

@@ -108,6 +108,18 @@ struct ContentView: View {
                     if nativeSettings.mainThreadWatchdog.value {
                         Watchdog.shared.start()
                     }
+
+                    if nativeSettings.memoryGuard(true).value {
+                        MemoryGuard.shared.start()
+                    }
+
+                    if nativeSettings.thermalGovernor(true).value {
+                        ThermalGovernor.shared.start()
+                    }
+
+                    if nativeSettings.autoPerformance(false).value {
+                        AutoPerformanceManager.shared.start()
+                    }
                 }
             }
             .environmentObject(gameHandler)

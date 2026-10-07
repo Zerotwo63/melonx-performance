@@ -97,10 +97,20 @@ class Ryujinx : ObservableObject {
         var disablevsync: Bool = false
         var language: SystemLanguage = .americanEnglish
         var regioncode: SystemRegionCode = .usa
-        
-        
+        var scalingFilter: ScalingFilter = .bilinear
+        // 80 matches desktop Ryujinx's own default (ConfigurationState.swift
+        // line ~813/1394), not the bare CLI default of 0 — Options.cs's
+        // --scaling-filter-level default is just CommandLineParser's int
+        // default, not a considered value: the FSR sharpening shader computes
+        // its coefficient as 1.5 - (level * 0.015), so 0 means maximum
+        // sharpening, which is not a reasonable out-of-the-box default.
+        var scalingFilterLevel: Double = 80
+
+
         static func == (lhs: Arguments, rhs: Arguments) -> Bool {
             return lhs.resscale == rhs.resscale &&
+            lhs.scalingFilter == rhs.scalingFilter &&
+            lhs.scalingFilterLevel == rhs.scalingFilterLevel &&
             lhs.debuglogs == rhs.debuglogs &&
             lhs.tracelogs == rhs.tracelogs &&
             lhs.nintendoinput == rhs.nintendoinput &&
@@ -490,7 +500,19 @@ class Ryujinx : ObservableObject {
         if config.resscale != 1.0 {
             args.append(contentsOf: ["--resolution-scale", String(config.resscale)])
         }
-        
+
+        // --scaling-filter / --scaling-filter-level: real, already-existing
+        // CoreCLI options (src/Ryujinx.Headless.SDL2/Options.cs) wired all
+        // the way through to Ryujinx.Graphics.Vulkan.Effects.FsrScalingFilter
+        // with no iOS/MoltenVK exclusion anywhere in that path — verified by
+        // reading Window.cs/WindowBase.cs/MoltenVKWindow.cs, not assumed.
+        // Default is Bilinear, matching the core's own CLI default, so this
+        // is only passed when the user actually picked something else.
+        if config.scalingFilter != .bilinear {
+            args.append(contentsOf: ["--scaling-filter", config.scalingFilter.rawValue])
+            args.append(contentsOf: ["--scaling-filter-level", String(config.scalingFilterLevel)])
+        }
+
         if config.expandRam {
             args.append(contentsOf: ["--expand-ram", String(config.expandRam)])
         }

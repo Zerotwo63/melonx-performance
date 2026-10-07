@@ -15,23 +15,31 @@
 Mantenernos lo más cerca posible de upstream. Nunca reescribir módulos
 existentes que ya funcionan. Cada mejora de rendimiento/JIT vive en su
 propio commit pequeño y, cuando el tamaño lo justifique, en su propia rama
-`perf/*`, para que `git fetch upstream && git merge upstream/XC-ios-ht`
-produzca el mínimo de conflictos posible.
+`perf/*`.
 
 No se modifica, ni se le escribe, ni se abre PR contra
 `AzureDominus/melonx`. Todo el trabajo vive únicamente en este fork.
 
-## Cómo actualizar desde upstream
+**Actualización (2026-10-05): `XC-ios-ht` dejó de ser un espejo
+limpio de upstream.** Por instrucción explícita, las 9 ramas de
+trabajo de abajo (29 commits, cada uno verificado en CI por
+separado) se fusionaron — vía fast-forward puro, sin conflictos —
+directo a la rama local `XC-ios-ht` de este fork, que ahora es la
+rama de integración real del fork, no un simple tracking branch de
+upstream. Esto es una decisión consciente, no un accidente: se avisó
+antes de hacerlo que tendría esta consecuencia exacta.
+
+## Cómo actualizar desde upstream (revisado tras la fusión)
+
+Ya no es un simple fast-forward — `XC-ios-ht` de este fork ahora tiene
+commits que `upstream/XC-ios-ht` no tiene, así que traer cambios
+nuevos de upstream requiere una fusión real, revisando conflictos:
 
 ```bash
 git fetch upstream
 git checkout XC-ios-ht
-git merge upstream/XC-ios-ht     # o rebase, según convenga por rama
+git merge upstream/XC-ios-ht     # fusión real ahora, no fast-forward — revisar conflictos uno por uno
 git push origin XC-ios-ht
-
-# luego, para traer la base nueva a una rama de trabajo:
-git checkout perf/jit-integration
-git merge XC-ios-ht              # nunca --force, nunca rebase de upstream sobre commits ya pusheados sin avisar
 ```
 
 No hay auto-merge de upstream configurado (ningún workflow lo hace
@@ -39,15 +47,37 @@ automáticamente) — se decide manualmente cada vez, revisando el diff real.
 
 ## Estrategia de ramas
 
+**Corrección (2026-10-07): el diagrama de "cadena real" que estuvo aquí
+antes era incorrecto.** Afirmaba que cada rama nacía de la punta de la
+anterior, "confirmado con `git merge-base --is-ancestor`" — pero una
+auditoría real de Git (`git merge-base <branch> 98c95e203` para cada
+una) muestra que `perf/jit-integration`, `perf/benchmark-manager`,
+`perf/memory-guard`, `perf/thermal-governor`, `perf/auto-performance`,
+`perf/frame-pacing`, `perf/shader-prewarm`, `perf/metalfx`,
+`feat/save-backup-manager` y `perf/fsr-ios-integration` son **10 ramas
+hermanas**, todas nacidas del MISMO commit (`98c95e203`), no una
+cadena. 8 de esas 9 ramas de trabajo (todas salvo `perf/jit-integration`)
+sí se fusionaron a `XC-ios-ht` vía fast-forward el 2026-10-05
+(`30fb45f7d`) — pero `perf/jit-integration` (la rama real desde la que
+se compila el IPA) **nunca estuvo en esa fusión ni la recibió después**,
+así que todo el trabajo gráfico/FSR/shader-cache que vive en
+`perf/fsr-ios-integration` (también hermana, también nunca fusionada a
+`XC-ios-ht` ni a `perf/jit-integration`) simplemente nunca llegó a la
+rama que genera el IPA. Esta es la causa real documentada en la
+auditoría de Git de 2026-10-07 (ver sección `#fsr-recovery` abajo) -
+los commits existían, nunca se fusionaron en esta rama.
+
 ```
-upstream/XC-ios-ht
-        ↓
-   XC-ios-ht (este fork, espejo de upstream)
-        ↓
-   perf/jit-integration   ← rama de trabajo actual
-        ↓
-   (futuras: perf/benchmark-manager, perf/memory-guard, perf/metalfx, ...)
+                         98c95e203 (base común real de las 10 ramas)
+                        /    |     \      \        \         \
+     perf/jit-integration  perf/benchmark-manager  ...  perf/fsr-ios-integration
+     (esta rama - IPA)      \    |      |        /
+                          (8 de 9 fusionadas a XC-ios-ht, fast-forward, 2026-10-05)
 ```
+
+Las ramas de trabajo siguen existiendo en `origin` tal cual — ninguna
+se borró (no hay autorización para eso, y no hacía falta: cada una
+tiene su propio CI verificado por separado en su momento).
 
 No se crean todas las ramas `perf/*` de antemano — solo cuando un tema
 (JIT, memoria, térmico, etc.) esté listo para empezar, para no complicar
@@ -139,6 +169,49 @@ Git innecesariamente.
   - `get-task-allow` **no** está en el `.entitlements` fuente — lo inyecta
     la herramienta de firmado (AltStore/SideStore/etc.) al sideload, no el
     repositorio.
+
+<a id="fsr-recovery"></a>
+## Por qué FSR/Shader Cache Status desaparecieron de Settings, y cómo se recuperaron (2026-10-07)
+
+**Síntoma reportado:** Settings en la IPA actual ya no muestra las
+opciones de FSR/escalado ni "Shader Cache Status" que se habían
+implementado en una ronda anterior.
+
+**Auditoría de Git realizada (no se presupuso nada):**
+
+```
+git log --all --oneline     # confirmó que los commits SÍ existen
+git branch -a                # confirmó 10 ramas hermanas, no una cadena
+git merge-base <branch> 98c95e203   # para cada una de las 10 - TODAS devuelven 98c95e203
+git merge-base --is-ancestor 1f61944e2 HEAD   # NO - el commit FSR no es ancestro de esta rama
+git merge-base --is-ancestor perf/fsr-ios-integration XC-ios-ht   # NO tampoco
+```
+
+**Diagnóstico exacto (opción C de las 5 planteadas: los commits nunca
+se fusionaron en esta rama)**: `perf/fsr-ios-integration` (FSR,
+`ScalingFilter.swift`, `ShaderCacheStatusRow.swift`,
+`MetalFXCapabilityInspector.swift`, save data backup/restore) y
+`perf/jit-integration` (esta rama, desde la que se compila el IPA) son
+**ramas hermanas** nacidas del mismo commit (`98c95e203`). 8 de las 9
+ramas de trabajo relacionadas se fusionaron a `XC-ios-ht` por
+fast-forward el 2026-10-05 (`30fb45f7d`) — pero ni
+`perf/fsr-ios-integration` recibió esa fusión, ni `perf/jit-integration`
+jamás se fusionó con `XC-ios-ht` ni con `perf/fsr-ios-integration`. El
+backend (`ScalingFilter`/`FsrScalingFilter` del core C#/.NET) nunca
+dejó de existir — vive intacto en Ryujinx upstream, nunca se tocó. Lo
+que faltaba era exclusivamente el lado Swift/iOS que lo expone en
+Settings, y ese lado vivía solo en la rama hermana nunca fusionada.
+
+**Recuperación:** `git merge perf/fsr-ios-integration` directo sobre
+`perf/jit-integration` (mismo ancestro común real, confirmado arriba) -
+**un solo conflicto real**, en este mismo archivo de documentación
+(`docs/PERFORMANCE_FORK.md`, resuelto conservando ambas narrativas en
+vez de descartar una); los 18 archivos de código fusionaron limpios
+automáticamente, incluyendo los 3 que ambas ramas habían tocado
+(`Ryujinx.swift`, `Program.cs`, `WindowBase.cs` - hunks en regiones
+distintas del archivo en cada rama, sin solapamiento real). Nada del
+trabajo JIT26/dual-mapped de esta rama se tocó ni se tuvo que
+resolver a mano.
 
 <a id="jit"></a>
 ## JIT actual (análisis completo, antes de tocar nada)
@@ -1410,8 +1483,728 @@ present de verdad progresan o dónde se detienen exactamente — eso solo lo
 responde la siguiente prueba real en el iPhone con este IPA, leyendo
 `swapchainImageCount`, `lastAcquireResult`, `lastSubmitResult`,
 `lastPresentResult` y `lastRenderLoopStage`/`secondsSinceLastRenderProgress`
-en el reporte.
+en el reporte.<a id="benchmark-manager"></a>
+## BenchmarkManager (sección 11 del pedido original)
 
+Esta rama (`perf/benchmark-manager`) empieza desde la punta de
+`perf/jit-integration` ya terminada, no desde `XC-ios-ht` — el diagrama
+de "Estrategia de ramas" arriba ya lo marcaba así, y no hay nada en
+JIT que BenchmarkManager necesite deshacer o evitar.
+
+### Qué ya existía (verificado antes de escribir nada, no inventado)
+
+MeloNX ya tiene monitores de rendimiento en vivo:
+`FPSMonitor.swift` (sondea `RyujinxBridge.currentFPS` cada 100ms) y
+`MemoryUsageMonitor.swift` (sondea `task_info`/`phys_footprint` cada
+200ms), combinados en `PerformanceOverlayView` (el HUD en pantalla
+durante el juego). Ninguno de los dos guarda historial ni calcula
+estadísticas — solo muestran el valor actual. Grepeando el proyecto por
+`RyujinxBridge.` se confirmó que **`currentFPS` es el único dato de
+rendimiento que expone el puente nativo** — no hay timestamps por
+frame ni tiempos de GPU. Esto importa: `BenchmarkManager` reporta
+estadísticas sobre muestras periódicas de ese escalar, no percentiles
+reales de frame time — no se puede medir lo que el puente no expone, y
+el código/documentación no debe insinuar que mide más de lo que mide.
+
+### Qué se agregó
+
+- `App/Core/Performance/BenchmarkManager.swift` (nuevo) — `start()`/
+  `stop() -> Result?`, muestreando `RyujinxBridge.currentFPS` +
+  memoria (mismo método `task_info` que `MemoryUsageMonitor`,
+  duplicado a propósito — es una función privada de otra clase, y este
+  muestreo necesita compartir cadencia con la muestra de FPS, no un
+  segundo poll loop independiente) cada 100ms mientras corre. `stop()`
+  devuelve duración, cantidad de muestras, FPS promedio/mínimo/máximo y
+  memoria promedio/pico.
+- `PerformanceOverlayView.swift` — un botón "Benchmark"/"Stop
+  Benchmark" + resumen de una línea una vez detenido, agregado a los
+  dos layouts existentes (horizontal/vertical) vía una sola
+  `benchmarkControl` compartida — no se duplicó el bloque de UI dos
+  veces a mano.
+
+No hay persistencia ni exportación de resultados todavía (el resultado
+vive solo en memoria, en `BenchmarkManager.lastResult`, mientras la
+vista del HUD exista) — eso, si hace falta, es un paso aparte.
+
+<a id="memory-guard"></a>
+## MemoryGuard (sección 12 del pedido original)
+
+Rama nueva (`perf/memory-guard`), por la misma regla de no mezclar
+temas — continúa la cadena desde la punta de `perf/benchmark-manager`.
+
+### Qué ya existía (verificado antes de escribir nada)
+
+Grepeando el proyecto entero por `didReceiveMemoryWarning`,
+`memoryPressure` y `makeMemoryPressureSource`: **cero resultados**. No
+hay ningún observador de presión de memoria real en todo el código —
+`MemoryUsageMonitor` solo sondea el `phys_footprint` de este proceso
+cada 200ms, una señal distinta y más débil (que el propio footprint
+suba no significa que el sistema esté bajo presión real, y el sistema
+puede estar bajo presión por OTROS procesos sin que el footprint propio
+cambie). `Ryujinx.clearShaderCache()` es el único hook de limpieza de
+caché que existe, y es una acción destructiva que hoy solo se dispara
+con confirmación explícita del usuario (botones con alerta "¿Estás
+seguro?" en Settings/GamesListView) — nunca automáticamente.
+
+### Qué se agregó
+
+- `App/Core/Performance/MemoryGuard.swift` (nuevo) — usa
+  `DispatchSource.makeMemoryPressureSource(eventMask: [.warning,
+  .critical], queue: .main)`, la API real de Apple para esto (no un
+  polling propio reinventado), expone `currentLevel`
+  (`.normal`/`.warning`/`.critical`) y `lastTransitionAt`.
+  **Deliberadamente pasivo**: solo registra transiciones (`print`), no
+  limpia caché ni ajusta nada por su cuenta. Conectar una reacción real
+  (limpiar caché, bajar `resscale`, etc.) es un paso aparte,
+  explícitamente no hecho aquí — automatizar una acción destructiva
+  existente sin que se pida es exactamente el tipo de cambio de
+  comportamiento que este fork evita por defecto.
+- `ContentView.swift` — arranque gateado por un toggle nuevo
+  (`nativeSettings.memoryGuard(true)`), insertado junto al arranque
+  existente de `Watchdog.shared.start()` (mismo patrón: monitor de
+  fondo opcional, activado por defecto, con un `SettingsToggle`
+  correspondiente en `SettingsView.swift` explicando que por ahora es
+  solo observación).
+
+El cierre con retención débil (`[weak self]` leyendo `self.source`
+dentro del handler, no la variable local `pressureSource`) evita el
+ciclo de retención clásico de GCD donde el event handler de un
+`DispatchSourceMemoryPressure` captura la propia fuente.
+
+<a id="thermal-governor"></a>
+## ThermalGovernor (sección 13 del pedido original)
+
+Rama nueva (`perf/thermal-governor`), continúa la cadena desde la
+punta de `perf/memory-guard`. Mismo patrón exacto que `MemoryGuard`,
+aplicado a la señal térmica real en vez de la de memoria:
+
+- Verificado primero: cero resultados grepeando el proyecto por
+  `thermalState`/`ThermalState`/`thermalStateDidChange` — no existía
+  ningún observador térmico.
+- `App/Core/Performance/ThermalGovernor.swift` (nuevo) — usa
+  `ProcessInfo.processInfo.thermalState` +
+  `ProcessInfo.thermalStateDidChangeNotification` (la API real de
+  Apple para esto, no polling inventado). A diferencia de
+  `MemoryGuard`, no hace falta un enum propio — `ProcessInfo.ThermalState`
+  (`.nominal`/`.fair`/`.serious`/`.critical`) ya es exactamente lo que
+  se necesita expuesto, envolverlo en otro tipo habría sido una
+  abstracción innecesaria.
+- **Deliberadamente pasivo**, misma razón que `MemoryGuard`: solo
+  registra transiciones, no ajusta `resscale` ni ninguna otra cosa por
+  su cuenta — el nombre "governor" no implica que ya gobierne algo;
+  eso es trabajo aparte, para cuando exista una acción real que
+  conectar.
+- `ContentView.swift`/`SettingsView.swift` — mismo patrón de arranque
+  gateado por toggle (`nativeSettings.thermalGovernor(true)`), junto a
+  `Watchdog`/`MemoryGuard`.
+
+<a id="auto-performance"></a>
+## Auto Performance (sección 14 del pedido original)
+
+Rama nueva (`perf/auto-performance`), continúa desde la punta de
+`perf/thermal-governor`. A diferencia de `MemoryGuard`/`ThermalGovernor`
+(deliberadamente pasivos), esta pieza SÍ actúa — es el consumidor
+natural de esas dos señales, y el usuario pidió explícitamente empezar
+con esta, no con una de las observaciones pasivas otra vez.
+
+### Investigación real antes de diseñar nada
+
+- `RyujinxBridge.updateSettingsExternal(argv:)` ya existe y ya tiene un
+  llamador real: `InGameSettingsManager.saveSettings()` (construye los
+  argumentos vía `Ryujinx.buildCommandLineArgs` y los empuja en vivo al
+  core nativo en ejecución). Verificado que `InGameSettingsManager` no
+  tiene NINGÚN otro llamador en todo el proyecto — está presente pero
+  sin usar desde ninguna UI actual. Esto es justo el mecanismo que
+  hacía falta para "ajustar algo durante una sesión activa", ya
+  construido, no inventado.
+- Verificación crítica antes de tocar nada: ¿`InGameSettingsManager`
+  escribe a disco? Se leyó su `saveSettings()` completo — **no**, solo
+  llama al puente nativo. La persistencia a disco real vive en una
+  clase COMPLETAMENTE DISTINTA, `PerGameSettingsManager`
+  (`PerGameSettingsView.swift`), que tiene su propio `saveSettings()`
+  con `data.write(to: fileURL)`. Mismo nombre de método, misma
+  protocolo (`PerGameSettingsManaging`), dos clases separadas con
+  propósitos opuestos — confirmado leyendo ambas implementaciones
+  completas antes de escribir `AutoPerformanceManager`, no asumido por
+  el nombre.
+- `Ryujinx.Arguments` es una `class` (no `struct`) — mutarla in-place
+  es seguro aquí precisamente porque se confirmó que nada más la
+  persiste automáticamente; restaurar el valor original más tarde deja
+  cero rastro en el archivo de settings guardado del usuario.
+
+### Qué se agregó
+
+- `App/Core/Performance/AutoPerformanceManager.swift` (nuevo) —
+  arranca `ThermalGovernor`/`MemoryGuard` él mismo (ambos ya se
+  protegen contra arranque doble) y se suscribe a sus `@Published` vía
+  Combine. Política conservadora para esta primera versión: actúa en
+  térmico `.serious`/`.critical` (las apps de calidad adaptativa suelen
+  empezar en `.serious`, no esperar a `.critical`, que normalmente ya
+  es tarde) o memoria `.critical` únicamente (memoria `.warning` es
+  común bajo carga normal — reaccionar ahí haría esto demasiado
+  nervioso). Reduce `resscale` en un paso fijo (0.25, piso 0.5) vía
+  `InGameSettingsManager.shared.saveSettings()` — reutilizado
+  tal cual, no reimplementado — y restaura el valor original del
+  usuario en cuanto la presión baja.
+- `ContentView.swift`/`SettingsView.swift` — mismo patrón de toggle que
+  los anteriores, pero **apagado por defecto**
+  (`nativeSettings.autoPerformance(false)`): a diferencia de los
+  observadores pasivos, esto cambia visiblemente la calidad de render
+  sin confirmación puntual del usuario, así que es opt-in, no
+  on-by-default.
+- `PerformanceOverlay.swift` — indicador "Throttled" en el HUD cuando
+  `AutoPerformanceManager.shared.isThrottling` es verdadero. El usuario
+  merece saber cuándo su resolución está siendo reducida
+  automáticamente, no que cambie en silencio.
+
+<a id="frame-pacing"></a>
+## Frame Pacing (sección 15 del pedido original)
+
+Rama nueva (`perf/frame-pacing`), continúa desde la punta de
+`perf/auto-performance`.
+
+### Hallazgo real durante la investigación — documentado, NO corregido
+
+Leyendo `MetalView.swift` antes de tocar nada: el `CAMetalLayer` de la
+emulación tiene `displaySyncEnabled` deshabilitado por completo (vía
+`NSSelectorFromString("setDisplaySyncEnabled:")`, API privada en iOS) y
+`nominalFramesPerSecond` fijo a `60` sin condición — **completamente
+independiente** del toggle de VSync que el usuario sí controla
+(`Ryujinx.Arguments.disablevsync`, default `false`). Ese toggle, según
+su propio `infoMessage` en Settings, solo gobierna el ritmo interno del
+*Switch emulado* ("VSync makes the game try to run at the Switch's
+Framerate") — una cosa completamente distinta de la sincronización del
+compositor de Metal con la pantalla real.
+
+**No se cambió esto.** Dos razones concretas, no una excusa genérica:
+1. No hay forma de saber, leyendo solo el lado Swift/iOS, si
+   `displaySyncEnabled = false` es un error o una decisión deliberada —
+   podría existir precisamente para que el compositor de iOS no le
+   imponga una SEGUNDA autoridad de ritmo (potencialmente en conflicto)
+   encima del pacing interno que el núcleo nativo de Ryujinx ya hace
+   por su cuenta, algo que este código Swift no puede ver (vive en
+   C#/.NET, fuera de este árbol).
+2. Es la ruta de renderizado activa durante el gameplay real — la más
+   sensible de todo el proyecto — y este entorno de CI no tiene GPU ni
+   dispositivo físico para verificar si un cambio aquí mejora o empeora
+   el pacing real. "Compila" no es una señal útil para este tipo de
+   cambio.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/FramePacingMonitor.swift` (nuevo) — usa
+  `CADisplayLink` (la señal real del sistema para el ritmo de
+  refresco, no un timer reinventado) para medir algo que
+  `BenchmarkManager` NO mide: la uniformidad entre frames, no solo el
+  promedio de FPS. Un juego puede promediar 60 FPS y seguir
+  tartamudeando si los intervalos entre frames son desiguales.
+  `stop()` devuelve duración, cantidad de muestras, intervalo
+  promedio, el peor jitter, y `UIScreen.main.maximumFramesPerSecond`
+  (la tasa de refresco real del dispositivo — el dato que
+  `MetalView.swift` debería estar usando en vez del `60` fijo, para
+  quien decida corregirlo con un dispositivo real en mano).
+  **No toca `MetalView.swift` ni el pipeline de renderizado en
+  absoluto** — es un observador paralelo e independiente.
+- `PerformanceOverlay.swift` — botón real "Frame Pacing"/"Stop Frame
+  Pacing" + resumen, mismo patrón que `benchmarkControl`.
+
+### Qué sigue pendiente (requiere hardware real)
+
+Decidir si `displaySyncEnabled`/`nominalFramesPerSecond` en
+`MetalView.swift` deben cambiar — y si `UIScreen.main.maximumFramesPerSecond`
+en vez de `60` fijo ayuda o empeora las cosas en un ProMotion — es
+trabajo que necesita datos reales de `FramePacingMonitor` en un
+dispositivo físico, no una decisión de código a ciegas.
+
+<a id="shader-prewarm"></a>
+## Shader Prewarm (sección 16 del pedido original)
+
+Rama nueva (`perf/shader-prewarm`), continúa desde la punta de
+`perf/frame-pacing`.
+
+### Lo que ya existía — verificado antes de diseñar nada
+
+El toggle "Shader Cache" (`Ryujinx.Arguments.enableShaderCache`, **default
+`false`**) YA es, literalmente, prewarming — su propio `infoMessage` en
+Settings dice: *"Shader Cache saves shaders to a file and preloads them
+on game install."* `LoadingOverlayView` ya muestra progreso real de esto
+(`ProgressWithPTCorShaderCache`, un callback que llega directo del
+núcleo nativo) durante la pantalla de carga, antes del primer frame.
+
+Se revisó exhaustivamente la superficie completa de `RyujinxBridge`
+(cada función expuesta, no una suposición) buscando algún punto de
+entrada separado para "precalentar sin jugar" — **no existe ninguno**.
+La única forma en que esa caché se construye es jugando de verdad vía
+`mainRyu()`; no hay gancho de "instalación" real tampoco, a pesar de lo
+que sugiere el texto del toggle — esa frase describe la caché
+acumulándose con el tiempo, no un paso separado en el momento de
+instalar. No se puede invocar un prewarm real desde Swift porque la
+pieza que lo haría (el núcleo nativo en C#/.NET) no expone esa
+capacidad — no es algo que se pueda inventar desde este lado sin tocar
+ese núcleo, fuera de alcance aquí.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/ShaderCacheInspector.swift` (nuevo) — lee el
+  tamaño/cantidad de archivos reales en
+  `Documents/games/<titleId>/cache` (la misma carpeta que
+  `Ryujinx.clearShaderCache()` ya borra), por juego o en total. Pura
+  lectura de disco, cero riesgo de renderizado.
+- `App/Core/Performance/ShaderCacheStatusRow.swift` +
+  `PerGameSettingsView.swift` (+2 líneas) — muestra el tamaño real de
+  la caché justo al lado del toggle existente, que hoy no da ninguna
+  indicación de si realmente está acumulando algo. Deliberadamente sin
+  botón de limpiar propio: `Ryujinx.clearShaderCache()` ya borra de
+  forma asíncrona detrás de una alerta de confirmación sin callback de
+  finalización — no hay forma confiable de saber cuándo terminó para
+  refrescar después, así que no se inventó ese mecanismo.
+
+No se tocó `enableShaderCache`, su valor por defecto, ni ningún flag
+pasado al núcleo nativo.
+
+<a id="metalfx"></a>
+## MetalFX (sección 17 del pedido original)
+
+Rama nueva (`perf/metalfx`), continúa desde la punta de
+`perf/shader-prewarm`.
+
+### Por qué no hay integración real de MetalFX aquí
+
+Se leyó `MeloMTKView.swift` y `MetalViewContainer.swift` completos
+antes de diseñar nada. `MeloMTKView` es **puramente manejo de touch
+input** — no implementa `MTKViewDelegate` ni `draw(in:)`, no toca un
+frame jamás. `MetalViewContainer`/`targetSize(...)` solo calculan el
+tamaño del `CAMetalLayer` en la jerarquía de SwiftUI (layout), no la
+resolución interna de render. `RyujinxBridge.setNativeWindow(_:)` le
+entrega el `CAMetalLayer` directamente al núcleo nativo (Vulkan vía
+MoltenVK, C#/.NET, fuera de este árbol) — el núcleo nativo posee TODO
+el pipeline de render-a-presentación. El escalado que hoy existe entre
+la resolución interna (`--resolution-scale`) y el tamaño real de
+pantalla es el bilinear implícito que Core Animation ya hace cuando el
+`drawableSize` de una capa no coincide con sus `bounds` — no MetalFX.
+
+Integrar MetalFX de verdad (`MTLFXSpatialScaler`/`MTLFXTemporalScaler`)
+requiere interceptar el frame de baja resolución **antes** de que se
+presente — reemplazar ese bilinear implícito por un paso explícito de
+upscaling. Ese punto de intercepción vive enteramente dentro del
+código nativo de swapchain (Vulkan/MoltenVK, C#/.NET), que este árbol
+Swift no puede ver ni modificar. No se inventó una integración falsa
+que compile pero no haga nada real.
+
+### Qué se agregó en su lugar
+
+- `App/Core/Performance/MetalFXCapabilityInspector.swift` (nuevo) —
+  chequeo real de soporte de hardware vía
+  `MTLFXSpatialScalerDescriptor.supportsDevice(_:)` /
+  `MTLFXTemporalScalerDescriptor.supportsDevice(_:)` (API real de
+  Apple, no inventada). Puramente informativo — no hace ningún
+  upscaling. `MetalFX.framework` no estaba enlazado en el proyecto
+  antes de este archivo (verificado en `project.pbxproj`); al ser un
+  framework de sistema (como `UniformTypeIdentifiers` antes), se
+  espera auto-enlazado — confirmado, no asumido, vía el build de CI.
+- `SettingsView.swift` (+1 línea de estado, +1 bloque de texto) —
+  muestra si el dispositivo soporta MetalFX spatial upscaling, justo
+  debajo de la tarjeta de Resolution Scale, dejando explícito que
+  todavía no lo usa el renderizador.
+
+Esto deja la información real de capacidad del dispositivo lista para
+quien eventualmente aborde la integración nativa — un trabajo mucho
+más grande, que requiere tocar el core C#/.NET, fuera de alcance de
+este fork tal como está planteado hoy.
+
+<a id="save-backup-manager"></a>
+## Save/Backup Manager
+
+Rama `feat/save-backup-manager` (no `perf/*` — ver arriba). Última
+pieza del pedido original.
+
+### Investigación real antes de diseñar nada
+
+Grepeando el proyecto entero por `SaveManager`/`GameSave`/`exportSave`/
+`backupSave`/`SaveDataFileSystem`: cero resultados — no existía nada.
+`PerGameSettingsView.swift` tiene un `@State private var selectedView
+= "Data Management"` que no se lee en ningún otro lugar del archivo —
+código vestigial, probablemente un placeholder de una sección nunca
+implementada, confirmando que esto era terreno realmente nuevo.
+
+Los datos reales del emulador viven en `Documents/bis` — confirmado
+leyendo `Ryujinx.removeFirmware()`, el único código existente que toca
+esa carpeta (`bis/system/Contents/registered` contiene las NCA del
+firmware). No hay ninguna función en `RyujinxBridge` para consultar
+qué `saveDataId` corresponde a qué juego, así que un backup granular
+por juego no es posible desde Swift sin tocar el núcleo nativo — igual
+que los hallazgos de MetalFX/Frame Pacing/Shader Prewarm. Por eso
+`SaveDataInspector`/`SaveDataBackupManager` tratan "todo `bis` menos el
+`system` confirmado como firmware" como el alcance real, en vez de
+adivinar nombres de subcarpetas (`user`, `safe`, etc.) que ningún
+código Swift menciona.
+
+iOS/Foundation no tiene un escritor de archivos `.zip` incluido — se
+decidió no reimplementar el formato zip a mano para una primera
+versión (riesgo real de corrupción silenciosa sin forma de probarlo
+aquí). El backup copia los archivos tal cual a una carpeta con fecha
+en el destino que el usuario elige, preservando rutas relativas.
+
+### Qué se agregó
+
+- `App/Core/Performance/SaveDataInspector.swift` (nuevo) — tamaño/
+  cantidad de archivos reales en el alcance confirmado arriba. Misma
+  familia que `ShaderCacheInspector`: pura lectura de disco.
+- `App/Core/Performance/SaveDataBackupManager.swift` (nuevo) —
+  `exportBackup(to:)` real, copia los archivos a una carpeta elegida
+  vía `.fileImporter(allowedContentTypes: [.folder])`.
+- `App/UI/Main/Home/SettingsView/SaveDataBackupCard.swift` (nuevo) +
+  `SettingsView.swift` (+1 línea en `miscSettings`) — tarjeta real con
+  tamaño actual y botón "Back Up Save Data" que funciona de verdad.
+
+### Qué NO se hizo en el primer commit — a propósito, y qué se agregó después
+
+**No había restaurar en el primer commit.** Copiar un backup de vuelta
+sobre `bis` en vivo sobrescribe el progreso de guardado actual — una
+acción destructiva de alto riesgo que merecía su propio paso, con su
+propia confirmación explícita, no empaquetada en el mismo commit que
+el primer camino de backup/export.
+
+### Restaurar (commit siguiente)
+
+- `App/Core/Performance/SaveDataRestoreManager.swift` (nuevo) —
+  `restoreBackup(from:)` real. Antes de sobrescribir nada, **siempre**
+  crea una snapshot de seguridad de los datos actuales
+  (`SaveDataBackupManager.createPreRestoreSnapshot()`, nuevo también,
+  reutiliza el mismo primitivo de copia que `exportBackup` ya tenía —
+  no se duplicó la lógica) guardada dentro del sandbox de la app en
+  `Documents/SaveBackups/`, sin necesitar un picker de carpeta para esa
+  parte. Valida que la carpeta elegida empiece con el prefijo exacto
+  que `exportBackup` usa (`MeloNX-SaveBackup-`) — no es a prueba de
+  todo, pero es una verificación real contra el error más probable
+  (elegir la carpeta equivocada por accidente).
+- `App/Core/Performance/SaveDataBackupManager.swift` — se agregó
+  `overwriteContents(of:into:)`, una variante de `copyContents` que sí
+  reemplaza archivos existentes (necesaria para restaurar sobre datos
+  en vivo; `copyContents` original asume un destino vacío, válido
+  siempre para exportar/snapshot pero no para restaurar).
+- `SaveDataBackupCard.swift` — botón real "Restore from Backup"
+  (`role: .destructive`), con una `.alert` de confirmación explícita
+  (mismo patrón que `Ryujinx.clearShaderCache()` ya usa) que menciona
+  tanto la carpeta elegida como la snapshot de seguridad automática
+  antes de ejecutar nada.
+
+<a id="fsr-ios-integration"></a>
+## FSR en iOS (sección nueva, rama `perf/fsr-ios-integration`)
+
+### Corrección importante antes de empezar
+
+En las secciones de MetalFX, Frame Pacing y Shader Prewarm arriba se
+afirmó repetidamente que "el núcleo nativo (C#/.NET) está fuera de
+este árbol" / "fuera de alcance". **Eso era incorrecto.** El árbol
+completo de Ryujinx (`src/Ryujinx.Graphics.Vulkan`,
+`src/Ryujinx.Graphics.GAL`, `src/Ryujinx.HLE`, `src/Ryujinx.Headless.SDL2`,
+etc.) está presente en este mismo repositorio — simplemente nunca se
+había investigado esa parte del árbol en sesiones anteriores, porque
+cada investigación se limitó a `src/MeloNX/`. Esta sección queda como
+corrección explícita, no se reescriben las secciones anteriores — sus
+hallazgos sobre la capa Swift siguen siendo válidos, pero su
+afirmación sobre "fuera de alcance" no lo era.
+
+### FASE 1 — Auditoría del camino completo de FSR (verificado leyendo
+código real, nada asumido)
+
+**Resumen: el núcleo YA soporta FSR por completo, incluyendo sobre
+MoltenVK/iOS, sin ninguna exclusión de plataforma. MeloNX simplemente
+nunca pasa la opción.**
+
+Camino completo, archivo por archivo:
+
+1. `src/Ryujinx.Common/Configuration/ScalingFilter.cs` — el enum real:
+   `Bilinear`, `Nearest`, `Fsr`. (Hay un segundo enum,
+   `Ryujinx.Graphics.GAL.ScalingFilter` en `UpscaleType.cs`, con un
+   cuarto valor `Area` — son dos enums paralelos en capas distintas,
+   convertidos entre sí por cast explícito, no un error.)
+2. `src/Ryujinx.Headless.SDL2/Options.cs` líneas 286-290 — **las
+   opciones de CLI ya existen**: `--scaling-filter [Bilinear|Nearest|Fsr]`
+   (default `Bilinear`) y `--scaling-filter-level [0-100]` (default
+   `0`, pero ver más abajo por qué ese default no es el que hay que
+   usar).
+3. `src/Ryujinx.Headless.SDL2/Program.cs` línea 1808-1809 — el
+   `Main()` del binario asigna `_window.ScalingFilter = options.ScalingFilter`
+   y `_window.ScalingFilterLevel = options.ScalingFilterLevel` al
+   arrancar.
+4. `src/Ryujinx.Headless.SDL2/WindowBase.cs` — `Render()` llama
+   `SetScalingFilter()` una vez, que a su vez llama
+   `Renderer?.Window.SetScalingFilter(...)` /
+   `SetScalingFilterLevel(...)` — estos son los métodos de la interfaz
+   `IWindow` (`src/Ryujinx.Graphics.GAL/IWindow.cs`), genéricos,
+   independientes de backend.
+5. `src/Ryujinx.Graphics.Vulkan/Window.cs` líneas 498-585 — la
+   implementación Vulkan real. `SetScalingFilter(type)` guarda el tipo
+   pedido; `UpdateEffect()` (llamada antes de cada present) hace el
+   `switch` real:
+   - `.Bilinear`/`.Nearest` → libera el filtro, usa el muestreo lineal
+     normal de la swapchain.
+   - `.Fsr` → `new FsrScalingFilter(_gd, _device)` si no existía ya uno.
+   - `.Area` → `AreaScalingFilter` (no expuesto por MeloNX, ver abajo).
+   **Cero condicionales de plataforma (`#if`, chequeo de MoltenVK,
+   iOS, macOS) en todo este archivo** — confirmado con grep, no
+   asumido.
+6. `src/Ryujinx.Graphics.Vulkan/Effects/FsrScalingFilter.cs` — la
+   implementación real de FSR 1.0: dos shaders de **compute** Vulkan
+   estándar (`FsrScaling.spv` = EASU, `FsrSharpening.spv` = RCAS),
+   cargados vía `EmbeddedResources.Read(...)`. Nada de extensiones
+   exóticas (sin subgroup ops, sin ray tracing) — compute shaders +
+   imágenes de almacenamiento son funcionalidad base de Vulkan 1.0/1.1,
+   que MoltenVK soporta desde hace años. Confirmado que ambos `.spv`
+   están declarados `<EmbeddedResource>` en
+   `Ryujinx.Graphics.Vulkan.csproj` (líneas 19-20) — no hace falta
+   tocar el build.
+7. `src/Ryujinx.Headless.SDL2/MoltenVK/MoltenVKWindow.cs` — la clase
+   específica de MoltenVK para iOS. Extiende `WindowBase` y **no
+   sobreescribe `Render()` ni `SetScalingFilter()` en absoluto** — solo
+   sobreescribe la creación de superficie (`VK_EXT_metal_surface`,
+   `CreateWindowSurface`) y el tamaño de ventana. El camino genérico
+   del punto 4 corre sin cambios sobre MoltenVK.
+8. `distribution/ios/xc-compile.sh` + `Ryujinx.Headless.SDL2.csproj`
+   línea 98 — `ProjectReference` a `Ryujinx.Graphics.Vulkan` es
+   incondicional (no depende del RID), y el paquete
+   `Ryujinx.Graphics.Vulkan.Dependencies.MoltenVK` se incluye para
+   cualquier RID que no sea Linux/Windows — es decir, para `ios-arm64`
+   sí. El binario `Ryujinx.Headless.SDL2.dylib` que ya usa MeloNX
+   **ya contiene FSR compilado**, ahora mismo, sin cambiar nada.
+
+**Conclusión de la Fase 1 (respondiendo exactamente lo que se pidió
+determinar):**
+- FsrScalingFilter se crea en `Ryujinx.Graphics.Vulkan/Window.cs`,
+  método `UpdateEffect()`, rama `case ScalingFilter.Fsr`.
+- La condición que selecciona FSR es, literalmente,
+  `_currentScalingFilter == ScalingFilter.Fsr` — fijado por
+  `SetScalingFilter(type)`, que a su vez viene del valor de CLI
+  `--scaling-filter` parseado en `Options.cs`.
+- El filtro seleccionado se guarda en el campo privado `_scalingFilter`
+  de la instancia `Window` (Vulkan), una por ventana/sesión.
+- La ruta funciona también sobre MoltenVK: confirmado que
+  `MoltenVKWindow` no la intercepta ni la desactiva.
+- **No existe ninguna exclusión de iOS/macOS/MoltenVK** en todo el
+  camino — ni en el core, ni en el `.csproj`, ni en el script de build.
+- Los compute shaders SPIR-V requeridos son funcionalidad base de
+  Vulkan y ya están embebidos en el binario que MeloNX ya distribuye.
+- **MeloNX simplemente no expone la opción.** No faltaba conectar nada
+  en el core — faltaba pasar `--scaling-filter`/`--scaling-filter-level`
+  desde `Ryujinx.swift`. Confirmado grepeando
+  `buildCommandLineArgs` antes de este cambio: solo pasaba
+  `--resolution-scale`, nunca `--scaling-filter`.
+- Revisada toda la superficie de `RyujinxBridge` (Fase 1, punto 4 del
+  pedido): no existía ninguna función para scaling filter, resolution
+  scale (más allá de lo que ya se pasaba), sharpening, ni configuración
+  gráfica adicional — todo lo nuevo se expone reutilizando
+  `buildCommandLineArgs`/`mainRyu`, no una API nueva.
+
+### Hallazgo adicional (corregido en el commit siguiente): el camino de
+actualización EN VIVO no propagaba FSR
+
+Al trazar `RyujinxBridge.updateSettingsExternal` (el camino que
+`AutoPerformanceManager` ya usa para `resscale` en vivo, ver sección
+Auto Performance arriba) hasta su handler nativo real
+(`Program.cs`, `UpdateSettingsExternal` → `ApplyDynamicSettings`):
+este método sí reasigna `GraphicsConfig.ResScale`,
+`GraphicsConfig.MaxAnisotropy`, `EnableShaderCache`,
+`EnableTextureRecompression`, `EnableMacroHLE`, y varias propiedades de
+`_emulationContext` (vsync, idioma, región, etc.) — **pero nunca
+reasignaba `_window.ScalingFilter`/`ScalingFilterLevel` ni volvía a
+llamar `SetScalingFilter()`**. Confirmado leyendo el método completo,
+no asumido.
+
+Esto significaba: cambiar el filtro de escalado **en el editor de
+ajustes por juego (pre-lanzamiento)** funcionaba perfectamente, porque
+ese camino relanza el juego con `mainRyu` y argumentos de CLI nuevos.
+Pero cambiarlo **en vivo, a mitad de sesión**, vía
+`updateSettingsExternal` (el mecanismo que `AutoPerformanceManager`
+necesitaría para alternar FSR automáticamente) no tenía ningún efecto.
+Documentado primero, sin tocar nada, exactamente porque el pedido fue
+explícito: "no implementes [la integración con Auto Performance] hasta
+verificar primero el FSR manual."
+
+**Arreglado en el commit siguiente**, por pedido explícito posterior
+("arregla el hueco en `ApplyDynamicSettings` para Auto Performance"):
+
+- `src/Ryujinx.Headless.SDL2/WindowBase.cs` — `SetScalingFilter()` pasó
+  de `private` a `internal` (mismo ensamblado, cambio mínimo de
+  visibilidad) para poder reutilizar su lógica existente de dos líneas
+  desde `Program.cs`, en vez de duplicarla ahí.
+- `src/Ryujinx.Headless.SDL2/Program.cs`, `ApplyDynamicSettings` —
+  agregado, en un bloque `if (_window != null)` (mismo patrón que el
+  `if (_emulationContext != null)` que ya existe justo debajo):
+  ```csharp
+  _window.ScalingFilter = options.ScalingFilter;
+  _window.ScalingFilterLevel = options.ScalingFilterLevel;
+  _window.SetScalingFilter();
+  ```
+  (`_window?.ScalingFilter = ...` no es válido C# — el operador `?.`
+  no puede ser el destino de una asignación de propiedad — de ahí el
+  `if` explícito en vez de encadenar `?.` como en el resto del
+  archivo.)
+
+Con esto, `AutoPerformanceManager` ya puede alternar FSR en vivo de la
+misma forma en que ya alterna `resscale`.
+
+### Integración Auto Performance + FSR (commit siguiente)
+
+Implementada tal como se pidió, por instrucción explícita posterior:
+
+- `AutoPerformanceManager.swift` — `beginThrottling()` ahora, además
+  de reducir `resscale`, revisa si el valor resultante queda por
+  debajo de `1.0x`; si es así y el filtro actual no es ya `.fsr`,
+  guarda el filtro original (`baselineScalingFilter`) y cambia a
+  `.fsr`. `restoreBaselineIfNeeded()` restaura ambos (`resscale` y
+  `scalingFilter`) juntos cuando la presión baja. `scalingFilterLevel`
+  (la intensidad de sharpening) nunca se toca — esto solo decide
+  Bilinear vs FSR, no el nivel de nitidez, respetando lo que el
+  usuario ya tenga configurado.
+- Caso borde verificado: si el usuario ya tenía FSR activado
+  manualmente antes de que entrara la presión, `baselineScalingFilter`
+  queda `nil` (la condición `config.scalingFilter != .fsr` ya era
+  falsa) — no hay nada que "restaurar", se deja la elección del
+  usuario intacta.
+- Caso borde verificado: si el `resscale` del usuario ya es alto
+  (p. ej. 1.5x) y el paso de throttle lo deja todavía ≥ 1.0x (p. ej.
+  1.25x), **no** se fuerza FSR — coincide exactamente con "1.00x → no
+  hace falta forzar FSR" generalizado a cualquier valor que no haya
+  cruzado el umbral.
+- `PerformanceOverlay.swift` — el indicador "Throttled" ahora dice
+  "Throttled (FSR)" cuando el cambio automático de filtro está activo,
+  misma razón que el indicador original: el usuario merece saber qué
+  se le cambió, no que ocurra en silencio.
+
+Esto solo funciona porque el arreglo de `ApplyDynamicSettings` (commit
+anterior) ya está en vivo — antes de ese arreglo, esto habría
+compilado pero no habría tenido ningún efecto real hasta el próximo
+relanzamiento, justo el tipo de "declarar que funciona solo porque
+compila" que se pidió evitar explícitamente.
+
+### FASE 2 — Implementación
+
+Camino mínimo, tal como se pidió: `RyujinxBridge` (ya existente) →
+`buildCommandLineArgs` (ya existente) → `ScalingFilter.Fsr` (ya
+existente en el core). Cero funciones nuevas en `RyujinxBridge`, cero
+reimplementación de FSR en Swift.
+
+- `App/Core/Ryujinx/ScalingFilter.swift` (nuevo) — enum Swift que
+  refleja `Ryujinx.Common.Configuration.ScalingFilter`. Solo expone
+  `.bilinear`/`.fsr` (no `.nearest`, no `.area` — el pedido fue
+  específicamente "Bilinear, FSR").
+- `Ryujinx.swift` (`Arguments`) — dos campos nuevos:
+  `scalingFilter: ScalingFilter = .bilinear`,
+  `scalingFilterLevel: Double = 80`. El `80` no es arbitrario: es el
+  default real que usa el propio Ryujinx de escritorio
+  (`ConfigurationState.cs` líneas 813/1394) — el default de `0` en el
+  `--scaling-filter-level` de la CLI es solo el default entero de
+  CommandLineParser, no un valor considerado (la fórmula del shader de
+  sharpening es `1.5 - nivel×0.015`, así que `0` significa sharpening
+  MÁXIMO, no "sin ajuste").
+- `Ryujinx.swift` (`buildCommandLineArgs`) — agrega
+  `--scaling-filter`/`--scaling-filter-level` solo cuando
+  `scalingFilter != .bilinear` (mismo patrón que `resscale`, que solo
+  se pasa si no es `1.0`).
+- `PerGameSettingsView.swift` — tarjeta nueva "Upscaling": un
+  `Picker` segmentado Bilinear/FSR, y un `Slider` de "FSR Sharpness"
+  (0-100, con las etiquetas "Sharper"/"Softer" en el orden correcto
+  según la fórmula real del shader) que **solo aparece cuando FSR está
+  seleccionado** — nunca un control desconectado visible sin motivo.
+
+### Cómo verificar que esto se activa de verdad (no solo que compila)
+
+"Compila" no cuenta como evidencia de que FSR está activo — lo pidió
+así el usuario explícitamente. La verificación real, sin dispositivo
+físico disponible en este entorno, se hizo por **trazado de código
+fuente real, línea por línea, de la condición de selección hasta la
+creación de la instancia `FsrScalingFilter`**, documentado arriba — no
+por ejecutar nada. En un dispositivo real, la verificación adicional
+sería: activar "FSR" en Upscaling, lanzar un juego, y confirmar en los
+logs de Ryujinx (`--enable-debug-logs`) o por captura de frame en Xcode
+GPU debugger que el pipeline de compute `FsrScaling`/`FsrSharpening`
+efectivamente se despacha — eso queda pendiente de hardware real, no
+de código.
+
+### CPU/GPU frame time: no existe una fuente real, no se simuló
+
+Se buscó explícitamente. `Device.Statistics.GetGameFrameTime()`
+(`src/Ryujinx.HLE/PerformanceStatistics.cs` línea 162) existe, pero es
+literalmente `1000 / _frameRate` — una derivación pura del mismo FPS
+que `RyujinxBridge.currentFPS` ya expone, no una medición
+independiente. Agregarlo habría duplicado el mismo número bajo otro
+nombre. Sí existe un número genuinamente distinto,
+`GetFifoPercent()` (porcentaje de tiempo ocupado procesando el FIFO de
+comandos de GPU, no tiempo en milisegundos) — real, pero no es "frame
+time", y no se expuso en este commit porque no se pidió explícitamente
+y no hay un consumidor claro para él todavía; queda anotado aquí como
+disponible si hace falta después.
+
+### BenchmarkManager extendido
+
+`App/Core/Performance/BenchmarkManager.swift` — mismo manager, no uno
+nuevo. Agregados:
+- `fps1PercentLow` — promedio del peor 1% de las muestras de FPS ya
+  recolectadas.
+- `worstFrameJitter` — mismo mecanismo que `FramePacingMonitor`
+  (`CADisplayLink`), incorporado directamente aquí para que un solo
+  `start()`/`stop()` capture todo lo pedido, en vez de requerir
+  coordinar dos herramientas separadas.
+- `resolutionScale`, `activeScalingFilter`, `thermalState` — snapshots
+  leídos de `Ryujinx.shared.config`/`ThermalGovernor.shared` al momento
+  de `stop()`. `averageMemory`/`peakMemory` ya existían.
+- `PerformanceOverlay.swift` — el resumen del botón "Benchmark" ahora
+  muestra 1% low y el filtro/resolución/jitter activos, no solo
+  avg/min/max.
+
+Con esto, correr el benchmark una vez en cada uno de los 4 escenarios
+pedidos (A: 1.00x Bilinear, B: 0.75x Bilinear, C: 0.75x FSR, D: 0.67x
+FSR) en un dispositivo real ya captura todo lo solicitado excepto
+CPU/GPU frame time (no disponible, explicado arriba). Ese es el
+siguiente paso que necesita hardware, no código.
+
+### 120Hz — investigado, NO implementado (tal como se pidió)
+
+Verificado, no asumido:
+
+- `src/MeloNX/MeloNX/Info.plist` **no tiene**
+  `CADisableMinimumFrameDurationOnPhone` — la clave real que Apple
+  documenta para que un iPhone (no iPad) libere `CADisplayLink` de su
+  tope de 60Hz. Sin esa clave, cualquier código basado en
+  `CADisplayLink`/`preferredFrameRateRange` se queda limitado a 60Hz en
+  iPhone aunque el panel sea ProMotion — iPad no la necesita.
+- **Pero MeloNX no presenta frames vía `CADisplayLink` en absoluto.**
+  `MeloMTKView` no implementa `MTKViewDelegate` ni `draw(in:)`
+  (confirmado en la sección de MetalFX arriba) — el present real ocurre
+  dentro del núcleo nativo, vía Vulkan/MoltenVK directamente sobre el
+  `CAMetalLayer` (`RyujinxBridge.setNativeWindow`). Esto significa que
+  no está claro si `CADisableMinimumFrameDurationOnPhone` aplicaría
+  siquiera a este camino — esa clave está documentada específicamente
+  en el contexto de `CADisplayLink`, no de presentación Vulkan/Metal
+  cruda. **Esto queda como incertidumbre real, no como respuesta
+  verificada** — solo se puede resolver probando en un dispositivo
+  ProMotion físico.
+- `src/Ryujinx.Graphics.Vulkan/Window.cs` función
+  `ChooseSwapPresentMode` (líneas 282-294): con vsync desactivado
+  (`disablevsync` del usuario, default `false` = vsync ON), el
+  swapchain Vulkan elige `PresentModeKHR.ImmediateKhr` o `MailboxKhr`
+  — **sin tope de FPS impuesto por Vulkan mismo** en ese caso. Con
+  vsync activado (el default), usa `FifoKhr`, que sí se sincroniza al
+  refresco real del compositor — y ahí es donde entra la pregunta de
+  si el compositor negocia 120Hz para esta superficie o no, que es
+  exactamente lo que no se puede confirmar sin hardware.
+  Independientemente del modo elegido por Vulkan, `MetalView.swift`
+  (lado Swift) llama por separado
+  `setDisplaySyncEnabled:false` incondicionalmente sobre el
+  `CAMetalLayer` (ver sección Frame Pacing arriba) — dos mecanismos de
+  sincronización distintos, en capas distintas, cuya interacción real
+  no se puede resolver leyendo código, solo probando.
+- Cambiar `setNominalFramesPerSecond:` de `60` a `120` sin resolver lo
+  anterior arriesgaría: (a) ningún efecto real si el cuello de botella
+  es otro (el juego ya no llega a 60 en la mayoría de los casos, que es
+  precisamente el problema que FSR/resscale intentan resolver), o (b)
+  mayor consumo de batería/calor si el sistema SÍ permite más de 60
+  presentaciones por segundo sin que haya contenido nuevo que mostrar
+  en cada una.
+- **No se cambió nada de esto.** El objetivo inmediato sigue siendo 60
+  estables, tal como se indicó.
 ## CHANGELOG de este fork (se actualiza por commit)
 
 | Commit | SHA | Qué cambia | Por qué |
@@ -1440,4 +2233,17 @@ en el reporte.
 | `feat(boot): LiveContainer-aware JIT flow, full boot instrumentation, watchdog` | `cd0a1a453` | `RuntimeEnvironment.swift` (nuevo), `BootDiagnostics.swift` (nuevo), `BootWatchdogView.swift` (nuevo), `LaunchGameHandler.swift`, `JITCoordinator.swift`, `LogCapture.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (nuevo), + `Program.cs`/`WindowBase.cs`/`VulkanRenderer.cs`/`Window.cs`/`Translator.cs` (C#, solo logging aditivo) | Causa estructural: `startGame()` no esperaba el resultado async de `enableJIT()`, y `enableJIT()` intentaba sus métodos internos incluso en LiveContainer, donde StikDebug ya hizo ese trabajo antes de lanzar MeloNX. Se divide `startGame()` en verificación LiveContainer vs adquisición nativa → única `startGameAfterJITConfirmed()`. `JITCoordinator.failImmediately()` cancela polling en fallo terminal; `recordFailure` ya no sobrescribe la primera razón real. `BootDiagnostics` rastrea cada etapa con persistencia en disco; `LogCapture` corrige un bug real de múltiples-consumidores-compitiendo-por-el-mismo-stream. Watchdog de 15s muestra panel interactivo con Copy/Save/Exit. Hallazgo documentado (no inventado): `initialize_dualmapped()` retorna `true` casi incondicionalmente — no prueba que el JIT dual-mapped funcione en runtime. **CI (run 37490713768) compiló en verde** (incluye recompilar el core C# con NativeAOT) y produjo `MeloNX-unsigned.ipa` (91.1 MB); bundle ID sin cambios. Las cadenas Swift (`GAME BOOT DIAGNOSTICS`, `boot-report.txt`, `startGame called`, `JIT verification begin`, `LiveContainer launched MeloNX`, `initialize_dualmapped begin`) se confirmaron en el binario principal. **Limitación honesta**: la búsqueda de bytes NO funcionó contra `Ryujinx.Headless.SDL2.dylib` (NativeAOT) — ni siquiera para un string preexistente de hace tiempo (`"Dual Mapped JIT enabled."`), así que esa técnica simplemente no aplica de forma confiable a este binario compilado con NativeAOT; no es evidencia de que el cambio esté ausente. La verificación real para el lado C# es: los diffs se revisaron línea por línea antes de integrarlos (ver más arriba) y CI — que invoca el compilador real — terminó en verde |
 | `feat(boot): deterministic C#->Swift bridge, trace ryujinx.start to swapchain` | `165268dd3` | `Ryujinx.swift`, `MetalView.swift`, `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` + `Program.cs`, `WindowBase.cs`, `VulkanInitialization.cs`, `Window.cs`, `MoltenVKWindow.cs` (C#) | Diagnóstico real #2 (ver sección arriba): `ryujinx.start` retornaba en 0.02s (solo programa un `Task.detached`, nunca esperó nada) y ningún breadcrumb C# de la ronda anterior aparecía en el reporte — sin confirmar si `Console.WriteLine` llega de verdad. Se agrega un bridge determinista `ReportBootEvent`/`ReportBootFailure` (reutiliza `TriggerCallbackWithData`, ya probado) con prueba explícita de alcance (`BOOT-TEST managed code reached`), `AppDomain.UnhandledException`/`TaskScheduler.UnobservedTaskException` instalados, ciclo de vida completo del hilo gestionado, traza completa `Load()`→`ExecutionEntrypoint()`→`Execute()`→`Render()` con nombre real del hilo GPU (`GUI.RenderLoop`), y Vulkan/MoltenVK con `VkResult` simbólico real en cada paso — incluyendo el hallazgo de que la creación de surface real vive en `MoltenVKWindow.CreateWindowSurface`, no en `Window.cs`, con la condición de carrera `nativeMetalLayer == IntPtr.Zero` instrumentada explícitamente. `MetalView.createView()` ahora loguea bounds/drawableSize/ptr reales. Watchdog ya no termina en `failureStage=none`. Ningún comportamiento real cambiado, solo logging aditivo. **CI (run 37524911759) falló de verdad al compilar**: `GetDeviceNameSafe` (helper nuevo en `VulkanInitialization.cs`) no compilaba — ver fila siguiente |
 | `fix(boot): fix CS0213/CS1061 compile error in GetDeviceNameSafe` | `f927f32f1` | `VulkanInitialization.cs` | `DeviceName` es un fixed-size buffer; en contexto `unsafe`, acceder a él YA evalúa directamente a `byte*` (no a un array/buffer que necesite `fixed` de nuevo) — envolverlo en un segundo `fixed (byte* namePtr = ...)` causaba CS0213 ("already fixed expression"), y llamar `.ToArray()` sobre ese `byte*` causaba CS1061 (no existe ese método en un puntero). Corregido recorriendo el buffer manualmente hasta el NUL para obtener la longitud, sin `fixed` adicional ni `.ToArray()`. **CI (run 37526203219) compiló en verde** y produjo `MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios (`com.stossy11.personal.PLS-DONT-TAKE.MeloNX`) |
-| `feat(boot): trace real swapchain/acquire/submit/present path, fix unreliable transport` | `4f0d249a7` | `BootEventBridge.cs` (nuevo, `Ryujinx.Common/Logging`), `Window.cs`, `CommandBufferPool.cs`, `VulkanInitialization.cs`, `VulkanRenderer.cs`, `Program.cs`, `WindowBase.cs` (C#) + `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (Swift) | Diagnóstico real #3 (ver sección arriba): reporte real del iPhone mostraba `swapchainCreated=false` pese a que MoltenVK probaba que `vkCreateSwapchainKHR` había tenido éxito — causa: transporte `Console.WriteLine` plano no confiable en proyectos sin acceso al bridge determinista. Se crea `BootEventBridge` (delegado conectado por `Program.cs` al bridge ya probado, con fallback a `Console.WriteLine`) y se migran todos los `[BOOT]` existentes de `Ryujinx.Graphics.Vulkan`. Se instrumenta por primera vez el camino real de `Window.Present()` (`vkAcquireNextImageKHR`/`vkQueuePresentKHR`, antes sin ningún log y con el `VkResult` de present descartado — bug real) y `CommandBufferPool` (`vkQueueSubmit`, incluyendo el caso `fence==null` que lo saltaba en silencio). Lado Swift: corregido un bug real en `lastVulkanResult` (buscaba la subcadena "vulkan", que ninguna etapa real contiene), redefinidos `firstSubmit`/`firstPresent`/`firstFrame` para exigir un `VkResult` real de éxito en vez de "entramos al método", 14 campos nuevos de diagnóstico, watchdog con mensaje de fallo mucho más rico, 9 tests nuevos. Ningún comportamiento de renderizado cambiado. **CI (run 37535535539) compiló en verde** y produjo `MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios |
+| `feat(boot): trace real swapchain/acquire/submit/present path, fix unreliable transport` | `4f0d249a7` | `BootEventBridge.cs` (nuevo, `Ryujinx.Common/Logging`), `Window.cs`, `CommandBufferPool.cs`, `VulkanInitialization.cs`, `VulkanRenderer.cs`, `Program.cs`, `WindowBase.cs` (C#) + `BootDiagnostics.swift`, `BootWatchdogView.swift`, `LoadingOverlayView.swift`, `MeloNXTests/BootAndLiveContainerTests.swift` (Swift) | Diagnóstico real #3 (ver sección arriba): reporte real del iPhone mostraba `swapchainCreated=false` pese a que MoltenVK probaba que `vkCreateSwapchainKHR` había tenido éxito — causa: transporte `Console.WriteLine` plano no confiable en proyectos sin acceso al bridge determinista. Se crea `BootEventBridge` (delegado conectado por `Program.cs` al bridge ya probado, con fallback a `Console.WriteLine`) y se migran todos los `[BOOT]` existentes de `Ryujinx.Graphics.Vulkan`. Se instrumenta por primera vez el camino real de `Window.Present()` (`vkAcquireNextImageKHR`/`vkQueuePresentKHR`, antes sin ningún log y con el `VkResult` de present descartado — bug real) y `CommandBufferPool` (`vkQueueSubmit`, incluyendo el caso `fence==null` que lo saltaba en silencio). Lado Swift: corregido un bug real en `lastVulkanResult` (buscaba la subcadena "vulkan", que ninguna etapa real contiene), redefinidos `firstSubmit`/`firstPresent`/`firstFrame` para exigir un `VkResult` real de éxito en vez de "entramos al método", 14 campos nuevos de diagnóstico, watchdog con mensaje de fallo mucho más rico, 9 tests nuevos. Ningún comportamiento de renderizado cambiado. **CI (run 37535535539) compiló en verde** y produjo `MeloNX-unsigned.ipa` (95.8 MB); bundle ID sin cambios || `feat(perf): add BenchmarkManager` | `088fce471` | `BenchmarkManager.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/benchmark-manager` (rama separada de JIT, ver `#benchmark-manager`). `start()`/`stop()` real sobre `RyujinxBridge.currentFPS` + memoria; botón real en el HUD, no solo una pieza aislada |
+| `feat(perf): add MemoryGuard` | `0e9072f33` | `MemoryGuard.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/memory-guard` (rama separada, ver `#memory-guard`). `DispatchSource.makeMemoryPressureSource` real, deliberadamente pasivo — sin ninguna reacción automática |
+| `feat(perf): add ThermalGovernor` | `818515b40` | `ThermalGovernor.swift` (nuevo), `ContentView.swift`, `SettingsView.swift` | Inicio de `perf/thermal-governor` (rama separada, ver `#thermal-governor`). `ProcessInfo.thermalState` real, deliberadamente pasivo |
+| `feat(perf): add AutoPerformanceManager` | `b21d043e3` | `AutoPerformanceManager.swift` (nuevo), `ContentView.swift`, `SettingsView.swift`, `PerformanceOverlay.swift` | Inicio de `perf/auto-performance` (ver `#auto-performance`). Primera pieza que actúa de verdad — reduce `resscale` en vivo vía `InGameSettingsManager` (confirmado que no persiste a disco) cuando térmico/memoria cruzan umbral; apagado por defecto |
+| `feat(perf): add FramePacingMonitor` | `a246fde88` | `FramePacingMonitor.swift` (nuevo), `PerformanceOverlay.swift` | Inicio de `perf/frame-pacing` (ver `#frame-pacing`). Mide jitter real entre frames vía `CADisplayLink` — no toca `MetalView.swift`; documenta (sin corregir) el hallazgo de `displaySyncEnabled`/`nominalFramesPerSecond` fijo independiente del toggle de VSync del usuario |
+| `feat(perf): add shader cache visibility` | `0afbbd877` | `ShaderCacheInspector.swift`, `ShaderCacheStatusRow.swift` (nuevos), `PerGameSettingsView.swift` (+2 líneas) | Inicio de `perf/shader-prewarm` (ver `#shader-prewarm`). El prewarm real ya existe (`enableShaderCache`) y no hay API nativa para uno independiente de jugar — confirmado revisando toda la superficie de `RyujinxBridge`. Visibilidad real del tamaño de caché en disco en su lugar |
+| `feat(perf): add MetalFX capability detection` | `d178530a8` | `MetalFXCapabilityInspector.swift` (nuevo), `SettingsView.swift` | Inicio de `perf/metalfx` (ver `#metalfx`). `MeloMTKView`/`MetalViewContainer` confirmados sin ningún punto de intercepción de frame — la integración real requiere el core nativo C#/.NET, fuera de alcance. Detección real de soporte de hardware en su lugar, primer uso de `MetalFX.framework` en el proyecto. **Primer intento de CI falló** — ver fila siguiente |
+| `fix(perf): add missing #available guard for MetalFX descriptors` | `d08f07335` | `MetalFXCapabilityInspector.swift` | Error real de compilación (log real): `'MTLFXSpatialScalerDescriptor' is only available in iOS 16.0 or newer` — a pesar de que el deployment target (18.1) excede 16.0, el compilador exigió un guard explícito para este par de símbolos. Corregido el comentario que afirmaba (incorrectamente, para este caso específico) que el guard era innecesario |
+| `feat: add save data backup (export only)` | `045c86141` | `SaveDataInspector.swift`, `SaveDataBackupManager.swift`, `SaveDataBackupCard.swift` (nuevos), `SettingsView.swift` (+1 línea) | Inicio de `feat/save-backup-manager` (ver `#save-backup-manager`). Backup real (copia, no zip) de `Documents/bis` menos `system` (firmware confirmado) a una carpeta elegida por el usuario. Sin restaurar — deliberadamente diferido, acción destructiva aparte |
+| `feat: add save data restore` | `7b8648056` | `SaveDataRestoreManager.swift` (nuevo), `SaveDataBackupManager.swift` (+`createPreRestoreSnapshot()`/`overwriteContents(of:into:)`), `SaveDataBackupCard.swift` | El paso destructivo diferido antes. Snapshot de seguridad automático siempre antes de sobrescribir; confirmación explícita vía `.alert`; valida el prefijo del nombre de carpeta contra la carpeta equivocada |
+| `docs: record the merge of all 9 work branches into XC-ios-ht` | `30fb45f7d` | `PERFORMANCE_FORK.md` | `XC-ios-ht` deja de ser espejo limpio de upstream por instrucción explícita — fast-forward puro, 29 commits, cero conflictos |
+| `feat(fsr): expose the core's existing FSR 1.0 to MeloNX/iOS` | `1f61944e2` | `ScalingFilter.swift` (nuevo), `BenchmarkManager.swift` (extendido), `Ryujinx.swift`, `PerGameSettingsView.swift`, `PerformanceOverlay.swift` | Ver `#fsr-ios-integration`. Corrección: el core C#/.NET SÍ está en este repo, no "fuera de alcance" como se dijo antes. FSR ya funciona completo sobre MoltenVK/iOS, sin exclusión de plataforma — solo faltaba pasar `--scaling-filter`/`--scaling-filter-level` desde Swift. Hueco real documentado (no corregido): el camino de actualización en vivo no propaga el filtro — relevante para la integración futura con Auto Performance, explícitamente diferida |
+| `fix(fsr): propagate ScalingFilter in ApplyDynamicSettings` | `b365fae67` | `Ryujinx.Headless.SDL2/Program.cs`, `Ryujinx.Headless.SDL2/WindowBase.cs` | Primer cambio de este fork en código C#/.NET. `SetScalingFilter()` de `private` a `internal` (mínimo cambio de visibilidad, mismo ensamblado) para reutilizarlo desde `ApplyDynamicSettings` en vez de duplicar su lógica. Desbloquea que `AutoPerformanceManager` pueda alternar FSR en vivo — la integración en sí sigue sin implementarse, solo se quitó el bloqueo |
+| `feat(fsr): auto-switch to FSR when AutoPerformanceManager throttles below 1.0x` | `c8c0201e0` | `AutoPerformanceManager.swift`, `PerformanceOverlay.swift` | Implementada tal como se pidió. Restaura `resscale` y `scalingFilter` juntos; nunca toca `scalingFilterLevel`; respeta si el usuario ya tenía FSR activado manualmente; no fuerza FSR si el throttle no cruza 1.0x. Solo funciona porque el fix anterior de `ApplyDynamicSettings` ya está en vivo |

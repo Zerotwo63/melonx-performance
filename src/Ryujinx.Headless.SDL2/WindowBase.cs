@@ -276,7 +276,12 @@ namespace Ryujinx.Headless.SDL2
             Renderer?.Window.SetAntiAliasing((Graphics.GAL.AntiAliasing)AntiAliasing);
         }
 
-        private void SetScalingFilter()
+        // Was private — made internal so Program.ApplyDynamicSettings can
+        // re-invoke it after a live update_settings_external call, not just
+        // once during Render()'s initial setup. Same assembly, so internal
+        // is the minimal visibility change needed; reuses this method's
+        // existing logic instead of duplicating its two lines at the call site.
+        internal void SetScalingFilter()
         {
             Renderer?.Window.SetScalingFilter((Graphics.GAL.ScalingFilter)ScalingFilter);
             Renderer?.Window.SetScalingFilterLevel(ScalingFilterLevel);
