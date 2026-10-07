@@ -865,7 +865,7 @@ namespace Ryujinx.Cpu.LightningJit
             // JIT26 requirement #8: BTI variant of the SAME real-allocator
             // probe, run only after the plain result above - diagnostic
             // only, never a substitute for the JIT26 preparation itself.
-            RunPostJit26BtiProbe();
+            RunPostJit26BtiProbe(ExpectedValue);
 
             return (succeeded, rwAddress, rxAddress, returnValue, bytesWritten, bytesReadBackRw);
         }
@@ -880,7 +880,7 @@ namespace Ryujinx.Cpu.LightningJit
         /// NativeMemoryDiagnostics.RunSingleMapBtiControl's doc comment for
         /// the full derivation.
         /// </summary>
-        private void RunPostJit26BtiProbe()
+        private void RunPostJit26BtiProbe(uint expectedValue)
         {
             const uint BtiC = 0xD503245F;
 
@@ -894,7 +894,7 @@ namespace Ryujinx.Cpu.LightningJit
             }
 
             Assembler asm = new(writer);
-            asm.Mov(Register(0, OperandType.I32), unchecked((int)ExpectedValue));
+            asm.Mov(Register(0, OperandType.I32), unchecked((int)expectedValue));
             asm.Ret();
 
             byte[] code = writer.AsByteSpan().ToArray();
