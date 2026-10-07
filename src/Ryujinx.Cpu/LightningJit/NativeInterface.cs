@@ -2,7 +2,10 @@ using ARMeilleure.Memory;
 using Ryujinx.Cpu.LightningJit.State;
 using Ryujinx.Common.Logging;
 using System;
-using System.Threading;
+// Not `using System.Threading;` - this file already has its own
+// `ExecutionContext` (Ryujinx.Cpu.LightningJit.State.ExecutionContext),
+// which collides with System.Threading.ExecutionContext. Interlocked is
+// referenced fully-qualified below instead.
 
 namespace Ryujinx.Cpu.LightningJit
 {
@@ -73,7 +76,7 @@ namespace Ryujinx.Cpu.LightningJit
 
         public static ulong GetFunctionAddress(IntPtr framePointer, ulong address)
         {
-            int calls = Interlocked.Increment(ref s_getFunctionAddressCalls);
+            int calls = System.Threading.Interlocked.Increment(ref s_getFunctionAddressCalls);
             bool verbose = calls <= 10 || calls % 50 == 0;
 
             if (verbose)
