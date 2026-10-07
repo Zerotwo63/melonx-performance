@@ -877,7 +877,7 @@ struct BootAndLiveContainerTests {
         BootDiagnostics.shared.beginBoot()
         BootDiagnostics.shared.log("LightningJit.SameMapProbe mapped", result: "rw=0xAAA0,rx=0xBBB0")
         BootDiagnostics.shared.log("LightningJit.SameMapProbe call begin")
-        BootDiagnostics.shared.log("LightningJit.SameMapProbe call returned", result: "result=0x12345678")
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe call returned", result: "result=0x5678")
         BootDiagnostics.shared.log("LightningJit.SameMapProbe PASS")
 
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -886,7 +886,7 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.dispatchProbeRxAddress == "0xBBB0")
         #expect(BootDiagnostics.shared.dispatchProbeCallAttempted)
         #expect(BootDiagnostics.shared.dispatchProbeReturned)
-        #expect(BootDiagnostics.shared.dispatchProbeReturnValue == "0x12345678")
+        #expect(BootDiagnostics.shared.dispatchProbeReturnValue == "0x5678")
         #expect(BootDiagnostics.shared.dispatchProbePassed == true)
 
         BootDiagnostics.shared.beginBoot()
@@ -1085,14 +1085,39 @@ struct BootAndLiveContainerTests {
 
     @Test func fase8bProtectionFieldsTrack() async throws {
         BootDiagnostics.shared.beginBoot()
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RW", result: "regionBase=0x7040004000,regionSize=0x4000,current=READ,WRITE,max=READ,WRITE,EXECUTE")
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x7000004000,regionSize=0x4000,current=READ,EXECUTE,max=READ,EXECUTE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RW", result: "regionBase=0x7040004000,regionSize=0x4000,current=READ+WRITE,max=READ+WRITE+EXECUTE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x7000004000,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
 
         try await Task.sleep(nanoseconds: 200_000_000)
 
-        #expect(BootDiagnostics.shared.dispatchProbeRwCurrentProtection == "READ,WRITE")
-        #expect(BootDiagnostics.shared.dispatchProbeRxCurrentProtection == "READ,EXECUTE")
-        #expect(BootDiagnostics.shared.dispatchProbeRxMaxProtection == "READ,EXECUTE")
+        #expect(BootDiagnostics.shared.dispatchProbeRwCurrentProtection == "READ+WRITE")
+        #expect(BootDiagnostics.shared.dispatchProbeRxCurrentProtection == "READ+EXECUTE")
+        #expect(BootDiagnostics.shared.dispatchProbeRxMaxProtection == "READ+EXECUTE")
+    }
+
+    /// Diagnóstico real #9 (FASE 9A, regression guard): C#'s `bool.
+    /// ToString()`/`$"{boolExpr}"` produce "True"/"False" (capitalized) -
+    /// several FASE 8 events used that, while OTHERS used literal
+    /// lowercase "true"/"false" strings. A plain `== "true"` comparison
+    /// silently read every capitalized one as false regardless of the
+    /// real value - this is why the final snapshot contradicted the
+    /// chronological STAGES list on real device. Every other test in this
+    /// file happens to log lowercase "true"/"false" fixtures, which would
+    /// have passed under the OLD buggy comparison too - this test exists
+    /// specifically to exercise the capitalized case the bug actually hit.
+    @Test func booleanFieldsParseRegardlessOfCSharpToStringCasing() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "True")
+        BootDiagnostics.shared.log("dispatchProbeCacheSyncCompleted", result: "True")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "True")
+        BootDiagnostics.shared.log("singleMapPassed", result: "False")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.dispatchProbeRwRxBytesMatch == true)
+        #expect(BootDiagnostics.shared.dispatchProbeCacheSyncCompleted == true)
+        #expect(BootDiagnostics.shared.nativeControlPassed == true)
+        #expect(BootDiagnostics.shared.singleMapPassed == false)
     }
 
     @Test func fase8cCacheSyncFieldsTrack() async throws {
@@ -1132,7 +1157,7 @@ struct BootAndLiveContainerTests {
         BootDiagnostics.shared.log("singleMapExecAddress", result: "0xAAAA")
         BootDiagnostics.shared.log("singleMapCallAttempted", result: "true")
         BootDiagnostics.shared.log("singleMapReturned", result: "true")
-        BootDiagnostics.shared.log("singleMapReturnValue", result: "0x12345678")
+        BootDiagnostics.shared.log("singleMapReturnValue", result: "0x5678")
         BootDiagnostics.shared.log("singleMapPassed", result: "true")
 
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -1166,6 +1191,71 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.sameMapNativeBeforeRetStage == 2)
     }
 
+    @Test func fase9aTXMStatusFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("hasTXMEnvVar", result: "1")
+        BootDiagnostics.shared.log("hasTXMDetected", result: "true")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.hasTXMEnvVar == "1")
+        #expect(BootDiagnostics.shared.hasTXMDetected == "true")
+    }
+
+    @Test func fase9cSingleMapProtectionFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapAllocationAPI", result: "mmap")
+        BootDiagnostics.shared.log("singleMapMmapFlags", result: "MAP_ANON|MAP_PRIVATE,PROT_READ|PROT_WRITE")
+        BootDiagnostics.shared.log("singleMapCurrentProtectionBefore", result: "READ+WRITE")
+        BootDiagnostics.shared.log("singleMapMaxProtectionBefore", result: "READ+WRITE+EXECUTE")
+        BootDiagnostics.shared.log("singleMapMprotectResult", result: "0")
+        BootDiagnostics.shared.log("singleMapMprotectErrno", result: "0")
+        BootDiagnostics.shared.log("singleMapCurrentProtectionAfter", result: "READ+EXECUTE")
+        BootDiagnostics.shared.log("singleMapMaxProtectionAfter", result: "READ+WRITE+EXECUTE")
+        BootDiagnostics.shared.log("singleMapDcacheFlushAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapIcacheInvalidateAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapCacheSyncCompleted", result: "True")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapAllocationAPI == "mmap")
+        #expect(BootDiagnostics.shared.singleMapCurrentProtectionBefore == "READ+WRITE")
+        #expect(BootDiagnostics.shared.singleMapCurrentProtectionAfter == "READ+EXECUTE")
+        #expect(BootDiagnostics.shared.singleMapMprotectResult == "0")
+        #expect(BootDiagnostics.shared.singleMapDcacheFlushAttempted)
+        #expect(BootDiagnostics.shared.singleMapIcacheInvalidateAttempted)
+        #expect(BootDiagnostics.shared.singleMapCacheSyncCompleted == true)
+    }
+
+    @Test func fase9dBtiControlFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("singleMapBtiAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "true")
+        BootDiagnostics.shared.log("singleMapBtiReturnValue", result: "0x5678")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.singleMapPlainAttempted)
+        #expect(BootDiagnostics.shared.singleMapPlainReturned == false)
+        #expect(BootDiagnostics.shared.singleMapBtiAttempted)
+        #expect(BootDiagnostics.shared.singleMapBtiReturned)
+        #expect(BootDiagnostics.shared.singleMapBtiReturnValue == "0x5678")
+    }
+
+    @Test func fase9hSingleMapStageMarkerFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("singleMapNativeEntryStage", result: "1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(BootDiagnostics.shared.singleMapNativeEntryStage == 1)
+        #expect(BootDiagnostics.shared.singleMapNativeBeforeRetStage == 0)
+
+        BootDiagnostics.shared.log("singleMapNativeBeforeRetStage", result: "2")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(BootDiagnostics.shared.singleMapNativeBeforeRetStage == 2)
+    }
+
     // MARK: - A1-A7 classification
 
     @Test func classifiesA1WhenRwRxBytesDiffer() async throws {
@@ -1180,7 +1270,7 @@ struct BootAndLiveContainerTests {
     @Test func classifiesA2WhenRxLacksExecute() async throws {
         enterProbeHungState()
         BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ,WRITE,max=READ,WRITE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+WRITE,max=READ+WRITE")
         try await Task.sleep(nanoseconds: 150_000_000)
 
         let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
@@ -1190,7 +1280,7 @@ struct BootAndLiveContainerTests {
     @Test func classifiesA4WhenNativeControlFails() async throws {
         enterProbeHungState()
         BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ,EXECUTE,max=READ,EXECUTE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
         BootDiagnostics.shared.log("nativeControlPassed", result: "false")
         try await Task.sleep(nanoseconds: 150_000_000)
 
@@ -1201,7 +1291,7 @@ struct BootAndLiveContainerTests {
     @Test func classifiesA5WhenSingleMapPassesButDualMapHangs() async throws {
         enterProbeHungState()
         BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ,EXECUTE,max=READ,EXECUTE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
         BootDiagnostics.shared.log("nativeControlPassed", result: "true")
         BootDiagnostics.shared.log("singleMapPassed", result: "true")
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -1213,7 +1303,7 @@ struct BootAndLiveContainerTests {
     @Test func classifiesA6WhenEnteredButNeverReachedRet() async throws {
         enterProbeHungState()
         BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
-        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ,EXECUTE,max=READ,EXECUTE")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
         BootDiagnostics.shared.log("nativeControlPassed", result: "true")
         BootDiagnostics.shared.log("singleMapPassed", result: "false")
         BootDiagnostics.shared.log("sameMapNativeEntryStage", result: "1")
@@ -1223,6 +1313,70 @@ struct BootAndLiveContainerTests {
         #expect(stage.hasPrefix("A6"))
     }
 
+    @Test func classifiesA8WhenBtiReturnsButPlainDoesNot() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "true")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A8"))
+    }
+
+    @Test func classifiesA9WhenTXMDetectedAndPlainFails() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "false")
+        BootDiagnostics.shared.log("hasTXMDetected", result: "true")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A9"))
+    }
+
+    @Test func classifiesA10WhenSingleMapEnteredButNeverReachedRet() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "false")
+        BootDiagnostics.shared.log("hasTXMDetected", result: "false")
+        BootDiagnostics.shared.log("singleMapNativeEntryStage", result: "1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A10"))
+    }
+
+    @Test func classifiesA11WhenSingleMapFailsWithNoOtherMatchingEvidence() async throws {
+        enterProbeHungState()
+        BootDiagnostics.shared.log("dispatchProbeRwRxBytesMatch", result: "true")
+        BootDiagnostics.shared.log("NativeMemoryDiagnostics.QueryProtection RX", result: "regionBase=0x1,regionSize=0x4000,current=READ+EXECUTE,max=READ+EXECUTE")
+        BootDiagnostics.shared.log("nativeControlPassed", result: "true")
+        BootDiagnostics.shared.log("singleMapPassed", result: "false")
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainReturned", result: "false")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "false")
+        BootDiagnostics.shared.log("hasTXMDetected", result: "false")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("A11"))
+    }
+
     @Test func beginBootResetsFase8Fields() async throws {
         BootDiagnostics.shared.beginBoot()
         BootDiagnostics.shared.log("dispatchProbeBytesRx", result: "AA")
@@ -1230,6 +1384,10 @@ struct BootAndLiveContainerTests {
         BootDiagnostics.shared.log("singleMapPassed", result: "true")
         BootDiagnostics.shared.log("isArm64e", result: "true")
         BootDiagnostics.shared.log("sameMapNativeEntryStage", result: "1")
+        BootDiagnostics.shared.log("hasTXMDetected", result: "true")
+        BootDiagnostics.shared.log("singleMapPlainAttempted", result: "true")
+        BootDiagnostics.shared.log("singleMapBtiReturned", result: "true")
+        BootDiagnostics.shared.log("singleMapNativeEntryStage", result: "1")
 
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(BootDiagnostics.shared.dispatchProbeBytesRx == "AA")
@@ -1244,6 +1402,10 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.isArm64e == nil)
         #expect(BootDiagnostics.shared.sameMapNativeEntryStage == 0)
         #expect(BootDiagnostics.shared.sameMapNativeBeforeRetStage == 0)
+        #expect(BootDiagnostics.shared.hasTXMDetected == nil)
+        #expect(BootDiagnostics.shared.singleMapPlainAttempted == false)
+        #expect(BootDiagnostics.shared.singleMapBtiReturned == false)
+        #expect(BootDiagnostics.shared.singleMapNativeEntryStage == 0)
     }
 
     @Test func buildReportIncludesFase8Section() {
@@ -1254,5 +1416,18 @@ struct BootAndLiveContainerTests {
         #expect(report.contains("nativeControlPassed ="))
         #expect(report.contains("singleMapPassed ="))
         #expect(report.contains("sameMapNativeEntryStage ="))
+    }
+
+    @Test func buildReportIncludesFase9Section() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("SINGLE-MAP DEEP DIVE (FASES 9A-9H"))
+        #expect(report.contains("hasTXMDetected ="))
+        #expect(report.contains("singleMapCurrentProtectionBefore ="))
+        #expect(report.contains("singleMapPlainAttempted"))
+        #expect(report.contains("singleMapBtiAttempted"))
+        #expect(report.contains("singleMapNativeEntryStage ="))
+        #expect(report.contains("NOT implemented this round"))
     }
 }

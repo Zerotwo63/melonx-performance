@@ -253,6 +253,46 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var sameMapNativeEntryStage = 0
     @Published private(set) var sameMapNativeBeforeRetStage = 0
 
+    // FASE 9A (TXM hypothesis): this fork already has a Trusted Execution
+    // Monitor workaround (DualMappedJitAllocator.hasTXM / BreakGetJITMapping),
+    // but RunSingleMapControl's plain mmap/mprotect path never goes through
+    // it - if TXM enforcement is real and active, that is independently
+    // consistent with single-mapped JIT execution hanging even though every
+    // software-level VM-protection/cache-sync check reports success.
+    @Published private(set) var hasTXMEnvVar: String?
+    @Published private(set) var hasTXMDetected: String?
+
+    // FASE 9C: real current/max protection of singleMapExecAddress BEFORE
+    // and AFTER mprotect, plus the raw mmap/mprotect call results - never
+    // assuming mprotect()==0 means the kernel's own VM bookkeeping agrees.
+    @Published private(set) var singleMapCurrentProtectionBefore: String?
+    @Published private(set) var singleMapMaxProtectionBefore: String?
+    @Published private(set) var singleMapCurrentProtectionAfter: String?
+    @Published private(set) var singleMapMaxProtectionAfter: String?
+    @Published private(set) var singleMapDcacheFlushAttempted = false
+    @Published private(set) var singleMapIcacheInvalidateAttempted = false
+    @Published private(set) var singleMapCacheSyncCompleted: Bool?
+    @Published private(set) var singleMapAllocationAPI: String?
+    @Published private(set) var singleMapMmapFlags: String?
+    @Published private(set) var singleMapMprotectResult: String?
+    @Published private(set) var singleMapMprotectErrno: String?
+    @Published private(set) var singleMapPlainAttempted = false
+    @Published private(set) var singleMapPlainReturned = false
+
+    // FASE 9D: Test B - same single-map mechanism, but the generated code
+    // starts with `bti c`. If B passes while Test A (plain) does not, that
+    // is direct evidence of a BTI landing-pad requirement.
+    @Published private(set) var singleMapBtiAttempted = false
+    @Published private(set) var singleMapBtiReturned = false
+    @Published private(set) var singleMapBtiReturnValue: String?
+
+    // FASE 9H: a THIRD single-map variant with entry/before-RET native
+    // stage markers, run on its own background thread+poller.
+    // 0 = never entered, 1 = entered but never reached the pre-RET marker,
+    // 2 = reached the pre-RET marker (RET/return path itself unverified).
+    @Published private(set) var singleMapNativeEntryStage = 0
+    @Published private(set) var singleMapNativeBeforeRetStage = 0
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -423,6 +463,26 @@ final class BootDiagnostics: ObservableObject {
             self.pointerAuthenticationRelevant = nil
             self.sameMapNativeEntryStage = 0
             self.sameMapNativeBeforeRetStage = 0
+            self.hasTXMEnvVar = nil
+            self.hasTXMDetected = nil
+            self.singleMapCurrentProtectionBefore = nil
+            self.singleMapMaxProtectionBefore = nil
+            self.singleMapCurrentProtectionAfter = nil
+            self.singleMapMaxProtectionAfter = nil
+            self.singleMapDcacheFlushAttempted = false
+            self.singleMapIcacheInvalidateAttempted = false
+            self.singleMapCacheSyncCompleted = nil
+            self.singleMapAllocationAPI = nil
+            self.singleMapMmapFlags = nil
+            self.singleMapMprotectResult = nil
+            self.singleMapMprotectErrno = nil
+            self.singleMapPlainAttempted = false
+            self.singleMapPlainReturned = false
+            self.singleMapBtiAttempted = false
+            self.singleMapBtiReturned = false
+            self.singleMapBtiReturnValue = nil
+            self.singleMapNativeEntryStage = 0
+            self.singleMapNativeBeforeRetStage = 0
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -585,16 +645,47 @@ final class BootDiagnostics: ObservableObject {
                     )
                 }
 
-                if isArm64e == "true" {
+                if Self.isTrue(isArm64e) {
                     return (
                         "A7 - possible arm64e/PAC indirect-call issue",
                         "this process is running as arm64e (pointerAuthenticationRelevant=true) - a function pointer produced manually from the RX alias may need pointer-authentication treatment before an indirect call/branch that this probe does not apply; nativeControlPassed=\(nativeControlPassed.map { "\($0)" } ?? "unknown") (if that also failed, prefer A4 instead - this is only reached when the control call itself succeeded)"
                     )
                 }
 
+                // FASE 9: evidence that single-map ALSO fails (not just the
+                // dual-mapped alias) narrows things further. A5 above only
+                // fires when single-map passed; these fire when it didn't.
+                if singleMapPlainAttempted && !singleMapPlainReturned {
+                    if singleMapBtiReturned {
+                        return (
+                            "A8 - BTI landing-pad requirement on indirect branches",
+                            "Test A (plain mov w0,#0x5678/ret) did not return, but Test B (bti c; mov w0,#0x5678; ret) through the EXACT SAME single-map mechanism did (singleMapBtiReturnValue=\(singleMapBtiReturnValue ?? "none")) - this is direct, not inferred, evidence that indirect branches (BLR) into JIT memory on this device/OS require a BTI landing pad that the real JIT-generated code is not currently emitting"
+                        )
+                    }
+
+                    if Self.isTrue(hasTXMDetected) {
+                        return (
+                            "A9 - Trusted Execution Monitor (TXM) likely blocking non-blessed pages",
+                            "this device has TXM present (hasTXMDetected=true, hasTXMEnvVar=\(hasTXMEnvVar ?? "unknown")), and RunSingleMapControl's plain mmap/mprotect path never goes through this fork's existing TXM workaround (BreakGetJITMapping/BreakpointJIT.framework, gated by hasTXM) - singleMapCurrentProtectionAfter=\(singleMapCurrentProtectionAfter ?? "unknown") shows standard VM protection bits report EXECUTE, but TXM is a SEPARATE enforcement layer Apple added on top of standard VM protection that can still block real instruction fetch on a page the monitor never \"blessed\", even when mprotect/vm_protect report success - this is the most plausible explanation given singleMapReturned=false despite every software-level check passing, but has NOT been proven by directly disabling/bypassing TXM for this specific test and observing success"
+                        )
+                    }
+
+                    if singleMapNativeEntryStage > 0 && singleMapNativeBeforeRetStage == 0 {
+                        return (
+                            "A10 - single-mapped code entered but RET never completed",
+                            "the single-map stage-marker probe wrote its entry marker (singleMapNativeEntryStage=\(singleMapNativeEntryStage)) but never reached the marker right before RET - execution started inside the single-mapped region and then got stuck or faulted before reaching RET, mirroring A6 but WITHOUT any dual-mapping/remap involved at all"
+                        )
+                    }
+
+                    return (
+                        "A11 - single-map ALSO fails to return (not dual-map specific)",
+                        "singleMapPlainAttempted=true but singleMapPlainReturned=false using a classic single mmap-RW/mprotect-RX region with no dual alias at all - this supersedes A5 (which assumed single-map was a clean control): DualMappedNoWxCache is no longer the leading suspect, since the identical minimal function also fails to return when single-mapped; singleMapCurrentProtectionAfter=\(singleMapCurrentProtectionAfter ?? "unknown"), singleMapMprotectResult=\(singleMapMprotectResult ?? "unknown"), hasTXMDetected=\(hasTXMDetected ?? "unknown")"
+                    )
+                }
+
                 return (
                     "Scenario A - dual mapping / icache / invocación de código generado",
-                    "the same-map probe (known function through the exact same cache DispatchLoop uses) did not complete successfully, but none of A1/A2/A3/A4/A5/A6/A7's specific evidence matched; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), dispatchProbeCallAttempted=\(dispatchProbeCallAttempted) - see the full report's \"DUAL-MAP PROBE HANG INVESTIGATION\" section for every FASE 8A-8G field"
+                    "the same-map probe (known function through the exact same cache DispatchLoop uses) did not complete successfully, but none of A1/A2/A3/A4/A5/A6/A7/A8/A9/A10/A11's specific evidence matched; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), dispatchProbeCallAttempted=\(dispatchProbeCallAttempted) - see the full report's \"DUAL-MAP PROBE HANG INVESTIGATION\" and \"SINGLE-MAP DEEP DIVE\" sections for every FASE 8A-8G/9A-9H field"
                 )
             }
 
@@ -716,9 +807,9 @@ final class BootDiagnostics: ObservableObject {
         case "environment":
             environment = result
         case "JIT verification result":
-            jitVerified = (result == "true")
+            jitVerified = (Self.isTrue(result))
         case "initialize_dualmapped result", "initialize_dualmapped returned":
-            dualMappedJIT = (result == "true")
+            dualMappedJIT = (Self.isTrue(result))
         case "ryujinx.start begin":
             ryujinxStarted = true
         case "MetalView.createView begin", "MetalView.createView end":
@@ -903,7 +994,7 @@ final class BootDiagnostics: ObservableObject {
         case "JITMEM bytes read back (RX alias)":
             jitMemBytesReadBack = result
         case "JITMEM RW/RX bytes match":
-            jitMemBytesMatch = (result == "true")
+            jitMemBytesMatch = (Self.isTrue(result))
 
         // Diagnóstico real #7: isolating exactly where inside LightningJit
         // execution progress stops (FASES 1-7, see field doc comments above).
@@ -965,7 +1056,7 @@ final class BootDiagnostics: ObservableObject {
             }
         case "LightningJit.FunctionTable lookup":
             if let result, let s = Self.extractField(result, "inRange") {
-                functionTableAddressInRange = (s == "true")
+                functionTableAddressInRange = (Self.isTrue(s))
             }
         case "LightningJit.FunctionTable level indices":
             functionTableLevelIndices = result
@@ -978,11 +1069,11 @@ final class BootDiagnostics: ObservableObject {
         case "dispatchProbeBytesRx":
             dispatchProbeBytesRx = result
         case "dispatchProbeRwRxBytesMatch":
-            dispatchProbeRwRxBytesMatch = (result == "true")
+            dispatchProbeRwRxBytesMatch = (Self.isTrue(result))
         case "LightningJit.SameMapProbe coherence pattern A":
-            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternAMatch = (s == "true") }
+            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternAMatch = (Self.isTrue(s)) }
         case "LightningJit.SameMapProbe coherence pattern B":
-            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternBMatch = (s == "true") }
+            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternBMatch = (Self.isTrue(s)) }
         case "NativeMemoryDiagnostics.QueryProtection RW":
             if let result {
                 dispatchProbeRwCurrentProtection = Self.extractField(result, "current")
@@ -1000,17 +1091,17 @@ final class BootDiagnostics: ObservableObject {
         case "dispatchProbeIcacheInvalidateRxAttempted":
             dispatchProbeIcacheInvalidateRxAttempted = true
         case "dispatchProbeCacheSyncCompleted":
-            dispatchProbeCacheSyncCompleted = (result == "true")
+            dispatchProbeCacheSyncCompleted = (Self.isTrue(result))
         case "nativeControlPointer":
             nativeControlPointer = result
         case "nativeControlCallAttempted":
-            nativeControlCallAttempted = (result == "true")
+            nativeControlCallAttempted = (Self.isTrue(result))
         case "nativeControlReturned":
-            nativeControlReturned = (result == "true")
+            nativeControlReturned = (Self.isTrue(result))
         case "nativeControlReturnValue":
             nativeControlReturnValue = result
         case "nativeControlPassed":
-            nativeControlPassed = (result == "true")
+            nativeControlPassed = (Self.isTrue(result))
         case "singleMapRwAddress":
             singleMapRwAddress = result
         case "singleMapExecAddress":
@@ -1018,13 +1109,13 @@ final class BootDiagnostics: ObservableObject {
         case "singleMapBytesReadBack":
             singleMapBytesReadBack = result
         case "singleMapCallAttempted":
-            singleMapCallAttempted = (result == "true")
+            singleMapCallAttempted = (Self.isTrue(result))
         case "singleMapReturned":
-            singleMapReturned = (result == "true")
+            singleMapReturned = (Self.isTrue(result))
         case "singleMapReturnValue":
             singleMapReturnValue = result
         case "singleMapPassed":
-            singleMapPassed = (result == "true")
+            singleMapPassed = (Self.isTrue(result))
         case "processArchitecture":
             processArchitecture = result
         case "isArm64e":
@@ -1035,6 +1126,46 @@ final class BootDiagnostics: ObservableObject {
             if let result, let n = Int(result) { sameMapNativeEntryStage = n }
         case "sameMapNativeBeforeRetStage":
             if let result, let n = Int(result) { sameMapNativeBeforeRetStage = n }
+        case "hasTXMEnvVar":
+            hasTXMEnvVar = result
+        case "hasTXMDetected":
+            hasTXMDetected = result
+        case "singleMapCurrentProtectionBefore":
+            singleMapCurrentProtectionBefore = result
+        case "singleMapMaxProtectionBefore":
+            singleMapMaxProtectionBefore = result
+        case "singleMapCurrentProtectionAfter":
+            singleMapCurrentProtectionAfter = result
+        case "singleMapMaxProtectionAfter":
+            singleMapMaxProtectionAfter = result
+        case "singleMapDcacheFlushAttempted":
+            singleMapDcacheFlushAttempted = true
+        case "singleMapIcacheInvalidateAttempted":
+            singleMapIcacheInvalidateAttempted = true
+        case "singleMapCacheSyncCompleted":
+            singleMapCacheSyncCompleted = (Self.isTrue(result))
+        case "singleMapAllocationAPI":
+            singleMapAllocationAPI = result
+        case "singleMapMmapFlags":
+            singleMapMmapFlags = result
+        case "singleMapMprotectResult":
+            singleMapMprotectResult = result
+        case "singleMapMprotectErrno":
+            singleMapMprotectErrno = result
+        case "singleMapPlainAttempted":
+            singleMapPlainAttempted = (Self.isTrue(result))
+        case "singleMapPlainReturned":
+            singleMapPlainReturned = (Self.isTrue(result))
+        case "singleMapBtiAttempted":
+            singleMapBtiAttempted = (Self.isTrue(result))
+        case "singleMapBtiReturned":
+            singleMapBtiReturned = (Self.isTrue(result))
+        case "singleMapBtiReturnValue":
+            singleMapBtiReturnValue = result
+        case "singleMapNativeEntryStage":
+            if let result, let n = Int(result) { singleMapNativeEntryStage = n }
+        case "singleMapNativeBeforeRetStage":
+            if let result, let n = Int(result) { singleMapNativeBeforeRetStage = n }
         default:
             break
         }
@@ -1181,10 +1312,36 @@ final class BootDiagnostics: ObservableObject {
             "processArchitecture", "isArm64e", "pointerAuthenticationRelevant",
             "sameMapNativeEntryStage", "sameMapNativeBeforeRetStage",
             "LightningJit.SameMapStageProbe call begin", "LightningJit.SameMapStageProbe call returned",
+            // FASE 9A-9H.
+            "hasTXMEnvVar", "hasTXMDetected",
+            "singleMapCurrentProtectionBefore", "singleMapMaxProtectionBefore",
+            "singleMapCurrentProtectionAfter", "singleMapMaxProtectionAfter",
+            "singleMapDcacheFlushAttempted", "singleMapIcacheInvalidateAttempted", "singleMapCacheSyncCompleted",
+            "singleMapAllocationAPI", "singleMapMmapFlags", "singleMapMprotectResult", "singleMapMprotectErrno",
+            "singleMapPlainAttempted", "singleMapPlainReturned",
+            "singleMapBtiAttempted", "singleMapBtiReturned", "singleMapBtiReturnValue",
+            "singleMapNativeEntryStage", "singleMapNativeBeforeRetStage",
+            "LightningJit.SingleMapStageProbe call begin", "LightningJit.SingleMapStageProbe call returned",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
         }
+    }
+
+    /// Diagnóstico real #9 (FASE 9A, bug real encontrado): C#'s `bool.
+    /// ToString()` produces "True"/"False" (capitalized) - several FASE 8
+    /// events reported this way (e.g. `completed.ToString()`,
+    /// `passed.ToString()`, `{boolExpression}` inside a C# `$"..."`
+    /// interpolation) while OTHER events used literal lowercase "true"/
+    /// "false" strings instead. A plain `result == "true"` comparison
+    /// silently read as false for every event in the first group, no
+    /// matter what the real value was - this is why the final snapshot
+    /// showed stale/wrong values while the chronological STAGES list (raw
+    /// text) showed the real ones. Case-insensitive on purpose so this
+    /// never breaks again regardless of which casing a future C# call site
+    /// happens to use.
+    private static func isTrue(_ value: String?) -> Bool {
+        value?.caseInsensitiveCompare("true") == .orderedSame
     }
 
     /// Pulls `key=value` out of a comma-separated "k1=v1,k2=v2" result
@@ -1409,6 +1566,29 @@ final class BootDiagnostics: ObservableObject {
         lines.append("pointerAuthenticationRelevant = \(pointerAuthenticationRelevant ?? "unknown")")
         lines.append("sameMapNativeEntryStage = \(sameMapNativeEntryStage)")
         lines.append("sameMapNativeBeforeRetStage = \(sameMapNativeBeforeRetStage)")
+        lines.append("")
+        lines.append("SINGLE-MAP DEEP DIVE (FASES 9A-9H - same execution fails using single-map, not just dual-map):")
+        lines.append("hasTXMEnvVar = \(hasTXMEnvVar ?? "unknown")")
+        lines.append("hasTXMDetected = \(hasTXMDetected ?? "unknown")")
+        lines.append("singleMapAllocationAPI = \(singleMapAllocationAPI ?? "none")")
+        lines.append("singleMapMmapFlags = \(singleMapMmapFlags ?? "none")")
+        lines.append("singleMapCurrentProtectionBefore = \(singleMapCurrentProtectionBefore ?? "none")")
+        lines.append("singleMapMaxProtectionBefore = \(singleMapMaxProtectionBefore ?? "none")")
+        lines.append("singleMapMprotectResult = \(singleMapMprotectResult ?? "none")")
+        lines.append("singleMapMprotectErrno = \(singleMapMprotectErrno ?? "none")")
+        lines.append("singleMapCurrentProtectionAfter = \(singleMapCurrentProtectionAfter ?? "none")")
+        lines.append("singleMapMaxProtectionAfter = \(singleMapMaxProtectionAfter ?? "none")")
+        lines.append("singleMapDcacheFlushAttempted = \(singleMapDcacheFlushAttempted)")
+        lines.append("singleMapIcacheInvalidateAttempted = \(singleMapIcacheInvalidateAttempted)")
+        lines.append("singleMapCacheSyncCompleted = \(singleMapCacheSyncCompleted.map { "\($0)" } ?? "unknown")")
+        lines.append("singleMapPlainAttempted (Test A: mov w0,#0x5678 / ret) = \(singleMapPlainAttempted)")
+        lines.append("singleMapPlainReturned = \(singleMapPlainReturned)")
+        lines.append("singleMapBtiAttempted (Test B: bti c / mov w0,#0x5678 / ret) = \(singleMapBtiAttempted)")
+        lines.append("singleMapBtiReturned = \(singleMapBtiReturned)")
+        lines.append("singleMapBtiReturnValue = \(singleMapBtiReturnValue ?? "none")")
+        lines.append("singleMapNativeEntryStage = \(singleMapNativeEntryStage)")
+        lines.append("singleMapNativeBeforeRetStage = \(singleMapNativeBeforeRetStage)")
+        lines.append("NOTE: PAC/ptrauth-signed function-pointer test (FASE 9E), raw-vs-PAC native shim matrix (FASE 9F), and signal-based fault classification (FASE 9G) were NOT implemented this round - see report for why (no native dylib rebuild in iOS CI, no on-device opcode verification capability for PACIA/AUTIA, no verified Darwin ucontext_t/mcontext64 offsets to safely parse a signal frame).")
         lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")

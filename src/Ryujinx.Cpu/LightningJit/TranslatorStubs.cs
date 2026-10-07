@@ -669,7 +669,19 @@ namespace Ryujinx.Cpu.LightningJit
         /// </summary>
         public (bool succeeded, IntPtr rwAddress, IntPtr rxAddress, uint returnValue, byte[] bytesWritten, byte[] bytesReadBack) RunSameMapProbe()
         {
-            const uint ExpectedValue = 0x12345678;
+            // Diagnóstico real #9 (FASE 9B, bug real encontrado): this used
+            // to say `const uint ExpectedValue = 0x12345678;`, but
+            // Assembler.Mov(Operand, int) is just Movz(rd, imm, 0) - ONE
+            // MOVZ instruction with no shift, which only ever loads the
+            // LOW 16 bits (confirmed by reading Assembler.cs: the ulong
+            // overload is the one that emits a real MOVZ+MOVK sequence for
+            // values that don't fit in 16 bits, but that overload was not
+            // used here). The real generated/executed instruction was
+            // always `mov w0, #0x5678; ret` - matching the actual observed
+            // bytes (00CF8A52C0035FD6) exactly. Per explicit preference,
+            // keep the single-instruction test and fix the expected value
+            // instead of switching to a multi-instruction load.
+            const uint ExpectedValue = 0x5678;
 
             CodeWriter writer = new();
 
@@ -782,6 +794,14 @@ namespace Ryujinx.Cpu.LightningJit
             // call below could be affected.
             NativeMemoryDiagnostics.ReportArchitecture();
 
+            // Diagnóstico real #9: this device's chip (Apple A19 Pro) very
+            // likely has TXM - this fork's OWN existing code already has a
+            // dedicated workaround for it (DualMappedJitAllocator.hasTXM /
+            // BreakGetJITMapping) that RunSingleMapControl below does NOT
+            // use at all (plain mmap/mprotect). If TXM enforcement is why
+            // execution never completes, this is a real, independent signal.
+            NativeMemoryDiagnostics.ReportTxmStatus();
+
             // FASE 8D: a trivially-verifiable, already-compiled-into-the-
             // process native function (getpid), called through the EXACT
             // SAME Marshal.GetDelegateForFunctionPointer mechanism used
@@ -789,10 +809,22 @@ namespace Ryujinx.Cpu.LightningJit
             // anything specific to DualMappedNoWxCache.
             NativeMemoryDiagnostics.RunNativeControl();
 
-            // FASE 8E: the SAME instruction bytes, mapped through a classic
-            // single mmap-RW/mprotect-RX region (no dual alias at all),
-            // called through the SAME delegate mechanism.
+            // FASE 8E/9C: the SAME instruction bytes, mapped through a
+            // classic single mmap-RW/mprotect-RX region (no dual alias at
+            // all), called through the SAME delegate mechanism, with full
+            // before/after protection + cache-sync instrumentation.
             NativeMemoryDiagnostics.RunSingleMapControl(code, ExpectedValue);
+
+            // FASE 9D: Test B - same single-map mechanism, but the
+            // generated code starts with `bti c`. Compared against Test A
+            // (plain, no BTI) above - if B succeeds and A does not, that
+            // is direct evidence of a BTI landing-pad requirement.
+            NativeMemoryDiagnostics.RunSingleMapBtiControl(ExpectedValue);
+
+            // FASE 9H: a THIRD, separate single-map variant with entry/
+            // before-RET native stage markers, run on its own background
+            // thread+poller so a hang here does not block anything else.
+            NativeMemoryDiagnostics.RunSingleMapStageProbe();
 
             // FASE 8G: a SEPARATE stage-marker variant of this same probe,
             // launched on its own background thread so that if IT also

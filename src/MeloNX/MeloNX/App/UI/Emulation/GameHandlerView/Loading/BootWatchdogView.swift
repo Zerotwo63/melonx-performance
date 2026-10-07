@@ -142,6 +142,16 @@ struct BootWatchdogView: View {
                 row("Architecture / arm64e", "\(diagnostics.processArchitecture ?? "?") / \(diagnostics.isArm64e ?? "unknown")")
             }
 
+            Text("SINGLE-MAP DEEP DIVE (FASES 9A-9H)").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("TXM detected / env var", "\(diagnostics.hasTXMDetected ?? "unknown") / \(diagnostics.hasTXMEnvVar ?? "unknown")")
+                row("Single-map protection (before -> after)", "\(diagnostics.singleMapCurrentProtectionBefore ?? "?") -> \(diagnostics.singleMapCurrentProtectionAfter ?? "?")")
+                row("Single-map mprotect result/errno", "\(diagnostics.singleMapMprotectResult ?? "?") / \(diagnostics.singleMapMprotectErrno ?? "?")")
+                row("Plain test (A) attempted/returned", "\(diagnostics.singleMapPlainAttempted) / \(diagnostics.singleMapPlainReturned)")
+                row("BTI test (B) attempted/returned", "\(diagnostics.singleMapBtiAttempted) / \(diagnostics.singleMapBtiReturned) (value \(diagnostics.singleMapBtiReturnValue ?? "none"))")
+                row("Single-map stage (entry/beforeRet)", "\(diagnostics.singleMapNativeEntryStage) / \(diagnostics.singleMapNativeBeforeRetStage)")
+            }
+
             Text("NativeInterface / FunctionTable").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GetFunctionAddress entered", "\(diagnostics.nativeGetFunctionAddressEntered) (calls \(diagnostics.nativeGetFunctionAddressCalls))")
