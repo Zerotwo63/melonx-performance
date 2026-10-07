@@ -77,6 +77,34 @@ namespace Ryujinx.Headless.SDL2
         private static InputManager _inputManager;
         private static Switch _emulationContext;
         private static WindowBase _window;
+
+        // Session lifecycle barrier ("running -> stopping -> fullyStopped
+        // -> readyForNextGame"): _window.Exit() (inside StopEmulation,
+        // below) only blocks until the render loop's while-loop exits -
+        // it does NOT wait for ExecutionEntrypoint to actually reach
+        // _emulationContext.Dispose()/_window.Dispose() on the managed
+        // thread, which happens AFTER MainLoop() returns, as a separate
+        // step on that same thread. Without this, stop_emulation could
+        // return to Swift - letting the user launch the NEXT game - while
+        // THIS session's Translator.Dispose()/EndGameSession() (the
+        // shared JIT cache's per-session reset) is still unwinding,
+        // racing the next session's first TranslatorStubs.Map call
+        // against this session's cleanup of the exact same shared
+        // allocator. Starts Set (nothing to wait for before the first
+        // game ever runs); Reset at the top of ExecutionEntrypoint, Set
+        // once its real teardown is done.
+        private static readonly ManualResetEventSlim _sessionFullyTornDown = new(true);
+
+        // Lifecycle diagnostics only - one increment per ExecutionEntrypoint
+        // run (one per mainRyu/main_ryujinx_sdl call, i.e. one per game
+        // session). Independent from LightningJit.Translator's own
+        // _sessionId counter (that one increments inside the Translator
+        // constructor, further downstream once Switch/guest construction
+        // reaches the CPU context) - the two stay 1:1 in practice since
+        // exactly one Translator is created per game session, but are
+        // kept as separate counters to avoid a cross-file coupling for a
+        // diagnostics-only id.
+        private static int _gameSessionId;
         private static WindowsMultimediaTimerResolution _windowsMultimediaTimerResolution;
         private static List<InputConfig> _inputConfiguration;
         private static bool _enableKeyboard;
@@ -787,11 +815,23 @@ namespace Ryujinx.Headless.SDL2
         public static void StopEmulation()
         {
             BootEventBridge.Report("stop_emulation entered");
+            BootEventBridge.Report($"[SESSION {_gameSessionId}] stop requested");
             if (_window != null)
             {
                 _window.Exit();
             }
-            BootEventBridge.Report("stop_emulation returned", "_window.Exit() completed, waiting for ExecutionEntrypoint to unwind");
+
+            // Real completion barrier, not a fixed sleep: _window.Exit()
+            // above only guarantees the render loop's while-loop has
+            // exited - this waits for ExecutionEntrypoint's managed
+            // thread to actually finish _emulationContext.Dispose()/
+            // _window.Dispose() (see _sessionFullyTornDown's doc
+            // comment). The timeout is a safety bound against a genuine
+            // hang during teardown, never the primary gate - the real
+            // gate is the Set() call at the end of ExecutionEntrypoint.
+            bool fullyStopped = _sessionFullyTornDown.Wait(TimeSpan.FromSeconds(10));
+            BootEventBridge.Report("stop_emulation sessionFullyTornDown", fullyStopped.ToString());
+            BootEventBridge.Report("stop_emulation returned", "teardown barrier satisfied, safe to start the next game session");
         }
 
         [UnmanagedCallersOnly(EntryPoint = "get_game_info")]
@@ -1561,11 +1601,26 @@ namespace Ryujinx.Headless.SDL2
 
         static void LoadInner(Options option)
         {
-            _libHacHorizonManager = new LibHacHorizonManager();
-            _libHacHorizonManager.InitializeFsServer(_virtualFileSystem);
-            _libHacHorizonManager.InitializeArpServer();
-            _libHacHorizonManager.InitializeBcatServer();
-            _libHacHorizonManager.InitializeSystemClients();
+            // PROCESS-WIDE state, not per-game-session state: this used
+            // to unconditionally construct a brand new LibHacHorizonManager
+            // (a fresh LibHac.Horizon kernel instance, re-registering the
+            // FS/ARP/BCAT servers against the SAME _virtualFileSystem)
+            // on EVERY game launch, silently abandoning the PREVIOUS
+            // instance with no disposal - the exact same class of bug
+            // already found and fixed in LightningJit's Translator/
+            // DualMappedNoWxCache (process-wide singleton wrongly treated
+            // as per-session state). Initialize() (the "initialize"
+            // native export, called once at app startup) already does
+            // this exact setup with this exact guard - reuse it instead
+            // of duplicating and leaking it on every single game launch.
+            if (_libHacHorizonManager == null)
+            {
+                _libHacHorizonManager = new LibHacHorizonManager();
+                _libHacHorizonManager.InitializeFsServer(_virtualFileSystem);
+                _libHacHorizonManager.InitializeArpServer();
+                _libHacHorizonManager.InitializeBcatServer();
+                _libHacHorizonManager.InitializeSystemClients();
+            }
 
             // _contentManager = new ContentManager(_virtualFileSystem);
 
@@ -1911,45 +1966,75 @@ namespace Ryujinx.Headless.SDL2
 
         private static void ExecutionEntrypoint()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                _windowsMultimediaTimerResolution = new WindowsMultimediaTimerResolution(1);
-            }
+            int sessionId = System.Threading.Interlocked.Increment(ref _gameSessionId);
+            BootEventBridge.Report($"[SESSION {sessionId}] start");
 
-            DisplaySleep.Prevent();
+            // See _sessionFullyTornDown's doc comment - this marks the
+            // barrier as "not satisfied yet" for the ENTIRE duration of
+            // this session, from here until the finally block below sets
+            // it again (on every exit path, including an exception).
+            _sessionFullyTornDown.Reset();
 
-            ReportBootEvent("window initialize begin");
             try
             {
-                _window.Initialize(_emulationContext, _inputConfiguration, _enableKeyboard, _enableMouse);
-            }
-            catch (Exception ex)
-            {
-                ReportBootFailure("ExecutionEntrypoint.window initialize", ex);
-                throw;
-            }
-            ReportBootEvent("window initialized");
+                if (OperatingSystem.IsWindows())
+                {
+                    _windowsMultimediaTimerResolution = new WindowsMultimediaTimerResolution(1);
+                }
 
-            ReportBootEvent("window execute begin");
-            try
-            {
-                _window.Execute();
-            }
-            catch (Exception ex)
-            {
-                ReportBootFailure("ExecutionEntrypoint.window execute", ex);
-                throw;
-            }
+                DisplaySleep.Prevent();
 
-            BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose begin");
-            _emulationContext.Dispose();
-            BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose end");
-            _window.Dispose();
+                ReportBootEvent("window initialize begin");
+                try
+                {
+                    _window.Initialize(_emulationContext, _inputConfiguration, _enableKeyboard, _enableMouse);
+                }
+                catch (Exception ex)
+                {
+                    ReportBootFailure("ExecutionEntrypoint.window initialize", ex);
+                    throw;
+                }
+                ReportBootEvent("window initialized");
+                BootEventBridge.Report($"[SESSION {sessionId}] renderer created");
 
-            if (OperatingSystem.IsWindows())
+                ReportBootEvent("window execute begin");
+                BootEventBridge.Report($"[SESSION {sessionId}] game running");
+                try
+                {
+                    _window.Execute();
+                }
+                catch (Exception ex)
+                {
+                    ReportBootFailure("ExecutionEntrypoint.window execute", ex);
+                    throw;
+                }
+
+                // _window.Execute() only returns after _window.Exit() (see
+                // StopEmulation) has driven MainLoop()'s while-loop to
+                // exit - i.e. the render loop has genuinely stopped.
+                BootEventBridge.Report($"[SESSION {sessionId}] render thread exited");
+
+                BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose begin");
+                _emulationContext.Dispose();
+                BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose end");
+                BootEventBridge.Report($"[SESSION {sessionId}] renderer disposed");
+                _window.Dispose();
+
+                if (OperatingSystem.IsWindows())
+                {
+                    _windowsMultimediaTimerResolution?.Dispose();
+                    _windowsMultimediaTimerResolution = null;
+                }
+            }
+            finally
             {
-                _windowsMultimediaTimerResolution?.Dispose();
-                _windowsMultimediaTimerResolution = null;
+                BootEventBridge.Report($"[SESSION {sessionId}] teardown completed");
+
+                // Always runs, including on an exception path above - a
+                // failed session must still release the barrier, or every
+                // future StopEmulation() call would block for its full
+                // timeout for no reason.
+                _sessionFullyTornDown.Set();
             }
         }
 

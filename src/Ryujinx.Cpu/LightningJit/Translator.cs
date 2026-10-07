@@ -623,6 +623,7 @@ namespace Ryujinx.Cpu.LightningJit
                 if (disposing)
                 {
                     BootEventBridge.Report($"GAME SESSION {_sessionId} shutdown begin");
+                    int regionsReleasedForSummary = 0;
 
                     // "threads stopped": this Dispose() runs from
                     // LightningJitCpuContext.Dispose(), itself only
@@ -669,7 +670,8 @@ namespace Ryujinx.Cpu.LightningJit
                         // fully Dispose().
                         if (ReferenceEquals(_dualMappedCache, originalDualMappedCache))
                         {
-                            _dualMappedCache.EndGameSession();
+                            var (regionsReleased, _) = _dualMappedCache.EndGameSession();
+                            regionsReleasedForSummary = regionsReleased;
                         }
                         else
                         {
@@ -701,6 +703,21 @@ namespace Ryujinx.Cpu.LightningJit
 
                     BootEventBridge.Report("translatorDisposed", "true");
                     BootEventBridge.Report($"GAME SESSION {_sessionId} translator disposed");
+
+                    // Consolidated, single-line, grep-able teardown
+                    // summary - "resumen verificable" requested
+                    // explicitly. guestThreads*/renderThreadAlive* are
+                    // NOT included here: no public counter is exposed by
+                    // KProcess/the GPU render thread for an independent
+                    // measurement without modifying Ryujinx.HLE's kernel
+                    // layer or the render-thread code, out of scope this
+                    // round - see gpuContextDisposed/surfaceCreatedAfterTeardown
+                    // (reported separately, from MoltenVKWindow.FinalizeWindowRenderer,
+                    // right before this Translator.Dispose() runs) for
+                    // the GPU/surface side of this same summary.
+                    BootEventBridge.Report(
+                        $"GAME SESSION {_sessionId} teardown summary",
+                        $"jitMappingsReleased={regionsReleasedForSummary},translatorDisposed=true,dispatchStubReset=true,threadLocalCachesReset=true,jitStateReset=true");
 
                     BootEventBridge.Report($"GAME SESSION {_sessionId} shutdown complete");
                 }

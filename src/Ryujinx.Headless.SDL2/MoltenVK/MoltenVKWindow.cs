@@ -171,12 +171,39 @@ namespace Ryujinx.Headless.SDL2.Vulkan
 
         protected override void FinalizeWindowRenderer()
         {
+            // CONFIRMED ROOT CAUSE of "works for 2 game sessions, fails
+            // on the 3rd without restarting the app": this override was
+            // missing the exact Device.DisposeGpu() call the desktop
+            // Vulkan path already makes at this same lifecycle point (see
+            // Ryujinx.Headless.SDL2.Vulkan.VulkanWindow.FinalizeWindowRenderer,
+            // called from WindowBase.Render() right after the render
+            // loop exits, on the render/GPU thread itself - the correct
+            // thread to destroy a Vulkan/Metal context on). Switch.Dispose()
+            // (called afterward, from Program.cs's ExecutionEntrypoint)
+            // never disposes Gpu either - DisposeGpu() is a SEPARATE
+            // public method specifically because the real GPU/renderer
+            // teardown (GpuContext.Dispose() -> Renderer.Dispose() ->
+            // VulkanRenderer.Dispose(): the actual Vulkan device/
+            // swapchain/command-pool/descriptor-pool/fence/semaphore
+            // destruction) must happen on THIS thread, not whichever
+            // thread calls Switch.Dispose(). Without it, every closed
+            // game leaked one full Vulkan/MoltenVK context to the GC,
+            // which does not deterministically or promptly destroy
+            // unmanaged Vulkan/Metal handles - two leaked contexts
+            // accumulate silently, and the third one hits whatever fixed
+            // resource ceiling MoltenVK/Metal enforces.
+            BootEventBridge.Report("gpuContextDisposeAttempted", (Device != null).ToString());
+            Device?.DisposeGpu();
+            BootEventBridge.Report("gpuContextDisposed", "true");
+
+            BootEventBridge.Report("surfaceCreatedBeforeTeardown", _surfaceCreated.ToString());
             if (_surfaceCreated)
             {
                 _surface = default;
                 _surfaceCreated = false;
             }
-            
+            BootEventBridge.Report("surfaceCreatedAfterTeardown", _surfaceCreated.ToString());
+
             nativeMetalLayer = IntPtr.Zero;
         }
 

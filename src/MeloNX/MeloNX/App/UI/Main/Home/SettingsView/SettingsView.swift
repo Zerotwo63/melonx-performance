@@ -444,10 +444,67 @@ struct SettingsViewNew: View {
     private var graphicsSettings: some View {
         SettingsSection(title: "Graphics & Performance") {
             resolutionScaleCard
+            upscalingFilterCard
             anisotropicFilteringCard
             graphicsTogglesCard
             performanceOverlayCard
             aspectRatioCard
+        }
+    }
+
+    /// Global default for the same real, already-existing core option
+    /// (--scaling-filter / --scaling-filter-level, see
+    /// Ryujinx.buildCommandLineArgs -> Ryujinx.Headless.SDL2.Options ->
+    /// Ryujinx.Graphics.Vulkan.Effects.FsrScalingFilter, upstream, never
+    /// touched) that PerGameSettingsView already exposes per-game. This
+    /// was only wired into the per-game screen when FSR support was
+    /// first merged in - the global Settings screen never got its own
+    /// copy, which is why FSR looked "missing" from Settings even though
+    /// it was real and connected one screen over. Same binding pattern
+    /// as resolutionScaleCard above (`config` is already
+    /// Binding<Ryujinx.Arguments>, so `config.scalingFilter` is itself a
+    /// Binding<ScalingFilter> via dynamic member lookup - no separate
+    /// configBinding(_:) helper needed here).
+    private var upscalingFilterCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    labelWithIcon("Upscaling Filter", iconName: "arrow.up.left.and.arrow.down.right")
+                        .font(.headline)
+                    Spacer()
+                }
+
+                Picker("Upscaling Filter", selection: config.scalingFilter) {
+                    ForEach(ScalingFilter.allCases, id: \.self) { filter in
+                        Text(filter.displayName).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if config.scalingFilter.wrappedValue == .fsr {
+                    VStack(spacing: 8) {
+                        Slider(value: config.scalingFilterLevel, in: 0...100, step: 1)
+
+                        HStack {
+                            Text("Sharper")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+
+                            Text("FSR Sharpening: \(Int(config.scalingFilterLevel.wrappedValue))")
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
+
+                            Spacer()
+
+                            Text("Softer")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
         }
     }
     
