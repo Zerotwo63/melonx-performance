@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using System;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -118,7 +119,17 @@ namespace Ryujinx.Memory
         {
             if (_dualMappedAllocator != null && DualMappedJitAllocator.hasTXM)
             {
-                DualMappedJitAllocator.BreakJITDetach();
+                BootEventBridge.Report("jit26DetachAttempted", "true");
+                try
+                {
+                    DualMappedJitAllocator.BreakJITDetach();
+                    BootEventBridge.Report("jit26DetachReturned", "true");
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("MemoryBlock.Detach BreakJITDetach", ex);
+                    BootEventBridge.Report("jit26DetachReturned", "false");
+                }
             }
         }
 

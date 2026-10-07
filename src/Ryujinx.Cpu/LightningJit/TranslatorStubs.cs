@@ -840,17 +840,102 @@ namespace Ryujinx.Cpu.LightningJit
                 returnValue = probe();
                 BootEventBridge.Report("LightningJit.SameMapProbe call returned", $"result=0x{returnValue:X}");
                 succeeded = returnValue == ExpectedValue;
+
+                // JIT26 requirement #7: this IS the "prepare RX region
+                // via JIT26 -> write RW alias -> sync caches -> execute
+                // RX" sequence, now that AllocateDualMapping (via
+                // _dualMappedCache -> DualMappedJitAllocator) actually
+                // participates in the JIT26 protocol when TXM presence
+                // cannot be disproven. Reported under the EXACT field
+                // names requested, as a companion to the existing
+                // dispatchProbe* fields above (never replacing them).
+                BootEventBridge.Report("postJit26PlainProbeReturned", "true");
+                BootEventBridge.Report("postJit26PlainProbeValue", $"0x{returnValue:X}");
             }
             catch (Exception ex)
             {
                 BootEventBridge.ReportFail("LightningJit.SameMapProbe call", ex);
+                BootEventBridge.Report("postJit26PlainProbeReturned", "false");
             }
 
             BootEventBridge.Report(
                 succeeded ? "LightningJit.SameMapProbe PASS" : "LightningJit.SameMapProbe FAIL",
                 $"expected=0x{ExpectedValue:X},actual=0x{returnValue:X}");
 
+            // JIT26 requirement #8: BTI variant of the SAME real-allocator
+            // probe, run only after the plain result above - diagnostic
+            // only, never a substitute for the JIT26 preparation itself.
+            RunPostJit26BtiProbe();
+
             return (succeeded, rwAddress, rxAddress, returnValue, bytesWritten, bytesReadBackRw);
+        }
+
+        /// <summary>
+        /// FASE 10D/requirement #8: `bti c; mov w0,#0x5678; ret`, mapped
+        /// through the SAME real allocator RunSameMapProbe uses
+        /// (_dualMappedCache/_noWxCache/JitCache - never the standalone
+        /// single-map diagnostic path), so a pass/fail here is evidence
+        /// about the REAL JIT cache, not a side-channel. BTI encoding
+        /// (0xD503245F) hand-verified bit-by-bit in a previous round - see
+        /// NativeMemoryDiagnostics.RunSingleMapBtiControl's doc comment for
+        /// the full derivation.
+        /// </summary>
+        private void RunPostJit26BtiProbe()
+        {
+            const uint BtiC = 0xD503245F;
+
+            CodeWriter writer = new();
+            writer.WriteInstruction(BtiC);
+
+            if (RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+            {
+                BootEventBridge.Report("postJit26BtiProbeReturned", "false");
+                return;
+            }
+
+            Assembler asm = new(writer);
+            asm.Mov(Register(0, OperandType.I32), unchecked((int)ExpectedValue));
+            asm.Ret();
+
+            byte[] code = writer.AsByteSpan().ToArray();
+            IntPtr rxAddress;
+
+            try
+            {
+                if (_noWxCache != null)
+                {
+                    rxAddress = _noWxCache.MapPageAligned(code, out _);
+                }
+                else if (_dualMappedCache != null)
+                {
+                    rxAddress = _dualMappedCache.MapPageAligned(code, out _);
+                }
+                else
+                {
+                    rxAddress = JitCache.Map(code);
+                }
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.PostJit26BtiProbe map", ex);
+                BootEventBridge.Report("postJit26BtiProbeReturned", "false");
+                return;
+            }
+
+            try
+            {
+                BootEventBridge.Report("LightningJit.PostJit26BtiProbe call begin", $"rx=0x{rxAddress:X}");
+                ProbeDelegate probe = Marshal.GetDelegateForFunctionPointer<ProbeDelegate>(rxAddress);
+                uint result = probe();
+                BootEventBridge.Report("LightningJit.PostJit26BtiProbe call returned", $"result=0x{result:X}");
+                BootEventBridge.Report("postJit26BtiProbeReturned", "true");
+                BootEventBridge.Report("postJit26BtiProbeValue", $"0x{result:X}");
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.PostJit26BtiProbe call", ex);
+                BootEventBridge.Report("postJit26BtiProbeReturned", "false");
+            }
         }
 
         private static byte[] ReadBytesSafe(IntPtr address, int length, string label)

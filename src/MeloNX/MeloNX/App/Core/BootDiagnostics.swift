@@ -353,6 +353,41 @@ final class BootDiagnostics: ObservableObject {
     // PAC_REQUIRED, BTI_REQUIRED, UNKNOWN_EXECUTION_FAILURE.
     @Published private(set) var singleMapExecutionClassification: String?
 
+    // JIT26 protocol (StikDebug/StikJIT universal breakpoint protocol -
+    // mov x16,#1/brk #0xf00d/ret to prepare a region, mov x16,#0/brk
+    // #0xf00d/ret to detach): real evidence of whether
+    // DualMappedJitAllocator actually participated in the documented
+    // iOS 26+ TXM/SPTM protocol (via BreakGetJITMapping/BreakJITDetach,
+    // BreakpointJIT.framework) for each region it allocated, rather than
+    // silently falling through to a plain mmap/mprotect that iOS strips
+    // EXECUTE from on a TXM-enforcing device.
+    @Published private(set) var jit26ProtocolRequired: Bool?
+    @Published private(set) var csDebugged: Bool?
+    @Published private(set) var jit26ScriptConnected: Bool?
+    @Published private(set) var jit26PrepareCalls: Int?
+    @Published private(set) var jit26PrepareSuccesses: Int?
+    @Published private(set) var jit26DetachAttempted: Bool?
+    @Published private(set) var jit26DetachReturned: Bool?
+    @Published private(set) var jitReadyBeforeRegionPreparation: Bool?
+
+    // Per-region fields - last-reported region only (one DualMappedJitAllocator
+    // call at a time: shared cache, local cache, signal-handler trampoline).
+    @Published private(set) var jit26RegionIndex: Int?
+    @Published private(set) var jit26RegionOriginalAddress: String?
+    @Published private(set) var jit26RegionLength: String?
+    @Published private(set) var jit26RegionPreparedAddress: String?
+    @Published private(set) var jit26RegionPrepareReturned: Bool?
+
+    // Post-JIT26 validation (requirement #7/#8): the SAME SameMapProbe/BTI
+    // sequence as before, but now run against the REAL allocator after it
+    // has had a chance to actually participate in the JIT26 protocol -
+    // companions to dispatchProbeReturned/dispatchProbeReturnValue, never
+    // a replacement for them.
+    @Published private(set) var postJit26PlainProbeReturned: Bool?
+    @Published private(set) var postJit26PlainProbeValue: String?
+    @Published private(set) var postJit26BtiProbeReturned: Bool?
+    @Published private(set) var postJit26BtiProbeValue: String?
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -574,6 +609,23 @@ final class BootDiagnostics: ObservableObject {
             self.btiCallReturned = false
             self.btiCallReturnValue = nil
             self.singleMapExecutionClassification = nil
+            self.jit26ProtocolRequired = nil
+            self.csDebugged = nil
+            self.jit26ScriptConnected = nil
+            self.jit26PrepareCalls = nil
+            self.jit26PrepareSuccesses = nil
+            self.jit26DetachAttempted = nil
+            self.jit26DetachReturned = nil
+            self.jitReadyBeforeRegionPreparation = nil
+            self.jit26RegionIndex = nil
+            self.jit26RegionOriginalAddress = nil
+            self.jit26RegionLength = nil
+            self.jit26RegionPreparedAddress = nil
+            self.jit26RegionPrepareReturned = nil
+            self.postJit26PlainProbeReturned = nil
+            self.postJit26PlainProbeValue = nil
+            self.postJit26BtiProbeReturned = nil
+            self.postJit26BtiProbeValue = nil
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -662,9 +714,21 @@ final class BootDiagnostics: ObservableObject {
     /// actually stopped at - never a guess, only state already observed.
     func classifyWatchdogFailure() -> (stage: String, reason: String) {
         if jitVerified != true || dualMappedJIT != true {
+            // JIT26: if the protocol is required but this process was
+            // never under CS_DEBUGGED when DualMappedJitAllocator tried to
+            // prepare a region, that is the direct, named reason - not a
+            // generic timeout. jit26ProtocolRequired/csDebugged are only
+            // set once AllocateDualMapping actually ran at least once.
+            if jit26ProtocolRequired == true && csDebugged == false {
+                return (
+                    "JIT - JIT26 protocol required but not attached",
+                    "TXM/SPTM presence could not be disproven (jit26ProtocolRequired=true) but this process was not under CS_DEBUGGED when DualMappedJitAllocator last tried to prepare a region - no external StikDebug/StikJIT script has attached yet to service the JIT26PrepareRegion breakpoint; jit26PrepareCalls=\(jit26PrepareCalls.map { "\($0)" } ?? "0"), jit26PrepareSuccesses=\(jit26PrepareSuccesses.map { "\($0)" } ?? "0")"
+                )
+            }
+
             return (
                 "JIT",
-                "timeout before JIT verification completed; jitVerified=\(jitVerified.map { "\($0)" } ?? "unknown"), dualMappedJIT=\(dualMappedJIT.map { "\($0)" } ?? "unknown")"
+                "timeout before JIT verification completed; jitVerified=\(jitVerified.map { "\($0)" } ?? "unknown"), dualMappedJIT=\(dualMappedJIT.map { "\($0)" } ?? "unknown"), jit26ProtocolRequired=\(jit26ProtocolRequired.map { "\($0)" } ?? "unknown"), csDebugged=\(csDebugged.map { "\($0)" } ?? "unknown")"
             )
         }
 
@@ -1360,6 +1424,40 @@ final class BootDiagnostics: ObservableObject {
             btiCallReturnValue = result
         case "classification":
             singleMapExecutionClassification = result
+        case "jit26ProtocolRequired":
+            jit26ProtocolRequired = Self.isTrue(result)
+        case "csDebugged":
+            csDebugged = Self.isTrue(result)
+        case "jit26ScriptConnected":
+            jit26ScriptConnected = Self.isTrue(result)
+        case "jit26PrepareCalls":
+            if let result, let n = Int(result) { jit26PrepareCalls = n }
+        case "jit26PrepareSuccesses":
+            if let result, let n = Int(result) { jit26PrepareSuccesses = n }
+        case "jit26DetachAttempted":
+            jit26DetachAttempted = Self.isTrue(result)
+        case "jit26DetachReturned":
+            jit26DetachReturned = Self.isTrue(result)
+        case "jitReadyBeforeRegionPreparation":
+            jitReadyBeforeRegionPreparation = Self.isTrue(result)
+        case "jit26RegionIndex":
+            if let result, let n = Int(result) { jit26RegionIndex = n }
+        case "jit26RegionOriginalAddress":
+            jit26RegionOriginalAddress = result
+        case "jit26RegionLength":
+            jit26RegionLength = result
+        case "jit26RegionPreparedAddress":
+            jit26RegionPreparedAddress = result
+        case "jit26RegionPrepareReturned":
+            jit26RegionPrepareReturned = Self.isTrue(result)
+        case "postJit26PlainProbeReturned":
+            postJit26PlainProbeReturned = Self.isTrue(result)
+        case "postJit26PlainProbeValue":
+            postJit26PlainProbeValue = result
+        case "postJit26BtiProbeReturned":
+            postJit26BtiProbeReturned = Self.isTrue(result)
+        case "postJit26BtiProbeValue":
+            postJit26BtiProbeValue = result
         default:
             break
         }
@@ -1530,6 +1628,15 @@ final class BootDiagnostics: ObservableObject {
             "pacCallAttempted", "pacPointerRaw", "pacPointerSigned", "pacCallReturned", "pacCallSkippedReason",
             "btiCallAttempted", "btiCallReturned", "btiCallReturnValue",
             "classification",
+            // JIT26 protocol.
+            "jit26ProtocolRequired", "csDebugged", "jit26ScriptConnected",
+            "jit26PrepareCalls", "jit26PrepareSuccesses",
+            "jit26DetachAttempted", "jit26DetachReturned", "jitReadyBeforeRegionPreparation",
+            "jit26RegionIndex", "jit26RegionOriginalAddress", "jit26RegionLength",
+            "jit26RegionPreparedAddress", "jit26RegionPrepareReturned",
+            "postJit26PlainProbeReturned", "postJit26PlainProbeValue",
+            "postJit26BtiProbeReturned", "postJit26BtiProbeValue",
+            "LightningJit.PostJit26BtiProbe call begin", "LightningJit.PostJit26BtiProbe call returned",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
@@ -1821,6 +1928,22 @@ final class BootDiagnostics: ObservableObject {
         lines.append("btiCallReturnValue = \(btiCallReturnValue ?? "none")")
         lines.append("")
         lines.append("classification = \(singleMapExecutionClassification ?? "unknown")")
+        lines.append("")
+        lines.append("JIT26 PROTOCOL (StikDebug/StikJIT universal breakpoint protocol - real allocator, not a side-channel):")
+        lines.append("jit26ProtocolRequired = \(jit26ProtocolRequired.map { "\($0)" } ?? "unknown")")
+        lines.append("csDebugged = \(csDebugged.map { "\($0)" } ?? "unknown")")
+        lines.append("jit26ScriptConnected = \(jit26ScriptConnected.map { "\($0)" } ?? "unknown")")
+        lines.append("jitReadyBeforeRegionPreparation = \(jitReadyBeforeRegionPreparation.map { "\($0)" } ?? "unknown")")
+        lines.append("jit26PrepareCalls / jit26PrepareSuccesses = \(jit26PrepareCalls.map { "\($0)" } ?? "0") / \(jit26PrepareSuccesses.map { "\($0)" } ?? "0")")
+        lines.append("last region: index=\(jit26RegionIndex.map { "\($0)" } ?? "none"), originalAddress=\(jit26RegionOriginalAddress ?? "none"), length=\(jit26RegionLength ?? "none"), preparedAddress=\(jit26RegionPreparedAddress ?? "none"), prepareReturned=\(jit26RegionPrepareReturned.map { "\($0)" } ?? "unknown")")
+        lines.append("jit26DetachAttempted / jit26DetachReturned = \(jit26DetachAttempted.map { "\($0)" } ?? "unknown") / \(jit26DetachReturned.map { "\($0)" } ?? "unknown")")
+        lines.append("")
+        lines.append("POST-JIT26 VALIDATION (same probe as dispatchProbe*, run against the REAL allocator after JIT26 preparation):")
+        lines.append("postJit26PlainProbeReturned = \(postJit26PlainProbeReturned.map { "\($0)" } ?? "unknown")")
+        lines.append("postJit26PlainProbeValue = \(postJit26PlainProbeValue ?? "none")")
+        lines.append("postJit26BtiProbeReturned = \(postJit26BtiProbeReturned.map { "\($0)" } ?? "unknown")")
+        lines.append("postJit26BtiProbeValue = \(postJit26BtiProbeValue ?? "none")")
+        lines.append("MINIMUM SUCCESS CRITERION: postJit26PlainProbeReturned=true AND postJit26PlainProbeValue=0x5678, then translationAttempts>0.")
         lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")

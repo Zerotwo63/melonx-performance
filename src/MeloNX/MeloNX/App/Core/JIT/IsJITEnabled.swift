@@ -91,9 +91,61 @@ func notnil(_ condition: Any?) -> Bool {
     }
 }
 
+/// Tri-state TXM/SPTM presence - `.unknown` MUST NOT be treated the same as
+/// `.notPresent` by any caller. The only direct evidence this process can
+/// gather is the img4 firmware file's presence (`.present` when found), but
+/// its absence does NOT prove TXM is inactive - the exact Preboot path
+/// layout and firmware filename are not officially documented and could
+/// differ across iOS 26/27 builds or device generations, so a missed file
+/// lookup is evidence of nothing. Per this round's real diagnostic
+/// (mprotect(PROT_READ|PROT_EXEC) reporting success on an Apple A19 Pro /
+/// iOS 26+ device while mach_vm_region shows the page is NOT actually
+/// executable afterward - NON_EXECUTABLE_MAPPING), treating an inconclusive
+/// file check as proof of absence is exactly the bug that made
+/// DualMappedJitAllocator skip the JIT26/BreakGetJITMapping protocol
+/// entirely and fall through to a plain mmap/mprotect that iOS silently
+/// strips EXECUTE from.
+public enum TXMStatus: String {
+    case present
+    case notPresent
+    case unknown
+}
+
 public extension ProcessInfo {
+    /// `.present` when the img4 file check succeeds (direct evidence).
+    /// `.notPresent` only when running an iOS version that predates the
+    /// documented iOS 26 TXM/SPTM introduction - a confident negative.
+    /// `.unknown` when running iOS 26+ but the file check could not find
+    /// the expected file - TXM/SPTM may still be enforced; never treat
+    /// this as `.notPresent`.
+    var txmStatus: TXMStatus {
+        let fileCheckPresent: Bool = {
+            if let boot = FileManager.default.filePath(atPath: "/System/Volumes/Preboot", withLength: 36), let file = FileManager.default.filePath(atPath: "\(boot)/boot", withLength: 96) {
+                return access("\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0
+            } else {
+                return (FileManager.default.filePath(atPath: "/private/preboot", withLength: 96).map { access("\($0)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0 }) ?? false
+            }
+        }()
+
+        if fileCheckPresent {
+            return .present
+        }
+
+        if #available(iOS 26.0, *) {
+            return .unknown
+        }
+
+        return .notPresent
+    }
+
+    /// Compatibility shim for every existing `if hasTXM` call site
+    /// (DualMappedJitAllocator's protocol gate, StikEnableJIT's script
+    /// attachment decision, LaunchGameHandler's LiveContainer check) -
+    /// `.unknown` collapses to `true` so the SAFE, JIT26-protocol-compatible
+    /// path is the default on iOS 26+ whenever presence cannot be
+    /// disproven, per this round's explicit requirement.
     var hasTXM: Bool {
-        { if let boot = FileManager.default.filePath(atPath: "/System/Volumes/Preboot", withLength: 36), let file = FileManager.default.filePath(atPath: "\(boot)/boot", withLength: 96) { return access("\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0 } else { return (FileManager.default.filePath(atPath: "/private/preboot", withLength: 96).map { access("\($0)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0 }) ?? false } }()
+        txmStatus != .notPresent
     }
 }
 

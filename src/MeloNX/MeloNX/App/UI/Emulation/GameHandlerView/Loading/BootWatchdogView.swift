@@ -163,6 +163,17 @@ struct BootWatchdogView: View {
                 row("PAC call", "not implemented (\(diagnostics.pacCallSkippedReason ?? "n/a"))")
             }
 
+            Text("JIT26 PROTOCOL (StikDebug/StikJIT universal breakpoint protocol)").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("Protocol required / CS_DEBUGGED", "\(diagnostics.jit26ProtocolRequired.map { "\($0)" } ?? "unknown") / \(diagnostics.csDebugged.map { "\($0)" } ?? "unknown")")
+                row("Script connected", diagnostics.jit26ScriptConnected.map { "\($0)" } ?? "unknown")
+                row("Ready before region prep (must be false)", diagnostics.jitReadyBeforeRegionPreparation.map { "\($0)" } ?? "unknown")
+                row("Prepare calls / successes", "\(diagnostics.jit26PrepareCalls.map { "\($0)" } ?? "0") / \(diagnostics.jit26PrepareSuccesses.map { "\($0)" } ?? "0")")
+                row("Detach attempted/returned", "\(diagnostics.jit26DetachAttempted.map { "\($0)" } ?? "unknown") / \(diagnostics.jit26DetachReturned.map { "\($0)" } ?? "unknown")")
+                row("Post-JIT26 plain probe", "\(diagnostics.postJit26PlainProbeReturned.map { "\($0)" } ?? "unknown") (value \(diagnostics.postJit26PlainProbeValue ?? "none"))")
+                row("Post-JIT26 BTI probe", "\(diagnostics.postJit26BtiProbeReturned.map { "\($0)" } ?? "unknown") (value \(diagnostics.postJit26BtiProbeValue ?? "none"))")
+            }
+
             Text("NativeInterface / FunctionTable").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GetFunctionAddress entered", "\(diagnostics.nativeGetFunctionAddressEntered) (calls \(diagnostics.nativeGetFunctionAddressCalls))")

@@ -132,7 +132,21 @@ struct MeloNXApp: View {
             env.set()
         }
         
-        EnvironmentVariable(string: "HAS_TXM", value: ProcessInfo.processInfo.hasTXM && !ProcessInfo.processInfo.isiOSAppOnMac ? "1" : "0").set()
+        // JIT26: tri-state, not binary - "unknown" must reach the
+        // C# side distinctly from "not present" (see TXMStatus's doc
+        // comment in IsJITEnabled.swift). DualMappedJitAllocator.TxmStatus
+        // parses this exact 3-value string.
+        let txmEnvValue: String
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            txmEnvValue = "0"
+        } else {
+            switch ProcessInfo.processInfo.txmStatus {
+            case .present: txmEnvValue = "1"
+            case .notPresent: txmEnvValue = "0"
+            case .unknown: txmEnvValue = "unknown"
+            }
+        }
+        EnvironmentVariable(string: "HAS_TXM", value: txmEnvValue).set()
 
         RyujinxBridge.initialize()
         

@@ -1347,6 +1347,62 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.singleMapExecutionClassification == "NON_EXECUTABLE_MAPPING")
     }
 
+    @Test func jit26ProtocolFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("jit26ProtocolRequired", result: "true")
+        BootDiagnostics.shared.log("csDebugged", result: "False")
+        BootDiagnostics.shared.log("jit26ScriptConnected", result: "false")
+        BootDiagnostics.shared.log("jitReadyBeforeRegionPreparation", result: "false")
+        BootDiagnostics.shared.log("jit26PrepareCalls", result: "2")
+        BootDiagnostics.shared.log("jit26PrepareSuccesses", result: "0")
+        BootDiagnostics.shared.log("jit26RegionIndex", result: "1")
+        BootDiagnostics.shared.log("jit26RegionOriginalAddress", result: "0x0")
+        BootDiagnostics.shared.log("jit26RegionLength", result: "536870912")
+        BootDiagnostics.shared.log("jit26RegionPreparedAddress", result: "0x0")
+        BootDiagnostics.shared.log("jit26RegionPrepareReturned", result: "false")
+        BootDiagnostics.shared.log("jit26DetachAttempted", result: "false")
+        BootDiagnostics.shared.log("jit26DetachReturned", result: "false")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.jit26ProtocolRequired == true)
+        #expect(BootDiagnostics.shared.csDebugged == false)
+        #expect(BootDiagnostics.shared.jit26ScriptConnected == false)
+        #expect(BootDiagnostics.shared.jitReadyBeforeRegionPreparation == false)
+        #expect(BootDiagnostics.shared.jit26PrepareCalls == 2)
+        #expect(BootDiagnostics.shared.jit26PrepareSuccesses == 0)
+        #expect(BootDiagnostics.shared.jit26RegionIndex == 1)
+        #expect(BootDiagnostics.shared.jit26RegionLength == "536870912")
+        #expect(BootDiagnostics.shared.jit26RegionPrepareReturned == false)
+        #expect(BootDiagnostics.shared.jit26DetachAttempted == false)
+    }
+
+    @Test func postJit26ProbeFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("postJit26PlainProbeReturned", result: "true")
+        BootDiagnostics.shared.log("postJit26PlainProbeValue", result: "0x5678")
+        BootDiagnostics.shared.log("postJit26BtiProbeReturned", result: "true")
+        BootDiagnostics.shared.log("postJit26BtiProbeValue", result: "0x5678")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.postJit26PlainProbeReturned == true)
+        #expect(BootDiagnostics.shared.postJit26PlainProbeValue == "0x5678")
+        #expect(BootDiagnostics.shared.postJit26BtiProbeReturned == true)
+        #expect(BootDiagnostics.shared.postJit26BtiProbeValue == "0x5678")
+    }
+
+    @Test func classifiesJitWhenProtocolRequiredButNotDebugged() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("jit26ProtocolRequired", result: "true")
+        BootDiagnostics.shared.log("csDebugged", result: "false")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, reason) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "JIT - JIT26 protocol required but not attached")
+        #expect(reason.contains("no external StikDebug/StikJIT script has attached"))
+    }
+
     // MARK: - A1-A7 classification
 
     @Test func classifiesA1WhenRwRxBytesDiffer() async throws {
@@ -1594,5 +1650,42 @@ struct BootAndLiveContainerTests {
         #expect(BootDiagnostics.shared.pacCallAttempted == false)
         #expect(BootDiagnostics.shared.btiCallAttempted == false)
         #expect(BootDiagnostics.shared.singleMapExecutionClassification == nil)
+    }
+
+    @Test func buildReportIncludesJit26Section() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("JIT26 PROTOCOL"))
+        #expect(report.contains("jit26ProtocolRequired ="))
+        #expect(report.contains("csDebugged ="))
+        #expect(report.contains("jitReadyBeforeRegionPreparation ="))
+        #expect(report.contains("jit26PrepareCalls"))
+        #expect(report.contains("jit26DetachAttempted"))
+        #expect(report.contains("POST-JIT26 VALIDATION"))
+        #expect(report.contains("postJit26PlainProbeReturned ="))
+        #expect(report.contains("postJit26BtiProbeReturned ="))
+        #expect(report.contains("MINIMUM SUCCESS CRITERION"))
+    }
+
+    @Test func beginBootResetsJit26Fields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("jit26ProtocolRequired", result: "true")
+        BootDiagnostics.shared.log("csDebugged", result: "true")
+        BootDiagnostics.shared.log("jit26PrepareCalls", result: "3")
+        BootDiagnostics.shared.log("postJit26PlainProbeReturned", result: "true")
+        BootDiagnostics.shared.log("postJit26PlainProbeValue", result: "0x5678")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.jit26ProtocolRequired == true)
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.jit26ProtocolRequired == nil)
+        #expect(BootDiagnostics.shared.csDebugged == nil)
+        #expect(BootDiagnostics.shared.jit26PrepareCalls == nil)
+        #expect(BootDiagnostics.shared.postJit26PlainProbeReturned == nil)
+        #expect(BootDiagnostics.shared.postJit26PlainProbeValue == nil)
     }
 }

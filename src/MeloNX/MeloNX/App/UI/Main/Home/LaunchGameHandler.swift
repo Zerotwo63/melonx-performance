@@ -311,6 +311,12 @@ class LaunchGameHandler: ObservableObject {
     private func acquireNativeJITAndContinue() {
         BootDiagnostics.shared.log("JIT verification begin")
 
+        // JIT26 requirement #3G: real evidence that readiness is not
+        // being claimed before region preparation even starts this cycle -
+        // must be false (or unset) here; jitVerified only becomes true
+        // once isJITEnabled()/JITCoordinator confirm it below.
+        BootDiagnostics.shared.log("jitReadyBeforeRegionPreparation", result: "\(BootDiagnostics.shared.jitVerified == true)")
+
         if ryujinx.jitenabled {
             BootDiagnostics.shared.log("JIT verification result", result: "true")
             startGameAfterJITConfirmed()
