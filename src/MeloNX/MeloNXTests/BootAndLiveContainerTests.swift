@@ -615,4 +615,213 @@ struct BootAndLiveContainerTests {
         #expect(report.contains("THREAD SNAPSHOT:"))
         #expect(report.contains("fifoProducerAlive ="))
     }
+
+    // MARK: - LightningJit translator trace (diagnóstico real #6)
+    //
+    // ArmProcessContextFactory picks Ryujinx.Cpu.LightningJit.Translator as
+    // the active backend on this build (arm64 host + MemoryManagerMode.
+    // HostMapped/HostMappedUnsafe) - NOT ARMeilleure.Translation.Translator,
+    // which the previous round's instrumentation targeted. These tests
+    // only cover the diagnostic plumbing - no real GPU/guest work is ever
+    // fabricated here.
+
+    @Test func contextExecuteEnteredTracksRealGuestPc() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.Translator.Execute entered", result: "pc=0x7FFE1000,threadId=3")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.contextExecuteEntered)
+        #expect(BootDiagnostics.shared.translatorExecuteEntered)
+        #expect(BootDiagnostics.shared.firstGuestPc == "0x7FFE1000")
+        #expect(BootDiagnostics.shared.lastGuestPc == "0x7FFE1000")
+    }
+
+    /// firstGuestPc must never move once set, even if later lookups report
+    /// a different address - it specifically answers "where did the guest
+    /// start", not "where is it now" (that's lastGuestPc/lastTranslatorAddress).
+    @Test func firstGuestPcNeverChangesAfterFirstSet() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.Translator.Execute entered", result: "pc=0x1000,threadId=1")
+        BootDiagnostics.shared.log("LightningJit translate lookup begin", result: "pc=0x2000,count=1")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.firstGuestPc == "0x1000")
+        #expect(BootDiagnostics.shared.lastGuestPc == "0x2000")
+    }
+
+    /// Real cumulative counters from C# (sent as "count=N" in the payload)
+    /// must be used directly - never approximated from how many log events
+    /// Swift happened to receive, since the C# side gates logging after the
+    /// first 10 occurrences while the real counter keeps incrementing.
+    @Test func translationCountersUseRealCumulativeValueNotEventCount() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit translate begin", result: "pc=0x1000,count=37")
+        BootDiagnostics.shared.log("LightningJit translate compiled", result: "pc=0x1000,hostCodeLength=64,count=12")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.translationAttempts == 37)
+        #expect(BootDiagnostics.shared.translatedFunctionsCreated == 12)
+    }
+
+    /// The NOP fallback (an existing, pre-this-round behavior that silently
+    /// swaps a failed translation for a synthetic NOP+RET) must be counted
+    /// SEPARATELY from real compiled functions - it must never inflate
+    /// translatedFunctionsCreated, or a stream of silent failures would look
+    /// identical to real progress.
+    @Test func nopFallbackDoesNotInflateTranslatedFunctionsCreated() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit translate NOP fallback", result: "pc=0x1000,exceptionType=System.OutOfMemoryException,count=5")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.nopFallbackCount == 5)
+        #expect(BootDiagnostics.shared.translatedFunctionsCreated == 0)
+    }
+
+    @Test func jitMemFieldsTrackAllocationsAndAddresses() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JITMEM allocate", result: "size=256")
+        BootDiagnostics.shared.log("JITMEM RW ptr", result: "0xAAAA0000")
+        BootDiagnostics.shared.log("JITMEM RX ptr", result: "0xBBBB0000")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.jitCodeAllocations == 1)
+        #expect(BootDiagnostics.shared.jitBytesGenerated == 256)
+        #expect(BootDiagnostics.shared.jitRwAddress == "0xAAAA0000")
+        #expect(BootDiagnostics.shared.jitRxAddress == "0xBBBB0000")
+    }
+
+    /// hostFunctionCallReturned/translatedFunctionsExecuted can only become
+    /// true/positive once the native dispatcher comes back for a SECOND
+    /// lookup - a single mapped function proves nothing was executed yet,
+    /// since there is no managed hook at the actual jump-to-host-code site.
+    @Test func hostFunctionCallReturnedRequiresASecondLookup() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit translate lookup begin", result: "pc=0x1000,count=1")
+        BootDiagnostics.shared.log("LightningJit translate mapped", result: "pc=0x1000,funcPtr=0xCCCC0000")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.hostFunctionCallAttempted)
+        #expect(!BootDiagnostics.shared.hostFunctionCallReturned)
+        #expect(BootDiagnostics.shared.translatedFunctionsExecuted == 0)
+
+        BootDiagnostics.shared.log("LightningJit translate lookup begin", result: "pc=0x1004,count=2")
+        BootDiagnostics.shared.log("LightningJit translate mapped", result: "pc=0x1004,funcPtr=0xCCCC0040")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.hostFunctionCallReturned)
+        #expect(BootDiagnostics.shared.translatedFunctionsExecuted == 1)
+    }
+
+    @Test func beginBootResetsLightningJitTranslatorFields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.Translator.Execute entered", result: "pc=0x1000,threadId=1")
+        BootDiagnostics.shared.log("JITMEM allocate", result: "size=128")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.contextExecuteEntered)
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(!BootDiagnostics.shared.contextExecuteEntered)
+        #expect(!BootDiagnostics.shared.contextExecuteReturned)
+        #expect(!BootDiagnostics.shared.translatorExecuteEntered)
+        #expect(BootDiagnostics.shared.translatorLookupAttempts == 0)
+        #expect(BootDiagnostics.shared.translationAttempts == 0)
+        #expect(BootDiagnostics.shared.nopFallbackCount == 0)
+        #expect(BootDiagnostics.shared.jitCodeAllocations == 0)
+        #expect(BootDiagnostics.shared.jitBytesGenerated == 0)
+        #expect(BootDiagnostics.shared.firstGuestPc == nil)
+        #expect(BootDiagnostics.shared.lastGuestPc == nil)
+        #expect(BootDiagnostics.shared.lastTranslatorAddress == nil)
+        #expect(BootDiagnostics.shared.jitRwAddress == nil)
+        #expect(BootDiagnostics.shared.jitRxAddress == nil)
+        #expect(!BootDiagnostics.shared.hostFunctionCallAttempted)
+        #expect(!BootDiagnostics.shared.hostFunctionCallReturned)
+    }
+
+    // MARK: - Watchdog state-based classification (diagnóstico real #6)
+    //
+    // The watchdog used to always say "timeout waiting for swapchain/first
+    // frame" no matter how far boot actually got. These tests lock in the
+    // real pipeline-walk behavior - especially the exact scenario this
+    // round's real device trace showed (swapchain created, guest alive,
+    // zero translated functions, zero GPU submissions).
+
+    @Test func classifiesAsJitWhenJitNeverVerified() async throws {
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "JIT")
+    }
+
+    @Test func classifiesAsSwapchainWhenSwapchainNeverCreated() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "renderer / swapchain")
+    }
+
+    @Test func classifiesAsGuestCpuStartupWhenGuestNeverAlive() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "guest CPU startup")
+    }
+
+    /// The exact real-device scenario this round is built around:
+    /// swapchainCreated=true, guestMainThreadAlive=true,
+    /// translatedFunctionsCreated=0, gpfifoSubmissions=0.
+    @Test func classifiesAsTranslatorStartupMatchingRealDeviceScenario() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=1")
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, reason) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "guest CPU / translator startup")
+        #expect(reason.contains("no translated function was created or executed"))
+    }
+
+    @Test func classifiesAsGpuProducerWhenTranslatingButNotSubmitting() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=1")
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+        BootDiagnostics.shared.log("LightningJit translate compiled", result: "pc=0x1000,hostCodeLength=64,count=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "guest CPU / GPU producer")
+    }
+
+    @Test func classifiesAsAcquireWhenGpuWorkSubmittedButNeverAcquired() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=1")
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+        BootDiagnostics.shared.log("LightningJit translate compiled", result: "pc=0x1000,hostCodeLength=64,count=1")
+        BootDiagnostics.shared.log("SubmitGpfifo ioctl received", result: "count=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage == "renderer / acquire")
+    }
 }

@@ -111,6 +111,34 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var gpuThreadAlive = false
     @Published private(set) var fifoProducerAlive = false
 
+    // Diagnóstico real #6: translatedFunctionsCreated/translatedFunctionsExecuted
+    // (declared above, in the GUEST block) were only ever fed by
+    // ARMeilleure.Translation.Translator's events - but that class is NOT
+    // the active CPU backend for this build. ArmProcessContextFactory picks
+    // LightningJitEngine whenever running on an arm64 host with
+    // MemoryManagerMode.HostMapped/HostMappedUnsafe (the default here, no
+    // override found anywhere in the Swift app), which is exactly this
+    // app's real configuration. Both fields are now ALSO fed from
+    // Ryujinx.Cpu.LightningJit.Translator's real events below (via a
+    // `max(current, newValue)` merge - whichever backend actually runs
+    // drives the number, nothing is overwritten backwards) - fixing the
+    // exact "no asumas que son correctas" concern this round raised.
+    @Published private(set) var contextExecuteEntered = false
+    @Published private(set) var contextExecuteReturned = false
+    @Published private(set) var translatorExecuteEntered = false
+    @Published private(set) var translatorLookupAttempts = 0
+    @Published private(set) var translationAttempts = 0
+    @Published private(set) var nopFallbackCount = 0
+    @Published private(set) var jitCodeAllocations = 0
+    @Published private(set) var jitBytesGenerated = 0
+    @Published private(set) var firstGuestPc: String?
+    @Published private(set) var lastGuestPc: String?
+    @Published private(set) var lastTranslatorAddress: String?
+    @Published private(set) var jitRwAddress: String?
+    @Published private(set) var jitRxAddress: String?
+    @Published private(set) var hostFunctionCallAttempted = false
+    @Published private(set) var hostFunctionCallReturned = false
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -204,6 +232,21 @@ final class BootDiagnostics: ObservableObject {
             self.lastTranslatorStage = nil
             self.gpuThreadAlive = false
             self.fifoProducerAlive = false
+            self.contextExecuteEntered = false
+            self.contextExecuteReturned = false
+            self.translatorExecuteEntered = false
+            self.translatorLookupAttempts = 0
+            self.translationAttempts = 0
+            self.nopFallbackCount = 0
+            self.jitCodeAllocations = 0
+            self.jitBytesGenerated = 0
+            self.firstGuestPc = nil
+            self.lastGuestPc = nil
+            self.lastTranslatorAddress = nil
+            self.jitRwAddress = nil
+            self.jitRxAddress = nil
+            self.hostFunctionCallAttempted = false
+            self.hostFunctionCallReturned = false
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -264,7 +307,10 @@ final class BootDiagnostics: ObservableObject {
         let summary = "managedThreadAlive=\(managedThreadAlive),renderThreadAlive=\(renderThreadAlive)," +
             "guestMainThreadAlive=\(guestMainThreadAlive),gpuThreadAlive=\(gpuThreadAlive),fifoProducerAlive=\(fifoProducerAlive)," +
             "lastGuestStage=\(lastGuestStage ?? "none"),lastGpuProducerStage=\(lastGpuProducerStage ?? "none")," +
-            "lastNvStage=\(lastNvStage ?? "none"),lastTranslatorStage=\(lastTranslatorStage ?? "none")"
+            "lastNvStage=\(lastNvStage ?? "none"),lastTranslatorStage=\(lastTranslatorStage ?? "none")," +
+            "contextExecuteEntered=\(contextExecuteEntered),translatorExecuteEntered=\(translatorExecuteEntered)," +
+            "translatorLookupAttempts=\(translatorLookupAttempts),translationAttempts=\(translationAttempts)," +
+            "translatedFunctionsCreated=\(translatedFunctionsCreated),nopFallbackCount=\(nopFallbackCount)"
 
         log("boot snapshot @\(label)", result: summary)
     }
@@ -277,6 +323,85 @@ final class BootDiagnostics: ObservableObject {
         let message = "[BOOT] \(stage) FAILED: \(reason)"
         print(message)
         persistLastStep(message)
+    }
+
+    /// Diagnóstico real #6: the watchdog used to always say "timeout
+    /// waiting for swapchain/first frame" regardless of how far the boot
+    /// actually got - including when swapchainCreated was already true,
+    /// which no longer describes the real blockage at all. This walks the
+    /// pipeline (JIT -> Vulkan/swapchain -> guest CPU/translator -> GPU-FIFO
+    /// producer -> renderer acquire/submit/present) and returns the
+    /// stage/reason for whichever point real evidence shows execution
+    /// actually stopped at - never a guess, only state already observed.
+    func classifyWatchdogFailure() -> (stage: String, reason: String) {
+        if jitVerified != true || dualMappedJIT != true {
+            return (
+                "JIT",
+                "timeout before JIT verification completed; jitVerified=\(jitVerified.map { "\($0)" } ?? "unknown"), dualMappedJIT=\(dualMappedJIT.map { "\($0)" } ?? "unknown")"
+            )
+        }
+
+        if !swapchainCreated {
+            return (
+                "renderer / swapchain",
+                "timeout waiting for swapchain/first frame; lastRendererStage=\(lastRendererStage ?? "none"), lastVulkanResult=\(lastVulkanResult ?? "none")"
+            )
+        }
+
+        if !guestMainThreadAlive {
+            return (
+                "guest CPU startup",
+                "swapchain created but the guest main thread never reached Owner.Context.Execute; guestMainThreadCreated=\(guestMainThreadCreated), guestMainThreadStarted=\(guestMainThreadStarted), lastGuestStage=\(lastGuestStage ?? "none")"
+            )
+        }
+
+        if translatedFunctionsCreated == 0 && gpfifoSubmissions == 0 {
+            return (
+                "guest CPU / translator startup",
+                "guest execution entered Context.Execute but no translated function was created or executed; translatorExecuteEntered=\(translatorExecuteEntered), translatorLookupAttempts=\(translatorLookupAttempts), translationAttempts=\(translationAttempts), nopFallbackCount=\(nopFallbackCount), lastTranslatorStage=\(lastTranslatorStage ?? "none")"
+            )
+        }
+
+        if gpfifoSubmissions == 0 {
+            return (
+                "guest CPU / GPU producer",
+                "guest code is translating and executing (translatedFunctionsCreated=\(translatedFunctionsCreated)) but never submitted any GPU FIFO work; gpuChannelsCreated=\(gpuChannelsCreated), lastNvStage=\(lastNvStage ?? "none")"
+            )
+        }
+
+        if !acquireAttempted {
+            return (
+                "renderer / acquire",
+                "GPU work was submitted (gpfifoSubmissions=\(gpfifoSubmissions)) but the renderer never attempted vkAcquireNextImageKHR; fifoCommandsQueued=\(fifoCommandsQueued), fifoCommandsConsumed=\(fifoCommandsConsumed)"
+            )
+        }
+
+        if !firstAcquireSucceeded {
+            return (
+                "renderer / acquire",
+                "acquire was attempted but never succeeded; acquireAttemptCount=\(acquireAttemptCount), lastAcquireResult=\(lastAcquireResult ?? "none")"
+            )
+        }
+
+        if !firstSubmit {
+            return (
+                "renderer / submit",
+                "acquire succeeded but vkQueueSubmit never returned Success; lastSubmitResult=\(lastSubmitResult ?? "none")"
+            )
+        }
+
+        if !firstPresent {
+            return (
+                "renderer / present",
+                "submit succeeded but vkQueuePresentKHR never returned Success/SuboptimalKHR; lastPresentResult=\(lastPresentResult ?? "none")"
+            )
+        }
+
+        let progress = secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a"
+        return (
+            "renderer / first frame",
+            "present succeeded but ran-first-frame never fired or was never corroborated; secondsSinceLastRenderProgress=\(progress), lastRenderLoopStage=\(lastRenderLoopStage ?? "none")"
+        )
     }
 
     private func currentThreadName() -> String {
@@ -422,6 +547,73 @@ final class BootDiagnostics: ObservableObject {
                 if let s = Self.extractField(result, "waitTrue"), let n = Int(s) { fifoWaitTrue = n }
                 if let s = Self.extractField(result, "waitFalse"), let n = Int(s) { fifoWaitFalse = n }
             }
+
+        // Diagnóstico real #6: the REAL active translator for this build
+        // (Ryujinx.Cpu.LightningJit.Translator - see field doc comments
+        // above for why ARMeilleure.Translation.Translator above is not
+        // the active path). translatedFunctionsCreated/Executed (declared
+        // in the GUEST block) are fed from BOTH paths via max(...) so
+        // whichever backend actually runs drives the real number.
+        case "LightningJit.Translator.Execute entered":
+            contextExecuteEntered = true
+            translatorExecuteEntered = true
+            if let result, let pc = Self.extractField(result, "pc") {
+                firstGuestPc = firstGuestPc ?? pc
+                lastGuestPc = pc
+            }
+        case "LightningJit.Translator.Execute after DispatchLoop":
+            contextExecuteReturned = true
+        case "LightningJit translate lookup begin":
+            // "count" is the real cumulative counter from C# (Interlocked-
+            // incremented on EVERY call, independent of log gating) - never
+            // approximated from how many events Swift happened to receive,
+            // since gating means most calls after the first 10 don't emit
+            // a log line at all.
+            if let result, let s = Self.extractField(result, "count"), let n = Int(s) {
+                translatorLookupAttempts = max(translatorLookupAttempts, n)
+            }
+            if let result, let pc = Self.extractField(result, "pc") {
+                lastGuestPc = pc
+                lastTranslatorAddress = pc
+            }
+        case "LightningJit translate begin":
+            if let result, let s = Self.extractField(result, "count"), let n = Int(s) {
+                translationAttempts = max(translationAttempts, n)
+            }
+            if let result, let pc = Self.extractField(result, "pc") {
+                lastTranslatorAddress = pc
+            }
+        case "LightningJit translate compiled":
+            if let result, let s = Self.extractField(result, "count"), let n = Int(s) {
+                translatedFunctionsCreated = max(translatedFunctionsCreated, n)
+            }
+            if let result, let pc = Self.extractField(result, "pc") {
+                lastTranslatorAddress = pc
+            }
+        case "LightningJit translate mapped":
+            hostFunctionCallAttempted = true
+            // Real evidence that the native dispatcher came BACK for a
+            // second lookup is the only honest proxy available for "the
+            // previously mapped function actually executed and returned" -
+            // there is no managed hook inside the generated assembly's
+            // jump-to-host-code instruction. See translatorLookupAttempts.
+            if translatorLookupAttempts > 1 {
+                translatedFunctionsExecuted = max(translatedFunctionsExecuted, translatorLookupAttempts - 1)
+                hostFunctionCallReturned = true
+            }
+        case "LightningJit translate NOP fallback":
+            if let result, let s = Self.extractField(result, "count"), let n = Int(s) {
+                nopFallbackCount = max(nopFallbackCount, n)
+            }
+        case "JITMEM allocate":
+            jitCodeAllocations += 1
+            if let result, let s = Self.extractField(result, "size"), let n = Int(s) {
+                jitBytesGenerated += n
+            }
+        case "JITMEM RW ptr":
+            jitRwAddress = result
+        case "JITMEM RX ptr":
+            jitRxAddress = result
         default:
             break
         }
@@ -530,6 +722,18 @@ final class BootDiagnostics: ObservableObject {
         let translatorStages: Set<String> = [
             "ARMeilleure.Translator.Execute entered", "ARMeilleure first function compiled",
             "ARMeilleure first function executed",
+            // Diagnóstico real #6 - the REAL active translator for this
+            // build (Ryujinx.Cpu.LightningJit.Translator).
+            "LightningJit.Translator.Execute entered", "LightningJit.Translator.Execute before DispatchLoop",
+            "LightningJit.Translator.Execute after DispatchLoop",
+            "TranslatorStubs.GenerateDispatchStub begin", "TranslatorStubs.GenerateDispatchStub end",
+            "TranslatorStubs.GenerateSlowDispatchStub begin", "TranslatorStubs.GenerateSlowDispatchStub end",
+            "TranslatorStubs.GenerateDispatchLoop begin", "TranslatorStubs.GenerateDispatchLoop end",
+            "TranslatorStubs.Map begin", "TranslatorStubs.Map end",
+            "LightningJit translate lookup begin", "LightningJit translate lookup hit",
+            "LightningJit translate begin", "LightningJit translate compiled", "LightningJit translate mapped",
+            "LightningJit translate NOP fallback",
+            "JITMEM allocate", "JITMEM RW ptr", "JITMEM RX ptr", "JITMEM cache flush begin", "JITMEM cache flush end",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
@@ -662,6 +866,23 @@ final class BootDiagnostics: ObservableObject {
         lines.append("lastNvStage = \(lastNvStage ?? "none")")
         lines.append("lastTranslatorStage = \(lastTranslatorStage ?? "none")")
         lines.append("")
+        lines.append("TRANSLATOR (real active backend - Ryujinx.Cpu.LightningJit on this build):")
+        lines.append("contextExecuteEntered = \(contextExecuteEntered)")
+        lines.append("contextExecuteReturned = \(contextExecuteReturned)")
+        lines.append("translatorExecuteEntered = \(translatorExecuteEntered)")
+        lines.append("translatorLookupAttempts = \(translatorLookupAttempts)")
+        lines.append("translationAttempts = \(translationAttempts)")
+        lines.append("nopFallbackCount = \(nopFallbackCount)")
+        lines.append("jitCodeAllocations = \(jitCodeAllocations)")
+        lines.append("jitBytesGenerated = \(jitBytesGenerated)")
+        lines.append("firstGuestPc = \(firstGuestPc ?? "none")")
+        lines.append("lastGuestPc = \(lastGuestPc ?? "none")")
+        lines.append("lastTranslatorAddress = \(lastTranslatorAddress ?? "none")")
+        lines.append("jitRwAddress = \(jitRwAddress ?? "none")")
+        lines.append("jitRxAddress = \(jitRxAddress ?? "none")")
+        lines.append("hostFunctionCallAttempted = \(hostFunctionCallAttempted)")
+        lines.append("hostFunctionCallReturned = \(hostFunctionCallReturned)")
+        lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")
         lines.append("acquireAttemptCount = \(acquireAttemptCount)")
@@ -673,6 +894,7 @@ final class BootDiagnostics: ObservableObject {
         lines.append("THREAD SNAPSHOT:")
         lines.append("gpuThreadAlive = \(gpuThreadAlive)")
         lines.append("fifoProducerAlive = \(fifoProducerAlive)")
+        lines.append("guestMainThreadAlive = \(guestMainThreadAlive)")
         lines.append("")
         lines.append("failureStage = \(failureStage ?? "none")")
         lines.append("failureReason = \(failureReason ?? "none")")

@@ -94,6 +94,24 @@ struct BootWatchdogView: View {
                 row("Last translator stage", diagnostics.lastTranslatorStage ?? "none")
             }
 
+            Text("TRANSLATOR (real backend)").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("Context.Execute entered", "\(diagnostics.contextExecuteEntered)")
+                row("Context.Execute returned", "\(diagnostics.contextExecuteReturned)")
+                row("Translator.Execute entered", "\(diagnostics.translatorExecuteEntered)")
+                row("Translator lookup attempts", "\(diagnostics.translatorLookupAttempts)")
+                row("Translation attempts", "\(diagnostics.translationAttempts)")
+                row("NOP fallback count", "\(diagnostics.nopFallbackCount)")
+                row("JIT code allocations", "\(diagnostics.jitCodeAllocations)")
+                row("JIT bytes generated", "\(diagnostics.jitBytesGenerated)")
+                row("First guest PC", diagnostics.firstGuestPc ?? "none")
+                row("Last guest PC", diagnostics.lastGuestPc ?? "none")
+                row("JIT RW address", diagnostics.jitRwAddress ?? "none")
+                row("JIT RX address", diagnostics.jitRxAddress ?? "none")
+                row("Host function call attempted", "\(diagnostics.hostFunctionCallAttempted)")
+                row("Host function call returned", "\(diagnostics.hostFunctionCallReturned)")
+            }
+
             Text("THREAD SNAPSHOT").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GPU thread alive", "\(diagnostics.gpuThreadAlive)")

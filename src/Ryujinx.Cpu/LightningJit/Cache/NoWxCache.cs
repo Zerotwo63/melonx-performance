@@ -1,5 +1,6 @@
 using ARMeilleure.Memory;
 using Ryujinx.Common;
+using Ryujinx.Common.Logging;
 using Ryujinx.Memory;
 using System;
 using System.Collections.Generic;
@@ -197,6 +198,9 @@ namespace Ryujinx.Cpu.LightningJit.Cache
         private readonly PageAlignedRangeList _pendingMap;
         private readonly object _lock = new();
 
+        // Additive diagnostics counter only - does not affect behavior.
+        private int _jitMemEvents;
+
         class ThreadLocalCacheEntry
         {
             public readonly int Offset;
@@ -378,17 +382,51 @@ namespace Ryujinx.Cpu.LightningJit.Cache
 
         private unsafe IntPtr AddThreadLocalFunction(ReadOnlySpan<byte> code, ulong guestAddress)
         {
+            int jitMemEvents = Interlocked.Increment(ref _jitMemEvents);
+            bool verbose = jitMemEvents <= 10 || jitMemEvents % 50 == 0;
+
             int alignedSize = BitUtils.AlignUp(code.Length, (int)MemoryBlock.GetPageSize());
             int funcOffset = _localCache.Allocate(alignedSize);
+
+            if (verbose)
+            {
+                BootEventBridge.Report("JITMEM allocate", $"size={alignedSize}");
+            }
 
             Debug.Assert((funcOffset & (int)(MemoryBlock.GetPageSize() - 1)) == 0);
 
             nint funcPtr = _localCache.GetPointerForOffset(funcOffset);
+            if (verbose)
+            {
+                BootEventBridge.Report("JITMEM RW ptr", $"0x{funcPtr:X}");
+            }
+
             code.CopyTo(new Span<byte>((void*)funcPtr, code.Length));
 
             (_threadLocalCache ??= new()).Add(guestAddress, new(funcOffset, code.Length, funcPtr));
 
+            if (verbose)
+            {
+                BootEventBridge.Report("JITMEM cache flush begin");
+            }
+            // This cache has no separate RW/RX pointer pair (unlike
+            // DualMappedNoWxCache) - ReprotectAsRx is the real W^X
+            // transition: the same mapping flips from writable to
+            // executable here, which is also where an icache flush (if
+            // this platform's ReprotectAsRx implementation does one
+            // internally) would happen.
             _localCache.ReprotectAsRx(funcOffset, alignedSize);
+            if (verbose)
+            {
+                BootEventBridge.Report("JITMEM cache flush end");
+                // Same pointer as "JITMEM RW ptr" above - this cache
+                // reprotects the one mapping in place rather than keeping
+                // two separate RW/RX mappings (see DualMappedNoWxCache for
+                // the dual-mapped variant, which does have distinct
+                // addresses) - reported under the same event name for a
+                // consistent Swift-side field either way.
+                BootEventBridge.Report("JITMEM RX ptr", $"0x{funcPtr:X}");
+            }
 
             return funcPtr;
         }

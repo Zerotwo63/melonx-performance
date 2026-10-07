@@ -81,11 +81,14 @@ struct LoadingOverlayView: View {
                     // used to silently imply.
                     let diag = BootDiagnostics.shared
                     if diag.failureStage == nil {
-                        let progress = diag.secondsSinceLastRenderProgress().map { String(format: "%.1fs", $0) } ?? "n/a"
-                        diag.fail(
-                            stage: "boot watchdog",
-                            reason: "timeout waiting for swapchain/first frame; lastManagedStage=\(diag.lastManagedStage ?? "none"), lastRendererStage=\(diag.lastRendererStage ?? "none"), lastRenderLoopStage=\(diag.lastRenderLoopStage ?? "none"), secondsSinceLastRenderProgress=\(progress), lastAcquireResult=\(diag.lastAcquireResult ?? "none"), lastSubmitResult=\(diag.lastSubmitResult ?? "none"), lastPresentResult=\(diag.lastPresentResult ?? "none"), guestMainThreadAlive=\(diag.guestMainThreadAlive), gpfifoSubmissions=\(diag.gpfifoSubmissions), fifoCommandsQueued=\(diag.fifoCommandsQueued), lastGuestStage=\(diag.lastGuestStage ?? "none"), lastGpuProducerStage=\(diag.lastGpuProducerStage ?? "none"), lastNvStage=\(diag.lastNvStage ?? "none")"
-                        )
+                        // State-based classification (diagnóstico real #6) -
+                        // walks the real pipeline instead of always saying
+                        // "timeout waiting for swapchain/first frame", which
+                        // stopped being true the moment swapchainCreated
+                        // became true but execution still stalled further
+                        // along (guest CPU/translator, GPU producer, etc).
+                        let (stage, reason) = diag.classifyWatchdogFailure()
+                        diag.fail(stage: stage, reason: reason)
                     }
                 }
             }

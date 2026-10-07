@@ -3,6 +3,7 @@ using Ryujinx.Cpu.LightningJit.Cache;
 using Ryujinx.Cpu.LightningJit.CodeGen;
 using Ryujinx.Cpu.LightningJit.CodeGen.Arm64;
 using Ryujinx.Cpu.LightningJit.State;
+using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -179,6 +180,7 @@ namespace Ryujinx.Cpu.LightningJit
         /// <returns>Generated <see cref="DispatchStub"/></returns>
         private IntPtr GenerateDispatchStub()
         {
+            BootEventBridge.Report("TranslatorStubs.GenerateDispatchStub begin");
             List<int> branchToFallbackOffsets = new();
 
             CodeWriter writer = new();
@@ -258,7 +260,9 @@ namespace Ryujinx.Cpu.LightningJit
                 throw new PlatformNotSupportedException();
             }
 
-            return Map(writer.AsByteSpan());
+            IntPtr dispatchStubPtr = Map(writer.AsByteSpan());
+            BootEventBridge.Report("TranslatorStubs.GenerateDispatchStub end", $"ptr=0x{dispatchStubPtr:X}");
+            return dispatchStubPtr;
         }
 
         /// <summary>
@@ -267,6 +271,7 @@ namespace Ryujinx.Cpu.LightningJit
         /// <returns>Generated <see cref="SlowDispatchStub"/></returns>
         private IntPtr GenerateSlowDispatchStub()
         {
+            BootEventBridge.Report("TranslatorStubs.GenerateSlowDispatchStub begin");
             CodeWriter writer = new();
 
             if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
@@ -296,7 +301,9 @@ namespace Ryujinx.Cpu.LightningJit
                 throw new PlatformNotSupportedException();
             }
 
-            return Map(writer.AsByteSpan());
+            IntPtr slowDispatchStubPtr = Map(writer.AsByteSpan());
+            BootEventBridge.Report("TranslatorStubs.GenerateSlowDispatchStub end", $"ptr=0x{slowDispatchStubPtr:X}");
+            return slowDispatchStubPtr;
         }
 
         /// <summary>
@@ -347,6 +354,7 @@ namespace Ryujinx.Cpu.LightningJit
         /// <returns><see cref="DispatchLoop"/> function</returns>
         private DispatcherFunction GenerateDispatchLoop()
         {
+            BootEventBridge.Report("TranslatorStubs.GenerateDispatchLoop begin");
             CodeWriter writer = new();
 
             if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
@@ -390,22 +398,31 @@ namespace Ryujinx.Cpu.LightningJit
             }
 
             IntPtr pointer = Map(writer.AsByteSpan());
+            BootEventBridge.Report("TranslatorStubs.GenerateDispatchLoop end", $"ptr=0x{pointer:X}");
 
             return Marshal.GetDelegateForFunctionPointer<DispatcherFunction>(pointer);
         }
 
         private IntPtr Map(ReadOnlySpan<byte> code)
         {
+            BootEventBridge.Report("TranslatorStubs.Map begin", $"size={code.Length}");
+
+            IntPtr result;
             if (_noWxCache != null)
             {
-                return _noWxCache.MapPageAligned(code);
+                result = _noWxCache.MapPageAligned(code);
             }
-            else if (_dualMappedCache != null) 
+            else if (_dualMappedCache != null)
             {
-                return _dualMappedCache.MapPageAligned(code);
+                result = _dualMappedCache.MapPageAligned(code);
             }
-            
-            return JitCache.Map(code);
+            else
+            {
+                result = JitCache.Map(code);
+            }
+
+            BootEventBridge.Report("TranslatorStubs.Map end", $"ptr=0x{result:X}");
+            return result;
         }
 
         private static Operand Register(int register, OperandType type = OperandType.I64)

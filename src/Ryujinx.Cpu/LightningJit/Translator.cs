@@ -51,6 +51,19 @@ namespace Ryujinx.Cpu.LightningJit
         public DualMappedNoWxCache _dualMappedCache;
         private bool _disposed;
 
+        // Additive diagnostics counters only - do not affect behavior.
+        // This is the REAL active translator for this build (see
+        // ArmProcessContextFactory: arm64 host + MemoryManagerMode.
+        // HostMapped/HostMappedUnsafe selects LightningJitEngine, not the
+        // classic ARMeilleure.Translation.Translator). A previous round's
+        // instrumentation of that other class never fired on real device
+        // traces because it isn't on this build's actual execution path.
+        private int _lookupCount;
+        private int _translationAttempts;
+        private int _realFunctionsCompiled;
+        private int _nopFallbacks;
+        private int _jitMemEvents;
+
         private static DualMappedNoWxCache originalDualMappedCache;
         private static bool firstSet = false;
 
@@ -182,21 +195,47 @@ namespace Ryujinx.Cpu.LightningJit
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
-            NativeInterface.RegisterThread(context, Memory, this);
+            BootEventBridge.Report("LightningJit.Translator.Execute entered", $"pc=0x{address:X},threadId={Environment.CurrentManagedThreadId}");
 
-            // NativeInterface.SetPageTablePointer();
+            try
+            {
+                NativeInterface.RegisterThread(context, Memory, this);
 
-            Stubs.DispatchLoop(context.NativeContextPtr, address);
+                // NativeInterface.SetPageTablePointer();
 
+                // Stubs.DispatchLoop is a Lazy<T> - the first access here
+                // triggers native ARM64 code generation for the dispatch
+                // loop/stub/slow-dispatch-stub (see TranslatorStubs.cs) and
+                // maps it into executable memory BEFORE any guest code runs.
+                // This call then blocks until the guest thread itself stops
+                // running (same "runs forever on this thread" pattern as the
+                // render loop) - it does not return until the guest exits.
+                BootEventBridge.Report("LightningJit.Translator.Execute before DispatchLoop", $"pc=0x{address:X}");
+                Stubs.DispatchLoop(context.NativeContextPtr, address);
+                BootEventBridge.Report("LightningJit.Translator.Execute after DispatchLoop", $"pc=0x{address:X}");
 
-            NativeInterface.UnregisterThread();
-            _noWxCache?.ClearEntireThreadLocalCache();
-            _dualMappedCache?.ClearEntireThreadLocalCache();
+                NativeInterface.UnregisterThread();
+                _noWxCache?.ClearEntireThreadLocalCache();
+                _dualMappedCache?.ClearEntireThreadLocalCache();
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.Translator.Execute", ex);
+                throw;
+            }
         }
 
 
         internal IntPtr GetOrTranslatePointer(IntPtr framePointer, ulong address, ExecutionMode mode)
         {
+            int lookupCount = Interlocked.Increment(ref _lookupCount);
+            bool verbose = lookupCount <= 10 || lookupCount % 50 == 0;
+
+            if (verbose)
+            {
+                BootEventBridge.Report("LightningJit translate lookup begin", $"pc=0x{address:X},count={lookupCount}");
+            }
+
             int guestCodeLength = 0;
             try
             {
@@ -204,23 +243,65 @@ namespace Ryujinx.Cpu.LightningJit
                 {
                     if (_noWxCache.TryGetThreadLocalFunction(address, out IntPtr funcPtr))
                     {
+                        if (verbose)
+                        {
+                            BootEventBridge.Report("LightningJit translate lookup hit", $"pc=0x{address:X}");
+                        }
                         return funcPtr;
+                    }
+
+                    int translationAttempts = Interlocked.Increment(ref _translationAttempts);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate begin", $"pc=0x{address:X},count={translationAttempts}");
                     }
 
                     CompiledFunction func = Compile(address, mode);
                     guestCodeLength = func.Code.Length;
-                    return _noWxCache.Map(framePointer, func.Code, address, (ulong)func.GuestCodeLength);
+                    int realFunctionsCompiled = Interlocked.Increment(ref _realFunctionsCompiled);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate compiled", $"pc=0x{address:X},hostCodeLength={func.Code.Length},count={realFunctionsCompiled}");
+                    }
+
+                    IntPtr mappedPtr = _noWxCache.Map(framePointer, func.Code, address, (ulong)func.GuestCodeLength);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate mapped", $"pc=0x{address:X},funcPtr=0x{mappedPtr:X}");
+                    }
+                    return mappedPtr;
                 }
                 else if (_dualMappedCache != null)
                 {
                     if (_dualMappedCache.TryGetThreadLocalFunction(address, out IntPtr funcPtr))
                     {
+                        if (verbose)
+                        {
+                            BootEventBridge.Report("LightningJit translate lookup hit", $"pc=0x{address:X}");
+                        }
                         return funcPtr;
+                    }
+
+                    int translationAttempts = Interlocked.Increment(ref _translationAttempts);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate begin", $"pc=0x{address:X},count={translationAttempts}");
                     }
 
                     CompiledFunction func = Compile(address, mode);
                     guestCodeLength = func.Code.Length;
-                    return _dualMappedCache.Map(framePointer, func.Code, address, (ulong)func.GuestCodeLength);
+                    int realFunctionsCompiled = Interlocked.Increment(ref _realFunctionsCompiled);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate compiled", $"pc=0x{address:X},hostCodeLength={func.Code.Length},count={realFunctionsCompiled}");
+                    }
+
+                    IntPtr mappedPtr = _dualMappedCache.Map(framePointer, func.Code, address, (ulong)func.GuestCodeLength);
+                    if (verbose)
+                    {
+                        BootEventBridge.Report("LightningJit translate mapped", $"pc=0x{address:X},funcPtr=0x{mappedPtr:X}");
+                    }
+                    return mappedPtr;
                 }
             }
             catch (Exception ex)
@@ -239,9 +320,21 @@ namespace Ryujinx.Cpu.LightningJit
                     $"  firstSet: {firstSet}\n" +
                     $"  Exception: {ex.GetType().Name}: {ex.Message}\n" +
                     $"  Stack trace: {ex.StackTrace}";
-                    
-                
+
+
                 Logger.Info?.Print(LogClass.Cpu, diagnosticInfo);
+
+                // Additive diagnostics only - the fallback behavior below
+                // (return a synthetic NOP+RET "function" instead of
+                // propagating) is unchanged and pre-existing. Without this,
+                // a guest thread can look alive and keep "looking up"
+                // addresses forever while never running any real
+                // translated code, with zero trace in the boot report -
+                // this makes that distinction visible.
+                int nopFallbacks = Interlocked.Increment(ref _nopFallbacks);
+                BootEventBridge.ReportFail("LightningJit.GetOrTranslatePointer", ex);
+                BootEventBridge.Report("LightningJit translate NOP fallback", $"pc=0x{address:X},exceptionType={ex.GetType().FullName},count={nopFallbacks}");
+
                 int nopLength = guestCodeLength > 0 ? guestCodeLength : 4;
                 return CreateNopFunction(framePointer, address, mode, nopLength);
             }
