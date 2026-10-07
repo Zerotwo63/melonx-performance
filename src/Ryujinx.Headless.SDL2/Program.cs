@@ -786,10 +786,12 @@ namespace Ryujinx.Headless.SDL2
         [UnmanagedCallersOnly(EntryPoint = "stop_emulation")]
         public static void StopEmulation()
         {
+            BootEventBridge.Report("stop_emulation entered");
             if (_window != null)
             {
                 _window.Exit();
             }
+            BootEventBridge.Report("stop_emulation returned", "_window.Exit() completed, waiting for ExecutionEntrypoint to unwind");
         }
 
         [UnmanagedCallersOnly(EntryPoint = "get_game_info")]
@@ -1939,7 +1941,9 @@ namespace Ryujinx.Headless.SDL2
                 throw;
             }
 
+            BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose begin");
             _emulationContext.Dispose();
+            BootEventBridge.Report("ExecutionEntrypoint emulationContext dispose end");
             _window.Dispose();
 
             if (OperatingSystem.IsWindows())

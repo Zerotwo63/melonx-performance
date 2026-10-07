@@ -215,6 +215,19 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             }
         }
 
+        /// <summary>
+        /// Drops all pending (not-yet-page-aligned) function entries and
+        /// range bookkeeping - used when ending a game session on a
+        /// process-wide shared cache: the guest address space of the next
+        /// game has no relationship to this one, so nothing pending here
+        /// is meaningful to keep.
+        /// </summary>
+        public void Clear()
+        {
+            _pendingFunctions.Clear();
+            _ranges.Clear();
+        }
+
         public void RemoveOverlaps(ulong guestAddress, ulong size)
         {
             for (int index = 0; index < _pendingFunctions.Count; index++)

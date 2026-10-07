@@ -68,6 +68,13 @@ namespace Ryujinx.Cpu.LightningJit
         private static DualMappedNoWxCache originalDualMappedCache;
         private static bool firstSet = false;
 
+        // Lifecycle instrumentation only (Start A -> Stop A -> Start B
+        // without restarting MeloNX): a process-wide counter, one
+        // "session" per Translator constructed/disposed - i.e. roughly
+        // one per game started/stopped. Never reset.
+        private static int s_sessionId;
+        private int _sessionId;
+
         static internal TranslatorCache<TranslatedFunction> Functions { get; set; }
         internal AddressTable<ulong> FunctionTable { get; }
         static internal TranslatorStubs Stubs { get; set; }
@@ -76,6 +83,9 @@ namespace Ryujinx.Cpu.LightningJit
         public Translator(IMemoryManager memory, bool for64Bits)
         {
             Memory = memory;
+
+            _sessionId = System.Threading.Interlocked.Increment(ref s_sessionId);
+            BootEventBridge.Report($"GAME SESSION {_sessionId} start");
 
             _oldFuncs = new ConcurrentQueue<KeyValuePair<ulong, TranslatedFunction>>();
 
@@ -612,21 +622,87 @@ namespace Ryujinx.Cpu.LightningJit
             {
                 if (disposing)
                 {
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} shutdown begin");
+
+                    // "threads stopped": this Dispose() runs from
+                    // LightningJitCpuContext.Dispose(), itself only
+                    // reached once Ryujinx's own HOS/Horizon process
+                    // teardown has already torn down every guest thread
+                    // for this title (a CPU context cannot safely be
+                    // disposed while a guest thread might still execute
+                    // through it) - this marker confirms ORDERING, not an
+                    // independently-measured live thread count (no public
+                    // counter is exposed by KProcess for that without
+                    // modifying Ryujinx.HLE's kernel layer, out of scope
+                    // here).
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} threads stopped");
+
+                    BootEventBridge.Report("jitDisposeAttempted", "true");
+
                     if (_noWxCache != null)
                     {
                         _noWxCache.Dispose();
+                        BootEventBridge.Report("jitMappingsReleased", "n/a (NoWxCache is per-session, fully disposed)");
                     }
                     else if (_dualMappedCache != null)
                     {
-                        _dualMappedCache.Dispose();
+                        // PROCESS JIT STATE vs GAME SESSION JIT STATE: when
+                        // _dualMappedCache IS the shared process-wide
+                        // singleton (originalDualMappedCache - the normal
+                        // case once TXM/JIT26 preparation has happened
+                        // once), its underlying RW/RX mapping must survive
+                        // for the life of the process - JIT26-prepared
+                        // regions cannot be re-prepared after the external
+                        // debugger/script detaches. Disposing it here (the
+                        // previous behavior) called the real allocator's
+                        // Dispose() AND CacheMemoryAllocator.Clear(), the
+                        // latter of which had a real bug (see
+                        // CacheMemoryAllocator.Clear's doc comment) that
+                        // left the shared allocator permanently unable to
+                        // satisfy any further Allocate() call - exactly
+                        // "TranslatorStubs.Map begin" with no "Map end" on
+                        // the very next game. EndGameSession() clears only
+                        // the per-game bookkeeping and leaves the mapping
+                        // itself untouched. A genuinely per-session,
+                        // non-shared instance (the non-TXM, not-yet-
+                        // firstSet construction path) is still safe to
+                        // fully Dispose().
+                        if (ReferenceEquals(_dualMappedCache, originalDualMappedCache))
+                        {
+                            _dualMappedCache.EndGameSession();
+                        }
+                        else
+                        {
+                            _dualMappedCache.Dispose();
+                            BootEventBridge.Report("jitMappingsReleased", "n/a (per-session dual-mapped instance, fully disposed)");
+                        }
                     }
                     else
                     {
                         ClearJitCache();
                     }
 
+                    BootEventBridge.Report("jitStateReset", "true");
+
+                    // Functions is a process-wide static cache keyed by
+                    // GUEST address - a different game's guest addresses
+                    // can and do collide with this one's, so a stale
+                    // TranslatedFunction here would silently execute THIS
+                    // game's code at an address the NEXT game thinks is
+                    // its own. Reset unconditionally, every path.
+                    Functions = new TranslatorCache<TranslatedFunction>();
+                    BootEventBridge.Report("threadLocalCachesReset", "true");
+
                     Stubs.Dispose();
                     FunctionTable.Dispose();
+                    BootEventBridge.Report("dispatchStubReset", "true");
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} JIT dispose");
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} mappings released");
+
+                    BootEventBridge.Report("translatorDisposed", "true");
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} translator disposed");
+
+                    BootEventBridge.Report($"GAME SESSION {_sessionId} shutdown complete");
                 }
 
                 _disposed = true;

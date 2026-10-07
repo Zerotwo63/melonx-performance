@@ -60,6 +60,20 @@ struct SettingsViewNew: View {
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
     }
+
+    /// Objective 2C: lets a real device confirm EXACTLY which commit/branch
+    /// an installed IPA came from, without needing the build machine -
+    /// written into Info.plist by ios-unsigned-ipa.yml's "Record build
+    /// identifiers" step (git rev-parse at checkout time), so a manual/
+    /// local Xcode build that never ran that CI step falls back to
+    /// "unknown" honestly rather than showing a stale or fabricated value.
+    private var buildCommitSHA: String {
+        (Bundle.main.infoDictionary?["GitCommitSHA"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unknown"
+    }
+
+    private var buildBranch: String {
+        (Bundle.main.infoDictionary?["GitBranch"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "unknown"
+    }
     
     private var isRegularLayout: Bool {
         (horizontalSizeClass == .regular && verticalSizeClass == .regular) ||
@@ -402,7 +416,12 @@ struct SettingsViewNew: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
-            
+
+            Text("Build \(buildBranch)@\(buildCommitSHA.prefix(10))")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .textSelection(.enabled)
+
             if isRegularLayout {
                 HStack(spacing: 16) { deviceInfoCards }
             } else {

@@ -139,9 +139,26 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             _blocks.Insert(index, block);
         }
 
+        /// <summary>
+        /// Resets the allocator back to its construction-time state: one
+        /// single free block covering the entire capacity. The previous
+        /// implementation only did `_blocks.Clear()`, leaving ZERO free
+        /// blocks - every subsequent <see cref="Allocate(int)"/> call then
+        /// fell through the "no block big enough" loop immediately and
+        /// returned -1 (interpreted by callers as permanent
+        /// out-of-memory), regardless of <see cref="FreeSize"/> reporting
+        /// the full capacity as available. This is the confirmed root
+        /// cause of the second-game-after-first-game-closes failure: this
+        /// allocator backs the dual-mapped shared/local JIT caches, which
+        /// are process-wide singletons reused across game sessions -
+        /// disposing the first game's <c>Translator</c> called this
+        /// buggy <c>Clear()</c> on the SAME allocator instance the second
+        /// game then tried to allocate from.
+        /// </summary>
         public void Clear()
         {
             _blocks.Clear();
+            _blocks.Add(new MemoryBlock(0, _capacity));
             _usedSize = 0;
         }
     }

@@ -604,6 +604,45 @@ namespace Ryujinx.Cpu.LightningJit.Cache
             }
         }
 
+        /// <summary>
+        /// PROCESS JIT STATE vs GAME SESSION JIT STATE: this cache
+        /// (specifically its <see cref="DualMappedJitAllocator"/>-backed
+        /// RW/RX memory mapping) is a process-wide singleton on iOS - once
+        /// JIT26-prepared (see Ryujinx.Memory.DualMappedJitAllocator), that
+        /// mapping cannot be re-prepared after the external debugger/script
+        /// detaches, so it must survive for the life of the process, NOT
+        /// be torn down when a single game session ends. This method
+        /// clears ONLY the per-game bookkeeping - tracked functions,
+        /// pending (not-yet-aligned) ranges, and allocator free-list state
+        /// (back to "fully free", via <see cref="CacheMemoryAllocator.Clear"/>)
+        /// - so the NEXT game session starts with a clean, fully-reusable
+        /// cache without ever touching the underlying mapping. Call this
+        /// instead of <see cref="Dispose"/> whenever this instance is the
+        /// shared process-wide singleton; <see cref="Dispose"/> remains
+        /// correct for a genuinely per-session instance (the non-TXM,
+        /// not-yet-firstSet path in Translator's constructor).
+        /// </summary>
+        public (int regionsReleased, int regionsRemaining) EndGameSession()
+        {
+            lock (_lock)
+            {
+                int before = _functionMetadata.Count;
+
+                _functionMetadata.Clear();
+                _pendingMap.Clear();
+                _sharedCache.CacheAllocator.Clear();
+                _localCache.CacheAllocator.Clear();
+
+                int after = _functionMetadata.Count;
+
+                BootEventBridge.Report("jitRegionCountBeforeShutdown", before.ToString());
+                BootEventBridge.Report("jitRegionCountAfterShutdown", after.ToString());
+                BootEventBridge.Report("jitMappingsReleased", (before - after).ToString());
+
+                return (before, after);
+            }
+        }
+
         protected virtual void Dispose(bool disposing)
         {
             if (disposing)

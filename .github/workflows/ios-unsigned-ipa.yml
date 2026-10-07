@@ -84,6 +84,15 @@ jobs:
             -scheme "$XCODE_SCHEME" \
             -resolvePackageDependencies
 
+      - name: Record build identifiers (Objective 2C)
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="${GITHUB_REF_NAME}"
+          echo "Recording GitCommitSHA=$sha GitBranch=$branch into Info.plist"
+          plutil -replace GitCommitSHA -string "$sha" "src/MeloNX/MeloNX/Info.plist"
+          plutil -replace GitBranch -string "$branch" "src/MeloNX/MeloNX/Info.plist"
+
       - name: Build unsigned app
         run: |
           set -euo pipefail
