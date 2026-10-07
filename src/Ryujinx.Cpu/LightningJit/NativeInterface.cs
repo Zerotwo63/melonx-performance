@@ -1,6 +1,8 @@
 using ARMeilleure.Memory;
 using Ryujinx.Cpu.LightningJit.State;
+using Ryujinx.Common.Logging;
 using System;
+using System.Threading;
 
 namespace Ryujinx.Cpu.LightningJit
 {
@@ -8,6 +10,14 @@ namespace Ryujinx.Cpu.LightningJit
     {
         private const int DczSizeLog2 = 4; // Log2 size in words
         private const int DczSizeInBytes = 4 << DczSizeLog2;
+
+        // Additive diagnostics counter only - does not affect behavior. This
+        // is called directly from hand-assembled ARM64 code via a native
+        // function pointer (Blr _getFunctionAddress), not from any other C#
+        // code - a marker on the very first statement here is the earliest
+        // possible managed-side confirmation that the generated dispatch
+        // code's BLR to this callback actually landed.
+        private static int s_getFunctionAddressCalls;
 
         private class ThreadContext
         {
@@ -63,7 +73,21 @@ namespace Ryujinx.Cpu.LightningJit
 
         public static ulong GetFunctionAddress(IntPtr framePointer, ulong address)
         {
-            return (ulong)Context.Translator.GetOrTranslatePointer(framePointer, address, GetContext().ExecutionMode);
+            int calls = Interlocked.Increment(ref s_getFunctionAddressCalls);
+            bool verbose = calls <= 10 || calls % 50 == 0;
+
+            if (verbose)
+            {
+                BootEventBridge.Report("NativeInterface.GetFunctionAddress entered", $"framePointer=0x{framePointer:X},address=0x{address:X},calls={calls}");
+            }
+
+            ulong result = (ulong)Context.Translator.GetOrTranslatePointer(framePointer, address, GetContext().ExecutionMode);
+
+            if (verbose)
+            {
+                BootEventBridge.Report("NativeInterface.GetFunctionAddress returning", $"result=0x{result:X},calls={calls}");
+            }
+            return result;
         }
 
         public static void InvalidateJitCacheRegion(ulong address, ulong size)

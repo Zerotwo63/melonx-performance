@@ -263,6 +263,18 @@ namespace Ryujinx.Cpu.LightningJit.Cache
 
         public unsafe nint MapPageAligned(ReadOnlySpan<byte> code)
         {
+            return MapPageAligned(code, out _);
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 2): identical to <see cref="MapPageAligned(ReadOnlySpan{byte})"/> -
+        /// this cache has no separate RW/RX address pair (one mapping,
+        /// reprotected in place via ReprotectAsRx), so rwAddress here is the
+        /// same pointer as the return value, exposed for API symmetry with
+        /// DualMappedNoWxCache's version.
+        /// </summary>
+        public unsafe nint MapPageAligned(ReadOnlySpan<byte> code, out nint rwAddress)
+        {
             lock (_lock)
             {
                 // Ensure we will get an aligned offset from the allocator.
@@ -274,6 +286,7 @@ namespace Ryujinx.Cpu.LightningJit.Cache
                 Debug.Assert((funcOffset & ((int)MemoryBlock.GetPageSize() - 1)) == 0);
 
                 nint funcPtr = _sharedCache.GetPointerForOffset(funcOffset);
+                rwAddress = funcPtr;
                 code.CopyTo(new Span<byte>((void*)funcPtr, code.Length));
 
                 _sharedCache.ReprotectAsRx(funcOffset, sizeAligned);

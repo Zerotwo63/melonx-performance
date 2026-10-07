@@ -63,6 +63,7 @@ namespace Ryujinx.Cpu.LightningJit
         private int _realFunctionsCompiled;
         private int _nopFallbacks;
         private int _jitMemEvents;
+        private static int s_sameMapProbeRun;
 
         private static DualMappedNoWxCache originalDualMappedCache;
         private static bool firstSet = false;
@@ -191,6 +192,46 @@ namespace Ryujinx.Cpu.LightningJit
             }
         }
 
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 3): reports TranslatorStubs' native
+        /// stage markers (written directly by generated ARM64 code, see
+        /// TranslatorStubs.EmitDiagMarker) via the boot-event bridge
+        /// whenever they change, while the real DispatchLoop call is in
+        /// flight. Read-only, zero effect on the real dispatch - just a
+        /// cheap periodic poll (3 int reads) from a background thread.
+        /// </summary>
+        private void PollDiagMarkers(CancellationToken token)
+        {
+            int lastDispatchLoop = -1, lastDispatchStub = -1, lastSlowDispatchStub = -1;
+
+            while (!token.IsCancellationRequested)
+            {
+                int dispatchLoop = Stubs.DiagDispatchLoopStage;
+                int dispatchStub = Stubs.DiagDispatchStubStage;
+                int slowDispatchStub = Stubs.DiagSlowDispatchStubStage;
+
+                if (dispatchLoop != lastDispatchLoop)
+                {
+                    BootEventBridge.Report("LightningJit.dispatchLoopNativeStage", dispatchLoop.ToString());
+                    lastDispatchLoop = dispatchLoop;
+                }
+
+                if (dispatchStub != lastDispatchStub)
+                {
+                    BootEventBridge.Report("LightningJit.dispatchStubStage", dispatchStub.ToString());
+                    lastDispatchStub = dispatchStub;
+                }
+
+                if (slowDispatchStub != lastSlowDispatchStub)
+                {
+                    BootEventBridge.Report("LightningJit.slowDispatchStubStage", slowDispatchStub.ToString());
+                    lastSlowDispatchStub = slowDispatchStub;
+                }
+
+                token.WaitHandle.WaitOne(200);
+            }
+        }
+
         public void Execute(State.ExecutionContext context, ulong address)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -203,15 +244,103 @@ namespace Ryujinx.Cpu.LightningJit
 
                 // NativeInterface.SetPageTablePointer();
 
-                // Stubs.DispatchLoop is a Lazy<T> - the first access here
-                // triggers native ARM64 code generation for the dispatch
-                // loop/stub/slow-dispatch-stub (see TranslatorStubs.cs) and
-                // maps it into executable memory BEFORE any guest code runs.
-                // This call then blocks until the guest thread itself stops
-                // running (same "runs forever on this thread" pattern as the
-                // render loop) - it does not return until the guest exits.
+                // Diagnóstico real #7 (FASE 2): run the same-map probe exactly
+                // once (first guest thread only, across ALL Translator
+                // instances - Stubs is shared static) before the real
+                // DispatchLoop ever runs. Never skips or alters the real
+                // dispatch below regardless of the probe's outcome - it is
+                // purely informational.
+                if (Interlocked.CompareExchange(ref s_sameMapProbeRun, 1, 0) == 0)
+                {
+                    try
+                    {
+                        Stubs.RunSameMapProbe();
+                    }
+                    catch (Exception ex)
+                    {
+                        BootEventBridge.ReportFail("LightningJit.SameMapProbe", ex);
+                    }
+                }
+
                 BootEventBridge.Report("LightningJit.Translator.Execute before DispatchLoop", $"pc=0x{address:X}");
-                Stubs.DispatchLoop(context.NativeContextPtr, address);
+
+                // Diagnóstico real #7 (FASE 1): split what used to be a single
+                // `Stubs.DispatchLoop(...)` expression into its real steps -
+                // resolving the Lazy<DispatcherFunction> (which triggers native
+                // ARM64 codegen for the dispatch loop/stub/slow-dispatch-stub on
+                // first access, see TranslatorStubs.cs), obtaining its real raw
+                // function pointer (for visibility only - the call below still
+                // goes through the delegate, unchanged), and the call itself.
+                BootEventBridge.Report("LightningJit.DispatchLoop resolve begin");
+                DispatcherFunction dispatchLoopDelegate = Stubs.DispatchLoop;
+                BootEventBridge.Report("LightningJit.DispatchLoop resolve end");
+
+                IntPtr dispatchLoopPtr = Marshal.GetFunctionPointerForDelegate(dispatchLoopDelegate);
+                BootEventBridge.Report("LightningJit.DispatchLoop pointer", $"0x{dispatchLoopPtr:X}");
+
+                // Diagnóstico real #7 (FASE 6): safe to read Base/Fill now -
+                // resolving Stubs.DispatchLoop just above already triggered
+                // GenerateDispatchLoop/GenerateDispatchStub, which already
+                // accessed _functionTable.Base/.Fill for real codegen - this
+                // is a read of already-allocated state, not a new allocation.
+                try
+                {
+                    Stubs.LogFunctionTableLookup(address);
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("LightningJit.FunctionTable lookup", ex);
+                }
+
+                // Diagnóstico real #7 (FASE 4): OFF unless
+                // LIGHTNINGJIT_DIAG_DIRECT_DISPATCH=1 is explicitly set (see
+                // RunDirectDispatchProbe) - never runs in a normal boot.
+                // framePointer=IntPtr.Zero here is a synthetic placeholder:
+                // there is no real native stack frame at this call site
+                // (unlike the real DispatchStub, which passes its actual
+                // X29), since this call originates from plain managed code,
+                // not from within generated dispatch code.
+                try
+                {
+                    Stubs.RunDirectDispatchProbe(IntPtr.Zero, address);
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("LightningJit.DirectDispatchProbe", ex);
+                }
+
+                // Diagnóstico real #7 (FASE 3): the stage markers above live
+                // in plain native memory that the GENERATED ARM64 code
+                // writes to directly - nothing manages pushes them into the
+                // boot-event stream on its own. Poll them from a background
+                // thread (cheap: 3 int reads every ~200ms) and report only
+                // on change, so BootDiagnostics/the watchdog can show real
+                // progress through DispatchLoop/DispatchStub/SlowDispatchStub
+                // while the blocking call below is in flight.
+                using CancellationTokenSource markerPollCts = new();
+                Thread markerPollThread = new(() => PollDiagMarkers(markerPollCts.Token))
+                {
+                    IsBackground = true,
+                    Name = "LightningJit.DiagMarkerPoll",
+                };
+                markerPollThread.Start();
+
+                // This call blocks until the guest thread itself stops running
+                // (same "runs forever on this thread" pattern as the render
+                // loop) - CALL BEGIN appearing without CALL RETURNED is expected
+                // while the guest keeps executing; what matters is confirming
+                // control actually reached the call.
+                BootEventBridge.Report("LightningJit.DispatchLoop CALL BEGIN", $"pc=0x{address:X}");
+                try
+                {
+                    dispatchLoopDelegate(context.NativeContextPtr, address);
+                }
+                finally
+                {
+                    markerPollCts.Cancel();
+                }
+                BootEventBridge.Report("LightningJit.DispatchLoop CALL RETURNED", $"pc=0x{address:X}");
+
                 BootEventBridge.Report("LightningJit.Translator.Execute after DispatchLoop", $"pc=0x{address:X}");
 
                 NativeInterface.UnregisterThread();

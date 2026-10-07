@@ -112,6 +112,32 @@ struct BootWatchdogView: View {
                 row("Host function call returned", "\(diagnostics.hostFunctionCallReturned)")
             }
 
+            Text("DISPATCH / NATIVE STAGES").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("DispatchLoop resolved", "\(diagnostics.dispatchLoopResolved)")
+                row("DispatchLoop call began", "\(diagnostics.dispatchLoopCallBegan)")
+                row("DispatchLoop call returned", "\(diagnostics.dispatchLoopCallReturned)")
+                row("DispatchLoop native stage", "\(diagnostics.dispatchLoopNativeStage)")
+                row("DispatchStub entered", "\(diagnostics.dispatchStubEntered) (stage \(diagnostics.dispatchStubStage))")
+                row("SlowDispatchStub entered", "\(diagnostics.slowDispatchStubEntered) (stage \(diagnostics.slowDispatchStubStage))")
+            }
+
+            Text("SAME-MAP PROBE").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("Probe passed", diagnostics.dispatchProbePassed.map { "\($0)" } ?? "unknown")
+                row("Probe call attempted/returned", "\(diagnostics.dispatchProbeCallAttempted) / \(diagnostics.dispatchProbeReturned)")
+                row("Probe return value", diagnostics.dispatchProbeReturnValue ?? "none")
+                row("Probe RW/RX address", "\(diagnostics.dispatchProbeRwAddress ?? "none") / \(diagnostics.dispatchProbeRxAddress ?? "none")")
+            }
+
+            Text("NativeInterface / FunctionTable").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("GetFunctionAddress entered", "\(diagnostics.nativeGetFunctionAddressEntered) (calls \(diagnostics.nativeGetFunctionAddressCalls))")
+                row("FunctionTable address in range", diagnostics.functionTableAddressInRange.map { "\($0)" } ?? "unknown")
+                row("FunctionTable level indices", diagnostics.functionTableLevelIndices ?? "none")
+                row("JITMEM RW/RX bytes match", diagnostics.jitMemBytesMatch.map { "\($0)" } ?? "unknown")
+            }
+
             Text("THREAD SNAPSHOT").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GPU thread alive", "\(diagnostics.gpuThreadAlive)")

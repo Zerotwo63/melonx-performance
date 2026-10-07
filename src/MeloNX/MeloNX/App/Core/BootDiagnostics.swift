@@ -139,6 +139,65 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var hostFunctionCallAttempted = false
     @Published private(set) var hostFunctionCallReturned = false
 
+    // Diagnóstico real #7: isolating WHERE inside LightningJit execution
+    // actually stops - DispatchLoop delegate resolution/call (FASE 1), a
+    // same-map probe proving the dual-mapping/icache/invocation mechanism
+    // itself works (FASE 2), native stage markers written directly by the
+    // generated ARM64 code (FASE 3), an opt-in direct-dispatch probe (FASE 4),
+    // the earliest possible GetFunctionAddress marker (FASE 5), a read-only
+    // FunctionTable snapshot (FASE 6), and RW/RX byte-level verification
+    // (FASE 7, extends jitRwAddress/jitRxAddress above with actual content).
+    @Published private(set) var dispatchLoopResolved = false
+    @Published private(set) var dispatchLoopPointer: String?
+    @Published private(set) var dispatchLoopCallBegan = false
+    @Published private(set) var dispatchLoopCallReturned = false
+
+    // FASE 3: raw native stage values (see TranslatorStubs.EmitDiagMarker) -
+    // 0 means "never written", polled from native memory while DispatchLoop
+    // runs (see Translator.PollDiagMarkers), not something C# sets directly.
+    @Published private(set) var dispatchLoopNativeStage = 0
+    @Published private(set) var dispatchStubStage = 0
+    @Published private(set) var slowDispatchStubStage = 0
+    var dispatchStubEntered: Bool { dispatchStubStage > 0 }
+    var slowDispatchStubEntered: Bool { slowDispatchStubStage > 0 }
+
+    // FASE 2: same-map probe (generates/maps/calls a tiny known function
+    // through the EXACT cache DispatchLoop uses, expects 0x12345678 back).
+    @Published private(set) var dispatchProbeRwAddress: String?
+    @Published private(set) var dispatchProbeRxAddress: String?
+    @Published private(set) var dispatchProbeCallAttempted = false
+    @Published private(set) var dispatchProbeReturned = false
+    @Published private(set) var dispatchProbeReturnValue: String?
+    @Published private(set) var dispatchProbeBytesWritten: String?
+    @Published private(set) var dispatchProbeBytesReadBack: String?
+    @Published private(set) var dispatchProbePassed: Bool?
+
+    // FASE 5: earliest possible marker inside NativeInterface.GetFunctionAddress.
+    @Published private(set) var nativeGetFunctionAddressEntered = false
+    @Published private(set) var nativeGetFunctionAddressCalls = 0
+    @Published private(set) var nativeGetFunctionAddressAddress: String?
+    @Published private(set) var nativeGetFunctionAddressFramePointer: String?
+
+    // FASE 6: read-only FunctionTable snapshot for the first guest PC.
+    @Published private(set) var functionTableBase: String?
+    @Published private(set) var functionTableMask: String?
+    @Published private(set) var functionTableFill: String?
+    @Published private(set) var functionTableLevelCount: Int?
+    @Published private(set) var functionTableDispatchStubPtr: String?
+    @Published private(set) var functionTableSlowDispatchStubPtr: String?
+    @Published private(set) var functionTableAddressInRange: Bool?
+    @Published private(set) var functionTableLevelIndices: String?
+
+    // FASE 4: off by default (LIGHTNINGJIT_DIAG_DIRECT_DISPATCH=1 required).
+    @Published private(set) var directDispatchProbeAttempted = false
+    @Published private(set) var directDispatchProbeResult: String?
+
+    // FASE 7: byte-level RW/RX coherence check on the real (non-probe)
+    // guest-function mapping path, extending jitRwAddress/jitRxAddress above.
+    @Published private(set) var jitMemBytesWritten: String?
+    @Published private(set) var jitMemBytesReadBack: String?
+    @Published private(set) var jitMemBytesMatch: Bool?
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -247,6 +306,38 @@ final class BootDiagnostics: ObservableObject {
             self.jitRxAddress = nil
             self.hostFunctionCallAttempted = false
             self.hostFunctionCallReturned = false
+            self.dispatchLoopResolved = false
+            self.dispatchLoopPointer = nil
+            self.dispatchLoopCallBegan = false
+            self.dispatchLoopCallReturned = false
+            self.dispatchLoopNativeStage = 0
+            self.dispatchStubStage = 0
+            self.slowDispatchStubStage = 0
+            self.dispatchProbeRwAddress = nil
+            self.dispatchProbeRxAddress = nil
+            self.dispatchProbeCallAttempted = false
+            self.dispatchProbeReturned = false
+            self.dispatchProbeReturnValue = nil
+            self.dispatchProbeBytesWritten = nil
+            self.dispatchProbeBytesReadBack = nil
+            self.dispatchProbePassed = nil
+            self.nativeGetFunctionAddressEntered = false
+            self.nativeGetFunctionAddressCalls = 0
+            self.nativeGetFunctionAddressAddress = nil
+            self.nativeGetFunctionAddressFramePointer = nil
+            self.functionTableBase = nil
+            self.functionTableMask = nil
+            self.functionTableFill = nil
+            self.functionTableLevelCount = nil
+            self.functionTableDispatchStubPtr = nil
+            self.functionTableSlowDispatchStubPtr = nil
+            self.functionTableAddressInRange = nil
+            self.functionTableLevelIndices = nil
+            self.directDispatchProbeAttempted = false
+            self.directDispatchProbeResult = nil
+            self.jitMemBytesWritten = nil
+            self.jitMemBytesReadBack = nil
+            self.jitMemBytesMatch = nil
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -355,7 +446,53 @@ final class BootDiagnostics: ObservableObject {
             )
         }
 
+        // Diagnóstico real #7: once translatedFunctionsCreated==0 (the real
+        // LightningJit backend never produced a single translated
+        // function), distinguish A-F from the user's exact enumeration
+        // using the FASE 1-6 evidence, instead of a single generic bucket.
         if translatedFunctionsCreated == 0 && gpfifoSubmissions == 0 {
+            if dispatchProbePassed == false {
+                return (
+                    "Scenario A - dual mapping / icache / invocación de código generado",
+                    "the same-map probe (known function through the exact same cache DispatchLoop uses) FAILED to execute or return the expected constant; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), jitMemBytesMatch=\(jitMemBytesMatch.map { "\($0)" } ?? "unknown") - the generated-code execution/mapping mechanism itself is broken, independent of DispatchLoop's own logic"
+                )
+            }
+
+            if dispatchLoopCallBegan && dispatchLoopNativeStage == 0 {
+                return (
+                    "Scenario B - entrando al delegate/function pointer de DispatchLoop",
+                    "CALL BEGIN was logged (the managed delegate call was issued) but DispatchLoop's native code never wrote its first stage marker; dispatchLoopPointer=\(dispatchLoopPointer ?? "none"), dispatchProbePassed=\(dispatchProbePassed.map { "\($0)" } ?? "unknown") (probe passing would mean the jump mechanism itself works, so the problem is specific to this particular call/pointer)"
+                )
+            }
+
+            if dispatchLoopNativeStage >= 1 && dispatchLoopNativeStage < 4 && dispatchStubStage == 0 {
+                return (
+                    "Scenario C - primeras instrucciones de DispatchLoop, antes de llegar a DispatchStub",
+                    "dispatchLoopNativeStage=\(dispatchLoopNativeStage) (never reached 4 = \"antes de BLR DispatchStub\"); dispatchStubEntered=\(dispatchStubEntered)"
+                )
+            }
+
+            if dispatchLoopNativeStage >= 4 && dispatchStubStage == 0 {
+                return (
+                    "Scenario C-D boundary - BLR DispatchStub fue emitido pero DispatchStub nunca escribió su primer marcador",
+                    "dispatchLoopNativeStage=\(dispatchLoopNativeStage) (reached the BLR) but dispatchStubStage=0 - the jump into DispatchStub itself may not be landing"
+                )
+            }
+
+            if dispatchStubStage > 0 && !nativeGetFunctionAddressEntered {
+                return (
+                    "Scenario D - FunctionTable/fallback/BLR dentro de DispatchStub",
+                    "dispatchStubStage=\(dispatchStubStage) (entered DispatchStub) but NativeInterface.GetFunctionAddress was never reached; functionTableAddressInRange=\(functionTableAddressInRange.map { "\($0)" } ?? "unknown"), functionTableLevelIndices=\(functionTableLevelIndices ?? "none")"
+                )
+            }
+
+            if nativeGetFunctionAddressEntered && translationAttempts == 0 {
+                return (
+                    "Scenario E - NativeInterface.GetFunctionAddress / GetOrTranslate",
+                    "GetFunctionAddress was entered (calls=\(nativeGetFunctionAddressCalls)) but GetOrTranslatePointer never reached a real Translate attempt; nopFallbackCount=\(nopFallbackCount) (a non-zero count here means it DID try and fell back to a NOP, not that it never tried)"
+                )
+            }
+
             return (
                 "guest CPU / translator startup",
                 "guest execution entered Context.Execute but no translated function was created or executed; translatorExecuteEntered=\(translatorExecuteEntered), translatorLookupAttempts=\(translatorLookupAttempts), translationAttempts=\(translationAttempts), nopFallbackCount=\(nopFallbackCount), lastTranslatorStage=\(lastTranslatorStage ?? "none")"
@@ -363,6 +500,13 @@ final class BootDiagnostics: ObservableObject {
         }
 
         if gpfifoSubmissions == 0 {
+            if translatedFunctionsCreated > 0 && !hostFunctionCallReturned {
+                return (
+                    "Scenario F - segundo salto hacia código JIT generado",
+                    "translatedFunctionsCreated=\(translatedFunctionsCreated) but the native dispatcher never came back for a second lookup (hostFunctionCallReturned=false) - the first translated function may be stuck executing, crashed silently, or never actually ran despite being mapped; dispatchStubStage=\(dispatchStubStage)"
+                )
+            }
+
             return (
                 "guest CPU / GPU producer",
                 "guest code is translating and executing (translatedFunctionsCreated=\(translatedFunctionsCreated)) but never submitted any GPU FIFO work; gpuChannelsCreated=\(gpuChannelsCreated), lastNvStage=\(lastNvStage ?? "none")"
@@ -614,6 +758,80 @@ final class BootDiagnostics: ObservableObject {
             jitRwAddress = result
         case "JITMEM RX ptr":
             jitRxAddress = result
+        case "JITMEM bytes written (RW)":
+            jitMemBytesWritten = result
+        case "JITMEM bytes read back (RX alias)":
+            jitMemBytesReadBack = result
+        case "JITMEM RW/RX bytes match":
+            jitMemBytesMatch = (result == "true")
+
+        // Diagnóstico real #7: isolating exactly where inside LightningJit
+        // execution progress stops (FASES 1-7, see field doc comments above).
+        case "LightningJit.DispatchLoop resolve end":
+            dispatchLoopResolved = true
+        case "LightningJit.DispatchLoop pointer":
+            dispatchLoopPointer = result
+        case "LightningJit.DispatchLoop CALL BEGIN":
+            dispatchLoopCallBegan = true
+        case "LightningJit.DispatchLoop CALL RETURNED":
+            dispatchLoopCallReturned = true
+        case "LightningJit.dispatchLoopNativeStage":
+            if let result, let n = Int(result) { dispatchLoopNativeStage = n }
+        case "LightningJit.dispatchStubStage":
+            if let result, let n = Int(result) { dispatchStubStage = n }
+        case "LightningJit.slowDispatchStubStage":
+            if let result, let n = Int(result) { slowDispatchStubStage = n }
+        case "LightningJit.SameMapProbe mapped":
+            if let result {
+                dispatchProbeRwAddress = Self.extractField(result, "rw")
+                dispatchProbeRxAddress = Self.extractField(result, "rx")
+            }
+        case "LightningJit.SameMapProbe bytes written":
+            dispatchProbeBytesWritten = result
+        case "LightningJit.SameMapProbe bytes read back (RW alias)":
+            dispatchProbeBytesReadBack = result
+        case "LightningJit.SameMapProbe call begin":
+            dispatchProbeCallAttempted = true
+        case "LightningJit.SameMapProbe call returned":
+            dispatchProbeReturned = true
+            if let result { dispatchProbeReturnValue = Self.extractField(result, "result") }
+        case "LightningJit.SameMapProbe PASS":
+            dispatchProbePassed = true
+        case "LightningJit.SameMapProbe FAIL":
+            dispatchProbePassed = false
+        case "NativeInterface.GetFunctionAddress entered":
+            nativeGetFunctionAddressEntered = true
+            if let result {
+                if let s = Self.extractField(result, "calls"), let n = Int(s) {
+                    nativeGetFunctionAddressCalls = max(nativeGetFunctionAddressCalls, n)
+                }
+                nativeGetFunctionAddressAddress = Self.extractField(result, "address")
+                nativeGetFunctionAddressFramePointer = Self.extractField(result, "framePointer")
+            }
+        case "LightningJit.FunctionTable info":
+            if let result {
+                functionTableBase = Self.extractField(result, "base")
+                functionTableMask = Self.extractField(result, "mask")
+                functionTableFill = Self.extractField(result, "fill")
+                if let s = Self.extractField(result, "levelCount"), let n = Int(s) {
+                    functionTableLevelCount = n
+                }
+            }
+        case "LightningJit.FunctionTable stubs":
+            if let result {
+                functionTableDispatchStubPtr = Self.extractField(result, "dispatchStub")
+                functionTableSlowDispatchStubPtr = Self.extractField(result, "slowDispatchStub")
+            }
+        case "LightningJit.FunctionTable lookup":
+            if let result, let s = Self.extractField(result, "inRange") {
+                functionTableAddressInRange = (s == "true")
+            }
+        case "LightningJit.FunctionTable level indices":
+            functionTableLevelIndices = result
+        case "LightningJit.DirectDispatchProbe begin":
+            directDispatchProbeAttempted = true
+        case "LightningJit.DirectDispatchProbe result":
+            if let result { directDispatchProbeResult = Self.extractField(result, "hostFuncPtr") }
         default:
             break
         }
@@ -734,6 +952,19 @@ final class BootDiagnostics: ObservableObject {
             "LightningJit translate begin", "LightningJit translate compiled", "LightningJit translate mapped",
             "LightningJit translate NOP fallback",
             "JITMEM allocate", "JITMEM RW ptr", "JITMEM RX ptr", "JITMEM cache flush begin", "JITMEM cache flush end",
+            "JITMEM bytes written (RW)", "JITMEM bytes read back (RX alias)", "JITMEM RW/RX bytes match",
+            // Diagnóstico real #7 (FASES 1-7).
+            "LightningJit.DispatchLoop resolve begin", "LightningJit.DispatchLoop resolve end",
+            "LightningJit.DispatchLoop pointer", "LightningJit.DispatchLoop CALL BEGIN", "LightningJit.DispatchLoop CALL RETURNED",
+            "LightningJit.dispatchLoopNativeStage", "LightningJit.dispatchStubStage", "LightningJit.slowDispatchStubStage",
+            "LightningJit.SameMapProbe begin", "LightningJit.SameMapProbe mapped",
+            "LightningJit.SameMapProbe bytes written", "LightningJit.SameMapProbe bytes read back (RW alias)",
+            "LightningJit.SameMapProbe call begin", "LightningJit.SameMapProbe call returned",
+            "LightningJit.SameMapProbe PASS", "LightningJit.SameMapProbe FAIL",
+            "NativeInterface.GetFunctionAddress entered", "NativeInterface.GetFunctionAddress returning",
+            "LightningJit.FunctionTable info", "LightningJit.FunctionTable stubs",
+            "LightningJit.FunctionTable lookup", "LightningJit.FunctionTable level indices",
+            "LightningJit.DirectDispatchProbe begin", "LightningJit.DirectDispatchProbe result",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
@@ -882,6 +1113,54 @@ final class BootDiagnostics: ObservableObject {
         lines.append("jitRxAddress = \(jitRxAddress ?? "none")")
         lines.append("hostFunctionCallAttempted = \(hostFunctionCallAttempted)")
         lines.append("hostFunctionCallReturned = \(hostFunctionCallReturned)")
+        lines.append("")
+        lines.append("DISPATCH (FASE 1 - DispatchLoop delegate resolve/call):")
+        lines.append("dispatchLoopResolved = \(dispatchLoopResolved)")
+        lines.append("dispatchLoopPointer = \(dispatchLoopPointer ?? "none")")
+        lines.append("dispatchLoopCallBegan = \(dispatchLoopCallBegan)")
+        lines.append("dispatchLoopCallReturned = \(dispatchLoopCallReturned)")
+        lines.append("")
+        lines.append("NATIVE STAGE MARKERS (FASE 3 - written by generated ARM64 code itself):")
+        lines.append("dispatchLoopNativeStage = \(dispatchLoopNativeStage)")
+        lines.append("dispatchStubStage = \(dispatchStubStage)")
+        lines.append("dispatchStubEntered = \(dispatchStubEntered)")
+        lines.append("slowDispatchStubStage = \(slowDispatchStubStage)")
+        lines.append("slowDispatchStubEntered = \(slowDispatchStubEntered)")
+        lines.append("")
+        lines.append("SAME-MAP PROBE (FASE 2 - known-constant function through the exact same cache):")
+        lines.append("dispatchProbeRwAddress = \(dispatchProbeRwAddress ?? "none")")
+        lines.append("dispatchProbeRxAddress = \(dispatchProbeRxAddress ?? "none")")
+        lines.append("dispatchProbeCallAttempted = \(dispatchProbeCallAttempted)")
+        lines.append("dispatchProbeReturned = \(dispatchProbeReturned)")
+        lines.append("dispatchProbeReturnValue = \(dispatchProbeReturnValue ?? "none")")
+        lines.append("dispatchProbePassed = \(dispatchProbePassed.map { "\($0)" } ?? "unknown")")
+        lines.append("dispatchProbeBytesWritten = \(dispatchProbeBytesWritten ?? "none")")
+        lines.append("dispatchProbeBytesReadBack = \(dispatchProbeBytesReadBack ?? "none")")
+        lines.append("")
+        lines.append("NativeInterface.GetFunctionAddress (FASE 5 - earliest possible marker):")
+        lines.append("nativeGetFunctionAddressEntered = \(nativeGetFunctionAddressEntered)")
+        lines.append("nativeGetFunctionAddressCalls = \(nativeGetFunctionAddressCalls)")
+        lines.append("nativeGetFunctionAddressAddress = \(nativeGetFunctionAddressAddress ?? "none")")
+        lines.append("nativeGetFunctionAddressFramePointer = \(nativeGetFunctionAddressFramePointer ?? "none")")
+        lines.append("")
+        lines.append("FUNCTION TABLE (FASE 6 - read-only snapshot for the first guest PC):")
+        lines.append("functionTableBase = \(functionTableBase ?? "none")")
+        lines.append("functionTableMask = \(functionTableMask ?? "none")")
+        lines.append("functionTableFill = \(functionTableFill ?? "none")")
+        lines.append("functionTableLevelCount = \(functionTableLevelCount.map { "\($0)" } ?? "none")")
+        lines.append("functionTableDispatchStubPtr = \(functionTableDispatchStubPtr ?? "none")")
+        lines.append("functionTableSlowDispatchStubPtr = \(functionTableSlowDispatchStubPtr ?? "none")")
+        lines.append("functionTableAddressInRange = \(functionTableAddressInRange.map { "\($0)" } ?? "unknown")")
+        lines.append("functionTableLevelIndices = \(functionTableLevelIndices ?? "none")")
+        lines.append("")
+        lines.append("DIRECT-DISPATCH PROBE (FASE 4 - off unless LIGHTNINGJIT_DIAG_DIRECT_DISPATCH=1):")
+        lines.append("directDispatchProbeAttempted = \(directDispatchProbeAttempted)")
+        lines.append("directDispatchProbeResult = \(directDispatchProbeResult ?? "none")")
+        lines.append("")
+        lines.append("JITMEM BYTE VERIFICATION (FASE 7 - real guest-function mapping path):")
+        lines.append("jitMemBytesWritten = \(jitMemBytesWritten ?? "none")")
+        lines.append("jitMemBytesReadBack = \(jitMemBytesReadBack ?? "none")")
+        lines.append("jitMemBytesMatch = \(jitMemBytesMatch.map { "\($0)" } ?? "unknown")")
         lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")

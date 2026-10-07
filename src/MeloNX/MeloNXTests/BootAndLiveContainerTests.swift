@@ -824,4 +824,233 @@ struct BootAndLiveContainerTests {
         let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
         #expect(stage == "renderer / acquire")
     }
+
+    // MARK: - LightningJit DispatchLoop/DispatchStub/SameMapProbe trace (diagnóstico real #7)
+    //
+    // These tests only cover the diagnostic plumbing (event parsing, field
+    // classification, and the refined A-F watchdog classification) - they
+    // never fabricate real GPU/guest/translator work.
+
+    private func reachTranslatorStartupBoundary() {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JIT verification result", result: "true")
+        BootDiagnostics.shared.log("initialize_dualmapped result", result: "true")
+        BootDiagnostics.shared.log("swapchain creation success", result: "handle=1,extent=1x1,imageCount=1")
+        BootDiagnostics.shared.log("KThread.ThreadStart: guest Context.Execute begin", result: "threadCount=1")
+    }
+
+    @Test func dispatchLoopResolveAndCallFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop resolve end")
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop pointer", result: "0x7000008000")
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL BEGIN", result: "pc=0x8500000")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.dispatchLoopResolved)
+        #expect(BootDiagnostics.shared.dispatchLoopPointer == "0x7000008000")
+        #expect(BootDiagnostics.shared.dispatchLoopCallBegan)
+        #expect(!BootDiagnostics.shared.dispatchLoopCallReturned)
+
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL RETURNED", result: "pc=0x8500000")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.dispatchLoopCallReturned)
+    }
+
+    @Test func nativeStageMarkersDeriveEnteredFlags() async throws {
+        BootDiagnostics.shared.beginBoot()
+        #expect(!BootDiagnostics.shared.dispatchStubEntered)
+        #expect(!BootDiagnostics.shared.slowDispatchStubEntered)
+
+        BootDiagnostics.shared.log("LightningJit.dispatchLoopNativeStage", result: "3")
+        BootDiagnostics.shared.log("LightningJit.dispatchStubStage", result: "10")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.dispatchLoopNativeStage == 3)
+        #expect(BootDiagnostics.shared.dispatchStubStage == 10)
+        #expect(BootDiagnostics.shared.dispatchStubEntered)
+        #expect(!BootDiagnostics.shared.slowDispatchStubEntered)
+    }
+
+    @Test func sameMapProbeFieldsTrackPassAndFail() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe mapped", result: "rw=0xAAA0,rx=0xBBB0")
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe call begin")
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe call returned", result: "result=0x12345678")
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe PASS")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.dispatchProbeRwAddress == "0xAAA0")
+        #expect(BootDiagnostics.shared.dispatchProbeRxAddress == "0xBBB0")
+        #expect(BootDiagnostics.shared.dispatchProbeCallAttempted)
+        #expect(BootDiagnostics.shared.dispatchProbeReturned)
+        #expect(BootDiagnostics.shared.dispatchProbeReturnValue == "0x12345678")
+        #expect(BootDiagnostics.shared.dispatchProbePassed == true)
+
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe FAIL")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.dispatchProbePassed == false)
+    }
+
+    @Test func nativeGetFunctionAddressFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("NativeInterface.GetFunctionAddress entered", result: "framePointer=0x1,address=0x8500000,calls=1")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.nativeGetFunctionAddressEntered)
+        #expect(BootDiagnostics.shared.nativeGetFunctionAddressCalls == 1)
+        #expect(BootDiagnostics.shared.nativeGetFunctionAddressAddress == "0x8500000")
+        #expect(BootDiagnostics.shared.nativeGetFunctionAddressFramePointer == "0x1")
+    }
+
+    @Test func functionTableFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.FunctionTable info", result: "base=0x100,mask=0x1FFFFFFFF,fill=0x7000000000,levelCount=5")
+        BootDiagnostics.shared.log("LightningJit.FunctionTable stubs", result: "dispatchStub=0x7000004000,slowDispatchStub=0x7000000000")
+        BootDiagnostics.shared.log("LightningJit.FunctionTable lookup", result: "address=0x8500000,inRange=true")
+        BootDiagnostics.shared.log("LightningJit.FunctionTable level indices", result: "level0=4,level1=0")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.functionTableBase == "0x100")
+        #expect(BootDiagnostics.shared.functionTableLevelCount == 5)
+        #expect(BootDiagnostics.shared.functionTableDispatchStubPtr == "0x7000004000")
+        #expect(BootDiagnostics.shared.functionTableAddressInRange == true)
+        #expect(BootDiagnostics.shared.functionTableLevelIndices == "level0=4,level1=0")
+    }
+
+    @Test func jitMemByteVerificationFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("JITMEM bytes written (RW)", result: "AABBCCDD")
+        BootDiagnostics.shared.log("JITMEM bytes read back (RX alias)", result: "AABBCCDD")
+        BootDiagnostics.shared.log("JITMEM RW/RX bytes match", result: "true")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.jitMemBytesWritten == "AABBCCDD")
+        #expect(BootDiagnostics.shared.jitMemBytesReadBack == "AABBCCDD")
+        #expect(BootDiagnostics.shared.jitMemBytesMatch == true)
+    }
+
+    @Test func directDispatchProbeFieldsTrack() async throws {
+        BootDiagnostics.shared.beginBoot()
+        #expect(!BootDiagnostics.shared.directDispatchProbeAttempted)
+
+        BootDiagnostics.shared.log("LightningJit.DirectDispatchProbe begin", result: "framePointer=0x0,address=0x8500000")
+        BootDiagnostics.shared.log("LightningJit.DirectDispatchProbe result", result: "hostFuncPtr=0x7000010000")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(BootDiagnostics.shared.directDispatchProbeAttempted)
+        #expect(BootDiagnostics.shared.directDispatchProbeResult == "0x7000010000")
+    }
+
+    // MARK: - Watchdog scenarios A-F (diagnóstico real #7)
+
+    @Test func classifiesScenarioAWhenSameMapProbeFails() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe FAIL")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario A"))
+    }
+
+    @Test func classifiesScenarioBWhenCallBeganButNativeStageNeverAdvances() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL BEGIN", result: "pc=0x8500000")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario B"))
+    }
+
+    @Test func classifiesScenarioCWhenDispatchLoopRunningButNotYetAtDispatchStub() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL BEGIN", result: "pc=0x8500000")
+        BootDiagnostics.shared.log("LightningJit.dispatchLoopNativeStage", result: "3")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario C"))
+    }
+
+    @Test func classifiesScenarioDWhenDispatchStubEnteredButNoGetFunctionAddress() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL BEGIN", result: "pc=0x8500000")
+        BootDiagnostics.shared.log("LightningJit.dispatchLoopNativeStage", result: "4")
+        BootDiagnostics.shared.log("LightningJit.dispatchStubStage", result: "12")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario D"))
+    }
+
+    @Test func classifiesScenarioEWhenGetFunctionAddressEnteredButNoTranslateAttempt() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop CALL BEGIN", result: "pc=0x8500000")
+        BootDiagnostics.shared.log("LightningJit.dispatchLoopNativeStage", result: "4")
+        BootDiagnostics.shared.log("LightningJit.dispatchStubStage", result: "14")
+        BootDiagnostics.shared.log("NativeInterface.GetFunctionAddress entered", result: "framePointer=0x1,address=0x8500000,calls=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario E"))
+    }
+
+    @Test func classifiesScenarioFWhenFunctionCreatedButNeverExecuted() async throws {
+        reachTranslatorStartupBoundary()
+        BootDiagnostics.shared.log("LightningJit translate compiled", result: "pc=0x8500000,hostCodeLength=64,count=1")
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (stage, _) = BootDiagnostics.shared.classifyWatchdogFailure()
+        #expect(stage.hasPrefix("Scenario F"))
+    }
+
+    @Test func beginBootResetsAllFase7Fields() async throws {
+        BootDiagnostics.shared.beginBoot()
+        BootDiagnostics.shared.log("LightningJit.DispatchLoop resolve end")
+        BootDiagnostics.shared.log("LightningJit.dispatchLoopNativeStage", result: "5")
+        BootDiagnostics.shared.log("LightningJit.SameMapProbe PASS")
+        BootDiagnostics.shared.log("NativeInterface.GetFunctionAddress entered", result: "framePointer=0x1,address=0x1,calls=1")
+        BootDiagnostics.shared.log("LightningJit.FunctionTable info", result: "base=0x1,mask=0x1,fill=0x1,levelCount=5")
+        BootDiagnostics.shared.log("LightningJit.DirectDispatchProbe begin")
+        BootDiagnostics.shared.log("JITMEM RW/RX bytes match", result: "true")
+
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(BootDiagnostics.shared.dispatchLoopResolved)
+
+        BootDiagnostics.shared.beginBoot()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(!BootDiagnostics.shared.dispatchLoopResolved)
+        #expect(BootDiagnostics.shared.dispatchLoopPointer == nil)
+        #expect(!BootDiagnostics.shared.dispatchLoopCallBegan)
+        #expect(!BootDiagnostics.shared.dispatchLoopCallReturned)
+        #expect(BootDiagnostics.shared.dispatchLoopNativeStage == 0)
+        #expect(BootDiagnostics.shared.dispatchStubStage == 0)
+        #expect(BootDiagnostics.shared.slowDispatchStubStage == 0)
+        #expect(BootDiagnostics.shared.dispatchProbePassed == nil)
+        #expect(!BootDiagnostics.shared.nativeGetFunctionAddressEntered)
+        #expect(BootDiagnostics.shared.nativeGetFunctionAddressCalls == 0)
+        #expect(BootDiagnostics.shared.functionTableBase == nil)
+        #expect(!BootDiagnostics.shared.directDispatchProbeAttempted)
+        #expect(BootDiagnostics.shared.jitMemBytesMatch == nil)
+    }
+
+    @Test func buildReportIncludesFase7Sections() {
+        BootDiagnostics.shared.beginBoot()
+        let report = BootDiagnostics.shared.buildReport()
+
+        #expect(report.contains("DISPATCH"))
+        #expect(report.contains("NATIVE STAGE MARKERS"))
+        #expect(report.contains("SAME-MAP PROBE"))
+        #expect(report.contains("FUNCTION TABLE"))
+        #expect(report.contains("DIRECT-DISPATCH PROBE"))
+        #expect(report.contains("JITMEM BYTE VERIFICATION"))
+    }
 }

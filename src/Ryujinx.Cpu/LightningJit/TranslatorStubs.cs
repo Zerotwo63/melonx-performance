@@ -14,6 +14,23 @@ namespace Ryujinx.Cpu.LightningJit
     delegate void DispatcherFunction(IntPtr nativeContext, ulong startAddress);
 
     /// <summary>
+    /// Diagnóstico real #7 (FASE 2): signature for the same-map probe - a
+    /// tiny generated function taking no arguments and returning a known
+    /// constant, used to verify the exact same cache/Map path DispatchLoop
+    /// uses can actually produce code that executes and returns correctly.
+    /// </summary>
+    delegate uint ProbeDelegate();
+
+    /// <summary>
+    /// Diagnóstico real #7 (FASE 4): signature matching GetFunctionAddressDelegate
+    /// exactly (framePointer, guest address) -> host function pointer. Used by
+    /// the direct-dispatch probe, which tail-calls straight into
+    /// _getFunctionAddress via the same BLR/native-call mechanism DispatchStub
+    /// uses, skipping the FunctionTable lookup entirely.
+    /// </summary>
+    delegate ulong DirectDispatchProbeDelegate(IntPtr framePointer, ulong address);
+
+    /// <summary>
     /// Represents a stub manager.
     /// </summary>
     class TranslatorStubs : IDisposable
@@ -32,6 +49,19 @@ namespace Ryujinx.Cpu.LightningJit
         private readonly IntPtr _getFunctionAddress;
         private readonly Lazy<IntPtr> _dispatchStub;
         private readonly Lazy<DispatcherFunction> _dispatchLoop;
+
+        // Diagnóstico real #7 (FASE 3): small, fixed, native memory block that
+        // the GENERATED ARM64 code itself writes known stage markers into via
+        // plain str instructions - a managed Console.WriteLine is impossible
+        // once control transfers into generated code via Blr. Allocated once,
+        // before any Generate* method runs, so its address is a stable
+        // constant that can be embedded directly into the assembled code.
+        // Offsets: 0 = DispatchLoop stage, 4 = DispatchStub stage, 8 = SlowDispatchStub stage.
+        private readonly IntPtr _diagMarkers;
+
+        public int DiagDispatchLoopStage => Marshal.ReadInt32(_diagMarkers, 0);
+        public int DiagDispatchStubStage => Marshal.ReadInt32(_diagMarkers, 4);
+        public int DiagSlowDispatchStubStage => Marshal.ReadInt32(_diagMarkers, 8);
 
         /// <summary>
         /// Gets the dispatch stub.
@@ -90,6 +120,10 @@ namespace Ryujinx.Cpu.LightningJit
             _noWxCache = noWxCache;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
+            _diagMarkers = Marshal.AllocHGlobal(12);
+            Marshal.WriteInt32(_diagMarkers, 0, 0);
+            Marshal.WriteInt32(_diagMarkers, 4, 0);
+            Marshal.WriteInt32(_diagMarkers, 8, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -110,6 +144,10 @@ namespace Ryujinx.Cpu.LightningJit
             _dualMappedCache = dualMappedCache;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
+            _diagMarkers = Marshal.AllocHGlobal(12);
+            Marshal.WriteInt32(_diagMarkers, 0, 0);
+            Marshal.WriteInt32(_diagMarkers, 4, 0);
+            Marshal.WriteInt32(_diagMarkers, 8, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -127,6 +165,10 @@ namespace Ryujinx.Cpu.LightningJit
             _functionTable = functionTable;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
+            _diagMarkers = Marshal.AllocHGlobal(12);
+            Marshal.WriteInt32(_diagMarkers, 0, 0);
+            Marshal.WriteInt32(_diagMarkers, 4, 0);
+            Marshal.WriteInt32(_diagMarkers, 8, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -162,6 +204,8 @@ namespace Ryujinx.Cpu.LightningJit
                     }
                 }
 
+                Marshal.FreeHGlobal(_diagMarkers);
+
                 _disposed = true;
             }
         }
@@ -195,10 +239,15 @@ namespace Ryujinx.Cpu.LightningJit
                 Operand context = Register(19);
                 asm.Mov(context, Register(0));
 
+                EmitDiagMarker(ref asm, 4, 10); // dispatchStubStage = 10: entró al DispatchStub
+
                 // Load the target guest address from the native context.
                 Operand guestAddress = Register(16);
 
                 asm.LdrRiUn(guestAddress, context, NativeContext.GetDispatchAddressOffset());
+
+                EmitDiagMarker(ref asm, 4, 11); // dispatchStubStage = 11: guest address leído
+                asm.LdrRiUn(guestAddress, context, NativeContext.GetDispatchAddressOffset()); // re-materialize X16 - EmitDiagMarker clobbered it
 
                 // Check if guest address is within range of the AddressTable.
                 asm.And(Register(17), guestAddress, Const(~_functionTable.Mask));
@@ -206,6 +255,9 @@ namespace Ryujinx.Cpu.LightningJit
                 branchToFallbackOffsets.Add(writer.InstructionPointer);
 
                 asm.Cbnz(Register(17), 0);
+
+                EmitDiagMarker(ref asm, 4, 12); // dispatchStubStage = 12: comenzó lookup de FunctionTable
+                asm.LdrRiUn(guestAddress, context, NativeContext.GetDispatchAddressOffset()); // re-materialize X16 (guestAddress) for the level-walking loop below
 
                 Operand page = Register(17);
                 Operand index = Register(21);
@@ -244,11 +296,25 @@ namespace Ryujinx.Cpu.LightningJit
                 }
 
                 // Fallback.
+                EmitDiagMarker(ref asm, 4, 13); // dispatchStubStage = 13: tomó fallback
+                asm.LdrRiUn(guestAddress, context, NativeContext.GetDispatchAddressOffset()); // re-materialize X16 - every branch into this fallback label leaves guestAddress valid in X16, but EmitDiagMarker just clobbered it
+
                 asm.Mov(Register(0), Register(29));
                 asm.Mov(Register(1), guestAddress);
                 asm.Mov(Register(16), (ulong)_getFunctionAddress);
+
+                EmitDiagMarker(ref asm, 4, 14); // dispatchStubStage = 14: inmediatamente antes de BLR _getFunctionAddress
+                asm.Mov(Register(16), (ulong)_getFunctionAddress); // re-materialize X16 (call target) - X0/X1 untouched by the marker
+
                 asm.Blr(Register(16));
+
+                EmitDiagMarker(ref asm, 4, 15); // dispatchStubStage = 15: inmediatamente después de BLR _getFunctionAddress - X0 (return value) untouched by the marker, no reload needed
+
                 asm.Mov(Register(16), Register(0));
+
+                EmitDiagMarker(ref asm, 4, 16); // dispatchStubStage = 16: antes de BR al translated function
+                asm.Mov(Register(16), Register(0)); // re-materialize X16 (result) - X0 still holds it at this exact point, before the next line overwrites X0 with context
+
                 asm.Mov(Register(0), Register(19));
 
                 rsr.WriteEpilogue(ref asm);
@@ -284,12 +350,25 @@ namespace Ryujinx.Cpu.LightningJit
                 Operand context = Register(19);
                 asm.Mov(context, Register(0));
 
+                EmitDiagMarker(ref asm, 8, 20); // slowDispatchStubStage = 20: entró
+
                 // Load the target guest address from the native context.
                 asm.Mov(Register(0), Register(29));
                 asm.LdrRiUn(Register(1), context, NativeContext.GetDispatchAddressOffset());
                 asm.Mov(Register(16), (ulong)_getFunctionAddress);
+
+                EmitDiagMarker(ref asm, 8, 21); // slowDispatchStubStage = 21: antes de BLR _getFunctionAddress
+                asm.Mov(Register(16), (ulong)_getFunctionAddress); // re-materialize X16 (call target) - X0/X1 untouched by the marker
+
                 asm.Blr(Register(16));
+
+                EmitDiagMarker(ref asm, 8, 22); // slowDispatchStubStage = 22: después de BLR _getFunctionAddress - X0 (return value) untouched, no reload needed
+
                 asm.Mov(Register(16), Register(0));
+
+                EmitDiagMarker(ref asm, 8, 23); // slowDispatchStubStage = 23: antes de BR translated function
+                asm.Mov(Register(16), Register(0)); // re-materialize X16 (result) - X0 still holds it here, before the next line overwrites X0 with context
+
                 asm.Mov(Register(0), Register(19));
 
                 rsr.WriteEpilogue(ref asm);
@@ -367,7 +446,11 @@ namespace Ryujinx.Cpu.LightningJit
                 Operand context = Register(19);
                 asm.Mov(context, Register(0));
 
+                EmitDiagMarker(ref asm, 0, 1); // dispatchLoopStage = 1: entró al DispatchLoop
+
                 EmitSyncFpContext(ref asm, context, Register(16, OperandType.I32), Register(17, OperandType.I32), true);
+
+                EmitDiagMarker(ref asm, 0, 2); // dispatchLoopStage = 2: terminó EmitSyncFpContext inicial
 
                 // Load the target guest address from the native context.
                 Operand guestAddress = Register(16);
@@ -377,9 +460,28 @@ namespace Ryujinx.Cpu.LightningJit
                 int loopStartIndex = writer.InstructionPointer;
 
                 asm.StrRiUn(guestAddress, context, NativeContext.GetDispatchAddressOffset());
+
+                // Marks 3/4/5 are safe to insert here: Cbz(guestAddress, 16) and
+                // Cbz(Register(17), 8) below encode their branch target as a
+                // fixed byte offset relative to THEIR OWN instruction address,
+                // not relative to loopStartIndex - nothing is inserted between
+                // either Cbz and its target (EmitSyncFpContext(false) below), so
+                // those literal 16/8 immediates remain correct however many
+                // instructions these markers add before them. The backward
+                // branch further down recomputes its own offset dynamically via
+                // writer.InstructionPointer, so it self-adjusts too.
+                EmitDiagMarker(ref asm, 0, 3); // dispatchLoopStage = 3: escribió DispatchAddress
+
                 asm.Mov(Register(0), context);
                 asm.Mov(Register(17), (ulong)DispatchStub);
+
+                EmitDiagMarker(ref asm, 0, 4); // dispatchLoopStage = 4: inmediatamente antes de BLR DispatchStub
+                asm.Mov(Register(17), (ulong)DispatchStub); // re-materialize X17 (call target) - X0 (context arg) untouched by the marker
+
                 asm.Blr(Register(17));
+
+                EmitDiagMarker(ref asm, 0, 5); // dispatchLoopStage = 5: inmediatamente después de regresar de DispatchStub - X0 (next guest PC) untouched, no reload needed
+
                 asm.Mov(guestAddress, Register(0));
                 asm.Cbz(guestAddress, 16);
                 asm.LdrRiUn(Register(17), context, NativeContext.GetRunningOffset());
@@ -433,6 +535,239 @@ namespace Ryujinx.Cpu.LightningJit
         private static Operand Const(ulong value)
         {
             return new(OperandKind.Constant, OperandType.I64, value);
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 6): read-only inspection of the real
+        /// FunctionTable state for a given guest address. Deliberately does
+        /// NOT call AddressTable.GetValue/.Base's page-walking internals for
+        /// anything beyond what codegen has ALREADY forced to exist by the
+        /// time this runs (Base/Fill are only read here AFTER DispatchLoop/
+        /// DispatchStub have already been generated and already accessed
+        /// them for real - see call site in Translator.Execute - so this
+        /// causes no NEW allocation of its own) - AddressTable.GetValue(ref)
+        /// and the private page-walk both lazily ALLOCATE missing pages as a
+        /// side effect, which would violate "sin alterar el estado" if
+        /// called here, so the actual leaf table entry for this address is
+        /// never read directly; only the per-level index it WOULD use (pure
+        /// arithmetic, Level.GetValue, no allocation) is computed and logged.
+        /// </summary>
+        public void LogFunctionTableLookup(ulong address)
+        {
+            BootEventBridge.Report(
+                "LightningJit.FunctionTable info",
+                $"base=0x{_functionTable.Base:X},mask=0x{_functionTable.Mask:X},fill=0x{_functionTable.Fill:X},levelCount={_functionTable.Levels.Length}");
+            BootEventBridge.Report(
+                "LightningJit.FunctionTable stubs",
+                $"dispatchStub=0x{DispatchStub:X},slowDispatchStub=0x{SlowDispatchStub:X}");
+
+            bool inRange = _functionTable.IsValid(address);
+            BootEventBridge.Report("LightningJit.FunctionTable lookup", $"address=0x{address:X},inRange={inRange}");
+
+            if (inRange)
+            {
+                var indices = new System.Text.StringBuilder();
+                for (int i = 0; i < _functionTable.Levels.Length; i++)
+                {
+                    if (i > 0)
+                    {
+                        indices.Append(',');
+                    }
+                    indices.Append($"level{i}={_functionTable.Levels[i].GetValue(address)}");
+                }
+                BootEventBridge.Report("LightningJit.FunctionTable level indices", indices.ToString());
+            }
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 4): OFF by default - only runs when the
+        /// env var LIGHTNINGJIT_DIAG_DIRECT_DISPATCH is exactly "1" (same
+        /// opt-in convention as DUAL_MAPPED_JIT elsewhere in this codebase).
+        /// Generates a tiny trampoline that tail-calls directly into
+        /// _getFunctionAddress (`mov x16, #_getFunctionAddress; br x16`),
+        /// reproducing "DispatchLoop -> GetFunctionAddress" through the real
+        /// BLR/native-call mechanism while completely skipping DispatchStub's
+        /// FunctionTable lookup. Does NOT touch the real DispatchLoop/
+        /// DispatchStub assembly at all - this is a fully separate, isolated
+        /// probe, never substituted for the real dispatch path. If this
+        /// reaches GetFunctionAddress and translationAttempts/
+        /// translatedFunctionsCreated advance (visible via the FASE 5
+        /// instrumentation already in NativeInterface.GetFunctionAddress),
+        /// the problem is isolated to DispatchStub/FunctionTable; if even
+        /// this never reaches GetFunctionAddress, the problem is earlier
+        /// (native call mechanism/mapping/ABI), matching the same conclusion
+        /// as a SameMapProbe failure.
+        /// </summary>
+        public ulong? RunDirectDispatchProbe(IntPtr framePointer, ulong address)
+        {
+            if (Environment.GetEnvironmentVariable("LIGHTNINGJIT_DIAG_DIRECT_DISPATCH") != "1")
+            {
+                return null;
+            }
+
+            BootEventBridge.Report("LightningJit.DirectDispatchProbe begin", $"framePointer=0x{framePointer:X},address=0x{address:X}");
+
+            CodeWriter writer = new();
+
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+            {
+                Assembler asm = new(writer);
+                asm.Mov(Register(16), (ulong)_getFunctionAddress);
+                asm.Br(Register(16));
+            }
+            else
+            {
+                throw new PlatformNotSupportedException();
+            }
+
+            IntPtr ptr;
+
+            try
+            {
+                ptr = Map(writer.AsByteSpan());
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.DirectDispatchProbe map", ex);
+                return null;
+            }
+
+            try
+            {
+                DirectDispatchProbeDelegate probe = Marshal.GetDelegateForFunctionPointer<DirectDispatchProbeDelegate>(ptr);
+                ulong result = probe(framePointer, address);
+                BootEventBridge.Report("LightningJit.DirectDispatchProbe result", $"hostFuncPtr=0x{result:X}");
+                return result;
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.DirectDispatchProbe call", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 2): generates `mov w0, #0x12345678; ret`
+        /// and maps it through the EXACT SAME cache/Map path DispatchLoop/
+        /// DispatchStub use (_noWxCache/_dualMappedCache's MapPageAligned,
+        /// same _sharedCache, same SysIcacheInvalidate), then calls it once.
+        /// This isolates "can code written through this exact dual-mapping/
+        /// icache mechanism actually execute and return correctly" from
+        /// "does DispatchLoop's own specific logic have a bug" - if this
+        /// fails, the problem is in the mapping/coherence/invocation
+        /// mechanism itself, not in anything DispatchLoop-specific.
+        /// </summary>
+        public (bool succeeded, IntPtr rwAddress, IntPtr rxAddress, uint returnValue, byte[] bytesWritten, byte[] bytesReadBack) RunSameMapProbe()
+        {
+            const uint ExpectedValue = 0x12345678;
+
+            CodeWriter writer = new();
+
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+            {
+                Assembler asm = new(writer);
+                asm.Mov(Register(0, OperandType.I32), unchecked((int)ExpectedValue));
+                asm.Ret();
+            }
+            else
+            {
+                throw new PlatformNotSupportedException();
+            }
+
+            byte[] code = writer.AsByteSpan().ToArray();
+            BootEventBridge.Report("LightningJit.SameMapProbe begin", $"size={code.Length}");
+
+            IntPtr rwAddress = IntPtr.Zero;
+            IntPtr rxAddress;
+
+            try
+            {
+                if (_noWxCache != null)
+                {
+                    rxAddress = _noWxCache.MapPageAligned(code, out nint rw);
+                    rwAddress = rw;
+                }
+                else if (_dualMappedCache != null)
+                {
+                    rxAddress = _dualMappedCache.MapPageAligned(code, out rwAddress);
+                }
+                else
+                {
+                    rxAddress = JitCache.Map(code);
+                    rwAddress = rxAddress;
+                }
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.SameMapProbe map", ex);
+                return (false, IntPtr.Zero, IntPtr.Zero, 0, Array.Empty<byte>(), Array.Empty<byte>());
+            }
+
+            BootEventBridge.Report("LightningJit.SameMapProbe mapped", $"rw=0x{rwAddress:X},rx=0x{rxAddress:X}");
+
+            byte[] bytesWritten = code;
+            byte[] bytesReadBack = Array.Empty<byte>();
+
+            try
+            {
+                if (rwAddress != IntPtr.Zero)
+                {
+                    bytesReadBack = new byte[code.Length];
+                    Marshal.Copy(rwAddress, bytesReadBack, 0, code.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.SameMapProbe read RW bytes", ex);
+            }
+
+            BootEventBridge.Report("LightningJit.SameMapProbe bytes written", Convert.ToHexString(bytesWritten));
+            if (bytesReadBack.Length > 0)
+            {
+                BootEventBridge.Report("LightningJit.SameMapProbe bytes read back (RW alias)", Convert.ToHexString(bytesReadBack));
+            }
+
+            uint returnValue = 0;
+            bool succeeded = false;
+
+            try
+            {
+                BootEventBridge.Report("LightningJit.SameMapProbe call begin", $"rx=0x{rxAddress:X}");
+                ProbeDelegate probe = Marshal.GetDelegateForFunctionPointer<ProbeDelegate>(rxAddress);
+                returnValue = probe();
+                BootEventBridge.Report("LightningJit.SameMapProbe call returned", $"result=0x{returnValue:X}");
+                succeeded = returnValue == ExpectedValue;
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.SameMapProbe call", ex);
+            }
+
+            BootEventBridge.Report(
+                succeeded ? "LightningJit.SameMapProbe PASS" : "LightningJit.SameMapProbe FAIL",
+                $"expected=0x{ExpectedValue:X},actual=0x{returnValue:X}");
+
+            return (succeeded, rwAddress, rxAddress, returnValue, bytesWritten, bytesReadBack);
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 3): emits `mov x16, #addr; mov w17, #value; str w17, [x16]`
+        /// - a 3-instruction stage marker write into the fixed native memory block
+        /// above. X16/X17 are the only registers ever used here because they are
+        /// the designated ARM64 scratch registers (IP0/IP1) - never callee-saved
+        /// under AAPCS64, so no caller/callee anywhere in this codebase can be
+        /// relying on their value surviving across any call or block boundary.
+        /// Every call site below that has a LIVE value already sitting in X16 or
+        /// X17 at the point a marker is inserted re-materializes it immediately
+        /// afterward (documented at each call site) - this never changes which
+        /// value ends up in any register the surrounding real code depends on.
+        /// </summary>
+        private void EmitDiagMarker(ref Assembler asm, int offset, int value)
+        {
+            IntPtr addr = _diagMarkers + offset;
+            asm.Mov(Register(16), (ulong)(long)addr);
+            asm.Mov(Register(17, OperandType.I32), value);
+            asm.StrRiUn(Register(17, OperandType.I32), Register(16), 0);
         }
     }
 }

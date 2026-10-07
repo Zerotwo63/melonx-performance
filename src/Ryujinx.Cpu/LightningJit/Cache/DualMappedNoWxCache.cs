@@ -316,14 +316,26 @@ namespace Ryujinx.Cpu.LightningJit.Cache
 
         public unsafe IntPtr MapPageAligned(ReadOnlySpan<byte> code)
         {
+            return MapPageAligned(code, out _);
+        }
+
+        /// <summary>
+        /// Diagnóstico real #7 (FASE 2): identical to <see cref="MapPageAligned(ReadOnlySpan{byte})"/> -
+        /// same lock, same _sharedCache, same allocate/copy/icache-invalidate
+        /// sequence - just also exposes the RW address it wrote through
+        /// before it was reassigned to the RX address, for the same-map probe
+        /// to read back and compare against what was written.
+        /// </summary>
+        public unsafe IntPtr MapPageAligned(ReadOnlySpan<byte> code, out IntPtr rwAddress)
+        {
             lock (_lock)
             {
                 int sizeAligned = BitUtils.AlignUp(code.Length, (int)MemoryBlock.GetPageSize());
-                
+
                 _pendingMap.Pad(_sharedCache.CacheAllocator);
 
                 int funcOffset;
-                
+
                 try
                 {
                     funcOffset = _sharedCache.Allocate(sizeAligned);
@@ -336,13 +348,14 @@ namespace Ryujinx.Cpu.LightningJit.Cache
                     }
                     else
                     {
-                        throw; 
+                        throw;
                     }
                 }
-                
+
                 Debug.Assert((funcOffset & ((int)MemoryBlock.GetPageSize() - 1)) == 0);
 
                 IntPtr funcPtr = _sharedCache.Pointer + funcOffset;
+                rwAddress = funcPtr;
                 code.CopyTo(new Span<byte>((void*)funcPtr, code.Length));
                 funcPtr = _sharedCache.RxPointer + funcOffset;
 
@@ -474,17 +487,40 @@ namespace Ryujinx.Cpu.LightningJit.Cache
 
             Debug.Assert((funcOffset & (int)(MemoryBlock.GetPageSize() - 1)) == 0);
 
-            IntPtr funcPtr = _localCache.Pointer + funcOffset;
+            IntPtr rwPtr = _localCache.Pointer + funcOffset;
             if (verbose)
             {
-                BootEventBridge.Report("JITMEM RW ptr", $"0x{funcPtr:X}");
+                BootEventBridge.Report("JITMEM RW ptr", $"0x{rwPtr:X}");
             }
 
-            code.CopyTo(new Span<byte>((void*)funcPtr, code.Length));
-            funcPtr = _localCache.RxPointer + funcOffset;
+            code.CopyTo(new Span<byte>((void*)rwPtr, code.Length));
+            IntPtr funcPtr = _localCache.RxPointer + funcOffset;
             if (verbose)
             {
                 BootEventBridge.Report("JITMEM RX ptr", $"0x{funcPtr:X}");
+            }
+
+            if (verbose)
+            {
+                // Diagnóstico real #7 (FASE 7): confirm the bytes visible
+                // through the RX alias are EXACTLY what was just written
+                // through the RW alias - this is the dual-mapping coherence
+                // question this round needs a yes/no answer for, not an
+                // assumption. Reading through RX is just a memory read (no
+                // execution), legal on this dual-mapped setup by design.
+                int dumpLen = Math.Min(32, code.Length);
+                ReadOnlySpan<byte> rwBytes = new((void*)rwPtr, dumpLen);
+                BootEventBridge.Report("JITMEM bytes written (RW)", Convert.ToHexString(rwBytes));
+                try
+                {
+                    ReadOnlySpan<byte> rxBytes = new((void*)funcPtr, dumpLen);
+                    BootEventBridge.Report("JITMEM bytes read back (RX alias)", Convert.ToHexString(rxBytes));
+                    BootEventBridge.Report("JITMEM RW/RX bytes match", rwBytes.SequenceEqual(rxBytes) ? "true" : "false");
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("JITMEM read RX alias", ex);
+                }
             }
 
             (_threadLocalCache ??= new()).Add(guestAddress, new(funcOffset, code.Length, funcPtr));
