@@ -198,6 +198,61 @@ final class BootDiagnostics: ObservableObject {
     @Published private(set) var jitMemBytesReadBack: String?
     @Published private(set) var jitMemBytesMatch: Bool?
 
+    // Diagnóstico real #8: dispatchProbeCallAttempted=true but
+    // dispatchProbeReturned=false on real device - isolating WHY a tiny
+    // ARM64 function written through the dual-mapped RW alias and invoked
+    // through the RX alias never returns (FASES 8A-8G).
+    @Published private(set) var dispatchProbeBytesRw: String?
+    @Published private(set) var dispatchProbeBytesRx: String?
+    @Published private(set) var dispatchProbeRwRxBytesMatch: Bool?
+    @Published private(set) var dispatchProbeCoherencePatternAMatch: Bool?
+    @Published private(set) var dispatchProbeCoherencePatternBMatch: Bool?
+
+    // FASE 8B: real current/max protection, queried via mach_vm_region -
+    // never assumed from Map()/vm_protect having returned success.
+    @Published private(set) var dispatchProbeRwCurrentProtection: String?
+    @Published private(set) var dispatchProbeRwMaxProtection: String?
+    @Published private(set) var dispatchProbeRxCurrentProtection: String?
+    @Published private(set) var dispatchProbeRxMaxProtection: String?
+
+    // FASE 8C: explicit cache sync right before the call, targeting the RX
+    // alias specifically (not only RW).
+    @Published private(set) var dispatchProbeDcacheFlushRwAttempted = false
+    @Published private(set) var dispatchProbeIcacheInvalidateRwAttempted = false
+    @Published private(set) var dispatchProbeIcacheInvalidateRxAttempted = false
+    @Published private(set) var dispatchProbeCacheSyncCompleted: Bool?
+
+    // FASE 8D: libc's real getpid(), called through the EXACT SAME
+    // Marshal.GetDelegateForFunctionPointer mechanism as the probe itself -
+    // isolates the managed call/delegate/ABI layer from DualMappedNoWxCache.
+    @Published private(set) var nativeControlPointer: String?
+    @Published private(set) var nativeControlCallAttempted = false
+    @Published private(set) var nativeControlReturned = false
+    @Published private(set) var nativeControlReturnValue: String?
+    @Published private(set) var nativeControlPassed: Bool?
+
+    // FASE 8E: the SAME 8 bytes, classic single mmap-RW/mprotect-RX (no
+    // dual alias), called through the SAME delegate mechanism.
+    @Published private(set) var singleMapRwAddress: String?
+    @Published private(set) var singleMapExecAddress: String?
+    @Published private(set) var singleMapBytesReadBack: String?
+    @Published private(set) var singleMapCallAttempted = false
+    @Published private(set) var singleMapReturned = false
+    @Published private(set) var singleMapReturnValue: String?
+    @Published private(set) var singleMapPassed: Bool?
+
+    // FASE 8F: real CPU subtype via sysctlbyname - RuntimeInformation.
+    // ProcessArchitecture alone cannot distinguish arm64 from arm64e.
+    @Published private(set) var processArchitecture: String?
+    @Published private(set) var isArm64e: String?
+    @Published private(set) var pointerAuthenticationRelevant: String?
+
+    // FASE 8G: a SEPARATE stage-marker variant of the same-map probe, run
+    // on its own background thread precisely so a hang here is still
+    // observable without blocking the real DispatchLoop attempt.
+    @Published private(set) var sameMapNativeEntryStage = 0
+    @Published private(set) var sameMapNativeBeforeRetStage = 0
+
     private var startedAt: Date?
     private var observeTask: Task<Void, Never>?
     private var snapshotTask: Task<Void, Never>?
@@ -338,6 +393,36 @@ final class BootDiagnostics: ObservableObject {
             self.jitMemBytesWritten = nil
             self.jitMemBytesReadBack = nil
             self.jitMemBytesMatch = nil
+            self.dispatchProbeBytesRw = nil
+            self.dispatchProbeBytesRx = nil
+            self.dispatchProbeRwRxBytesMatch = nil
+            self.dispatchProbeCoherencePatternAMatch = nil
+            self.dispatchProbeCoherencePatternBMatch = nil
+            self.dispatchProbeRwCurrentProtection = nil
+            self.dispatchProbeRwMaxProtection = nil
+            self.dispatchProbeRxCurrentProtection = nil
+            self.dispatchProbeRxMaxProtection = nil
+            self.dispatchProbeDcacheFlushRwAttempted = false
+            self.dispatchProbeIcacheInvalidateRwAttempted = false
+            self.dispatchProbeIcacheInvalidateRxAttempted = false
+            self.dispatchProbeCacheSyncCompleted = nil
+            self.nativeControlPointer = nil
+            self.nativeControlCallAttempted = false
+            self.nativeControlReturned = false
+            self.nativeControlReturnValue = nil
+            self.nativeControlPassed = nil
+            self.singleMapRwAddress = nil
+            self.singleMapExecAddress = nil
+            self.singleMapBytesReadBack = nil
+            self.singleMapCallAttempted = false
+            self.singleMapReturned = false
+            self.singleMapReturnValue = nil
+            self.singleMapPassed = nil
+            self.processArchitecture = nil
+            self.isArm64e = nil
+            self.pointerAuthenticationRelevant = nil
+            self.sameMapNativeEntryStage = 0
+            self.sameMapNativeBeforeRetStage = 0
             self.snapshot10sTaken = false
             self.snapshot20sTaken = false
         }
@@ -451,10 +536,65 @@ final class BootDiagnostics: ObservableObject {
         // function), distinguish A-F from the user's exact enumeration
         // using the FASE 1-6 evidence, instead of a single generic bucket.
         if translatedFunctionsCreated == 0 && gpfifoSubmissions == 0 {
-            if dispatchProbePassed == false {
+            // Diagnóstico real #8: the probe either returned the wrong
+            // value (dispatchProbePassed == false) or never returned at
+            // all (dispatchProbeCallAttempted but !dispatchProbeReturned -
+            // the real device scenario this round is built around).
+            // Sub-classify A1-A7 using the FASE 8A-8G evidence, in order of
+            // how certain/fundamental each diagnosis is - never a guess.
+            if dispatchProbePassed == false || (dispatchProbeCallAttempted && !dispatchProbeReturned) {
+                if dispatchProbeRwRxBytesMatch == false {
+                    return (
+                        "A1 - RX bytes differ from RW",
+                        "the RX alias does NOT show the same bytes that were written through RW; dispatchProbeBytesRw=\(dispatchProbeBytesRw ?? "none"), dispatchProbeBytesRx=\(dispatchProbeBytesRx ?? "none") - RW/RX are not really aliasing the same backing memory, or the read happened before the write was visible"
+                    )
+                }
+
+                if let rxProt = dispatchProbeRxCurrentProtection, !rxProt.contains("EXECUTE") {
+                    return (
+                        "A2 - RX lacks execute protection",
+                        "mach_vm_region reports the RX address's REAL current protection as \"\(rxProt)\" (no EXECUTE), right before the call - Map()/vm_protect succeeding earlier never proved this; max=\(dispatchProbeRxMaxProtection ?? "none")"
+                    )
+                }
+
+                if nativeControlPassed == false {
+                    return (
+                        "A4 - native/control calling mechanism failure",
+                        "calling libc's real getpid() through the EXACT SAME Marshal.GetDelegateForFunctionPointer mechanism also failed/hung (nativeControlReturned=\(nativeControlReturned), nativeControlReturnValue=\(nativeControlReturnValue ?? "none")) - the problem is in the managed call/delegate/ABI layer itself, not specific to DualMappedNoWxCache"
+                    )
+                }
+
+                if singleMapPassed == true {
+                    return (
+                        "A5 - single-map executes but dual-map hangs",
+                        "the exact same instruction bytes ran correctly (singleMapReturnValue=\(singleMapReturnValue ?? "none")) through a classic single mmap-RW/mprotect-RX region with no dual alias, but the dual-mapped version did not - the bug is specific to the dual-mapping/remap mechanism (DualMappedJitAllocator), not to code generation, the calling convention, or ABI"
+                    )
+                }
+
+                if sameMapNativeEntryStage > 0 && sameMapNativeBeforeRetStage == 0 {
+                    return (
+                        "A6 - generated code entered but RET never completed",
+                        "the stage-marker probe variant (same cache/mapping) wrote its entry marker (sameMapNativeEntryStage=\(sameMapNativeEntryStage)) but never reached the marker right before RET - execution started inside the generated/mapped code and then got stuck, crashed without a managed exception, or jumped somewhere unexpected before reaching RET"
+                    )
+                }
+
+                if dispatchProbeCacheSyncCompleted == false {
+                    return (
+                        "A3 - cache synchronization problem",
+                        "the explicit dcache-flush/icache-invalidate sequence (targeting the RX alias, not only RW) did not complete cleanly; dcacheFlushRwAttempted=\(dispatchProbeDcacheFlushRwAttempted), icacheInvalidateRwAttempted=\(dispatchProbeIcacheInvalidateRwAttempted), icacheInvalidateRxAttempted=\(dispatchProbeIcacheInvalidateRxAttempted)"
+                    )
+                }
+
+                if isArm64e == "true" {
+                    return (
+                        "A7 - possible arm64e/PAC indirect-call issue",
+                        "this process is running as arm64e (pointerAuthenticationRelevant=true) - a function pointer produced manually from the RX alias may need pointer-authentication treatment before an indirect call/branch that this probe does not apply; nativeControlPassed=\(nativeControlPassed.map { "\($0)" } ?? "unknown") (if that also failed, prefer A4 instead - this is only reached when the control call itself succeeded)"
+                    )
+                }
+
                 return (
                     "Scenario A - dual mapping / icache / invocación de código generado",
-                    "the same-map probe (known function through the exact same cache DispatchLoop uses) FAILED to execute or return the expected constant; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), jitMemBytesMatch=\(jitMemBytesMatch.map { "\($0)" } ?? "unknown") - the generated-code execution/mapping mechanism itself is broken, independent of DispatchLoop's own logic"
+                    "the same-map probe (known function through the exact same cache DispatchLoop uses) did not complete successfully, but none of A1/A2/A3/A4/A5/A6/A7's specific evidence matched; dispatchProbeReturned=\(dispatchProbeReturned), dispatchProbeReturnValue=\(dispatchProbeReturnValue ?? "none"), dispatchProbeCallAttempted=\(dispatchProbeCallAttempted) - see the full report's \"DUAL-MAP PROBE HANG INVESTIGATION\" section for every FASE 8A-8G field"
                 )
             }
 
@@ -790,6 +930,7 @@ final class BootDiagnostics: ObservableObject {
             dispatchProbeBytesWritten = result
         case "LightningJit.SameMapProbe bytes read back (RW alias)":
             dispatchProbeBytesReadBack = result
+            dispatchProbeBytesRw = result
         case "LightningJit.SameMapProbe call begin":
             dispatchProbeCallAttempted = true
         case "LightningJit.SameMapProbe call returned":
@@ -832,6 +973,68 @@ final class BootDiagnostics: ObservableObject {
             directDispatchProbeAttempted = true
         case "LightningJit.DirectDispatchProbe result":
             if let result { directDispatchProbeResult = Self.extractField(result, "hostFuncPtr") }
+
+        // Diagnóstico real #8 (FASES 8A-8G).
+        case "dispatchProbeBytesRx":
+            dispatchProbeBytesRx = result
+        case "dispatchProbeRwRxBytesMatch":
+            dispatchProbeRwRxBytesMatch = (result == "true")
+        case "LightningJit.SameMapProbe coherence pattern A":
+            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternAMatch = (s == "true") }
+        case "LightningJit.SameMapProbe coherence pattern B":
+            if let result, let s = Self.extractField(result, "match") { dispatchProbeCoherencePatternBMatch = (s == "true") }
+        case "NativeMemoryDiagnostics.QueryProtection RW":
+            if let result {
+                dispatchProbeRwCurrentProtection = Self.extractField(result, "current")
+                dispatchProbeRwMaxProtection = Self.extractField(result, "max")
+            }
+        case "NativeMemoryDiagnostics.QueryProtection RX":
+            if let result {
+                dispatchProbeRxCurrentProtection = Self.extractField(result, "current")
+                dispatchProbeRxMaxProtection = Self.extractField(result, "max")
+            }
+        case "dispatchProbeDcacheFlushRwAttempted":
+            dispatchProbeDcacheFlushRwAttempted = true
+        case "dispatchProbeIcacheInvalidateRwAttempted":
+            dispatchProbeIcacheInvalidateRwAttempted = true
+        case "dispatchProbeIcacheInvalidateRxAttempted":
+            dispatchProbeIcacheInvalidateRxAttempted = true
+        case "dispatchProbeCacheSyncCompleted":
+            dispatchProbeCacheSyncCompleted = (result == "true")
+        case "nativeControlPointer":
+            nativeControlPointer = result
+        case "nativeControlCallAttempted":
+            nativeControlCallAttempted = (result == "true")
+        case "nativeControlReturned":
+            nativeControlReturned = (result == "true")
+        case "nativeControlReturnValue":
+            nativeControlReturnValue = result
+        case "nativeControlPassed":
+            nativeControlPassed = (result == "true")
+        case "singleMapRwAddress":
+            singleMapRwAddress = result
+        case "singleMapExecAddress":
+            singleMapExecAddress = result
+        case "singleMapBytesReadBack":
+            singleMapBytesReadBack = result
+        case "singleMapCallAttempted":
+            singleMapCallAttempted = (result == "true")
+        case "singleMapReturned":
+            singleMapReturned = (result == "true")
+        case "singleMapReturnValue":
+            singleMapReturnValue = result
+        case "singleMapPassed":
+            singleMapPassed = (result == "true")
+        case "processArchitecture":
+            processArchitecture = result
+        case "isArm64e":
+            isArm64e = result
+        case "pointerAuthenticationRelevant":
+            pointerAuthenticationRelevant = result
+        case "sameMapNativeEntryStage":
+            if let result, let n = Int(result) { sameMapNativeEntryStage = n }
+        case "sameMapNativeBeforeRetStage":
+            if let result, let n = Int(result) { sameMapNativeBeforeRetStage = n }
         default:
             break
         }
@@ -965,6 +1168,19 @@ final class BootDiagnostics: ObservableObject {
             "LightningJit.FunctionTable info", "LightningJit.FunctionTable stubs",
             "LightningJit.FunctionTable lookup", "LightningJit.FunctionTable level indices",
             "LightningJit.DirectDispatchProbe begin", "LightningJit.DirectDispatchProbe result",
+            // Diagnóstico real #8 (FASES 8A-8G).
+            "dispatchProbeBytesRx", "dispatchProbeRwRxBytesMatch",
+            "LightningJit.SameMapProbe coherence pattern A", "LightningJit.SameMapProbe coherence pattern B",
+            "NativeMemoryDiagnostics.QueryProtection RW", "NativeMemoryDiagnostics.QueryProtection RX",
+            "dispatchProbeDcacheFlushRwAttempted", "dispatchProbeIcacheInvalidateRwAttempted",
+            "dispatchProbeIcacheInvalidateRxAttempted", "dispatchProbeCacheSyncCompleted",
+            "nativeControlPointer", "nativeControlCallAttempted", "nativeControlReturned",
+            "nativeControlReturnValue", "nativeControlPassed",
+            "singleMapRwAddress", "singleMapExecAddress", "singleMapBytesReadBack",
+            "singleMapCallAttempted", "singleMapReturned", "singleMapReturnValue", "singleMapPassed",
+            "processArchitecture", "isArm64e", "pointerAuthenticationRelevant",
+            "sameMapNativeEntryStage", "sameMapNativeBeforeRetStage",
+            "LightningJit.SameMapStageProbe call begin", "LightningJit.SameMapStageProbe call returned",
         ]
         if translatorStages.contains(stage) {
             lastTranslatorStage = stage
@@ -1161,6 +1377,38 @@ final class BootDiagnostics: ObservableObject {
         lines.append("jitMemBytesWritten = \(jitMemBytesWritten ?? "none")")
         lines.append("jitMemBytesReadBack = \(jitMemBytesReadBack ?? "none")")
         lines.append("jitMemBytesMatch = \(jitMemBytesMatch.map { "\($0)" } ?? "unknown")")
+        lines.append("")
+        lines.append("DUAL-MAP PROBE HANG INVESTIGATION (FASES 8A-8G):")
+        lines.append("dispatchProbeBytesRw = \(dispatchProbeBytesRw ?? "none")")
+        lines.append("dispatchProbeBytesRx = \(dispatchProbeBytesRx ?? "none")")
+        lines.append("dispatchProbeRwRxBytesMatch = \(dispatchProbeRwRxBytesMatch.map { "\($0)" } ?? "unknown")")
+        lines.append("dispatchProbeCoherencePatternAMatch = \(dispatchProbeCoherencePatternAMatch.map { "\($0)" } ?? "unknown")")
+        lines.append("dispatchProbeCoherencePatternBMatch = \(dispatchProbeCoherencePatternBMatch.map { "\($0)" } ?? "unknown")")
+        lines.append("dispatchProbeRwCurrentProtection = \(dispatchProbeRwCurrentProtection ?? "none")")
+        lines.append("dispatchProbeRwMaxProtection = \(dispatchProbeRwMaxProtection ?? "none")")
+        lines.append("dispatchProbeRxCurrentProtection = \(dispatchProbeRxCurrentProtection ?? "none")")
+        lines.append("dispatchProbeRxMaxProtection = \(dispatchProbeRxMaxProtection ?? "none")")
+        lines.append("dispatchProbeDcacheFlushRwAttempted = \(dispatchProbeDcacheFlushRwAttempted)")
+        lines.append("dispatchProbeIcacheInvalidateRwAttempted = \(dispatchProbeIcacheInvalidateRwAttempted)")
+        lines.append("dispatchProbeIcacheInvalidateRxAttempted = \(dispatchProbeIcacheInvalidateRxAttempted)")
+        lines.append("dispatchProbeCacheSyncCompleted = \(dispatchProbeCacheSyncCompleted.map { "\($0)" } ?? "unknown")")
+        lines.append("nativeControlPointer = \(nativeControlPointer ?? "none")")
+        lines.append("nativeControlCallAttempted = \(nativeControlCallAttempted)")
+        lines.append("nativeControlReturned = \(nativeControlReturned)")
+        lines.append("nativeControlReturnValue = \(nativeControlReturnValue ?? "none")")
+        lines.append("nativeControlPassed = \(nativeControlPassed.map { "\($0)" } ?? "unknown")")
+        lines.append("singleMapRwAddress = \(singleMapRwAddress ?? "none")")
+        lines.append("singleMapExecAddress = \(singleMapExecAddress ?? "none")")
+        lines.append("singleMapBytesReadBack = \(singleMapBytesReadBack ?? "none")")
+        lines.append("singleMapCallAttempted = \(singleMapCallAttempted)")
+        lines.append("singleMapReturned = \(singleMapReturned)")
+        lines.append("singleMapReturnValue = \(singleMapReturnValue ?? "none")")
+        lines.append("singleMapPassed = \(singleMapPassed.map { "\($0)" } ?? "unknown")")
+        lines.append("processArchitecture = \(processArchitecture ?? "none")")
+        lines.append("isArm64e = \(isArm64e ?? "unknown")")
+        lines.append("pointerAuthenticationRelevant = \(pointerAuthenticationRelevant ?? "unknown")")
+        lines.append("sameMapNativeEntryStage = \(sameMapNativeEntryStage)")
+        lines.append("sameMapNativeBeforeRetStage = \(sameMapNativeBeforeRetStage)")
         lines.append("")
         lines.append("RENDERER:")
         lines.append("renderLoopIterations = \(renderLoopIterations)")

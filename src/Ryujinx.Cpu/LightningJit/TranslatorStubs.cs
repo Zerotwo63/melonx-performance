@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Ryujinx.Cpu.LightningJit
 {
@@ -56,12 +57,15 @@ namespace Ryujinx.Cpu.LightningJit
         // once control transfers into generated code via Blr. Allocated once,
         // before any Generate* method runs, so its address is a stable
         // constant that can be embedded directly into the assembled code.
-        // Offsets: 0 = DispatchLoop stage, 4 = DispatchStub stage, 8 = SlowDispatchStub stage.
+        // Offsets: 0 = DispatchLoop stage, 4 = DispatchStub stage, 8 = SlowDispatchStub stage,
+        // 12 = FASE 8G same-map stage-probe entry stage, 16 = same-map stage-probe before-RET stage.
         private readonly IntPtr _diagMarkers;
 
         public int DiagDispatchLoopStage => Marshal.ReadInt32(_diagMarkers, 0);
         public int DiagDispatchStubStage => Marshal.ReadInt32(_diagMarkers, 4);
         public int DiagSlowDispatchStubStage => Marshal.ReadInt32(_diagMarkers, 8);
+        public int DiagSameMapEntryStage => Marshal.ReadInt32(_diagMarkers, 12);
+        public int DiagSameMapBeforeRetStage => Marshal.ReadInt32(_diagMarkers, 16);
 
         /// <summary>
         /// Gets the dispatch stub.
@@ -120,10 +124,12 @@ namespace Ryujinx.Cpu.LightningJit
             _noWxCache = noWxCache;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
-            _diagMarkers = Marshal.AllocHGlobal(12);
+            _diagMarkers = Marshal.AllocHGlobal(20);
             Marshal.WriteInt32(_diagMarkers, 0, 0);
             Marshal.WriteInt32(_diagMarkers, 4, 0);
             Marshal.WriteInt32(_diagMarkers, 8, 0);
+            Marshal.WriteInt32(_diagMarkers, 12, 0);
+            Marshal.WriteInt32(_diagMarkers, 16, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -144,10 +150,12 @@ namespace Ryujinx.Cpu.LightningJit
             _dualMappedCache = dualMappedCache;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
-            _diagMarkers = Marshal.AllocHGlobal(12);
+            _diagMarkers = Marshal.AllocHGlobal(20);
             Marshal.WriteInt32(_diagMarkers, 0, 0);
             Marshal.WriteInt32(_diagMarkers, 4, 0);
             Marshal.WriteInt32(_diagMarkers, 8, 0);
+            Marshal.WriteInt32(_diagMarkers, 12, 0);
+            Marshal.WriteInt32(_diagMarkers, 16, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -165,10 +173,12 @@ namespace Ryujinx.Cpu.LightningJit
             _functionTable = functionTable;
             _getFunctionAddressRef = NativeInterface.GetFunctionAddress;
             _getFunctionAddress = Marshal.GetFunctionPointerForDelegate(_getFunctionAddressRef);
-            _diagMarkers = Marshal.AllocHGlobal(12);
+            _diagMarkers = Marshal.AllocHGlobal(20);
             Marshal.WriteInt32(_diagMarkers, 0, 0);
             Marshal.WriteInt32(_diagMarkers, 4, 0);
             Marshal.WriteInt32(_diagMarkers, 8, 0);
+            Marshal.WriteInt32(_diagMarkers, 12, 0);
+            Marshal.WriteInt32(_diagMarkers, 16, 0);
             _slowDispatchStub = new(GenerateSlowDispatchStub, isThreadSafe: true);
             _dispatchStub = new(GenerateDispatchStub, isThreadSafe: true);
             _dispatchLoop = new(GenerateDispatchLoop, isThreadSafe: true);
@@ -706,26 +716,89 @@ namespace Ryujinx.Cpu.LightningJit
             BootEventBridge.Report("LightningJit.SameMapProbe mapped", $"rw=0x{rwAddress:X},rx=0x{rxAddress:X}");
 
             byte[] bytesWritten = code;
-            byte[] bytesReadBack = Array.Empty<byte>();
 
+            // FASE 8A: read the SAME bytes from BOTH aliases independently -
+            // the previous round's "bytes read back" only ever read through
+            // RW (so it trivially always matched what was just written
+            // through RW), never proving the RX alias shows the same
+            // content. Any exception reading RX is itself significant and
+            // reported, not swallowed.
+            byte[] bytesReadBackRw = ReadBytesSafe(rwAddress, code.Length, "RW");
+            byte[] bytesReadBackRx = ReadBytesSafe(rxAddress, code.Length, "RX");
+
+            BootEventBridge.Report("LightningJit.SameMapProbe bytes written", Convert.ToHexString(bytesWritten));
+            if (bytesReadBackRw.Length > 0)
+            {
+                BootEventBridge.Report("LightningJit.SameMapProbe bytes read back (RW alias)", Convert.ToHexString(bytesReadBackRw));
+            }
+            if (bytesReadBackRx.Length > 0)
+            {
+                BootEventBridge.Report("dispatchProbeBytesRx", Convert.ToHexString(bytesReadBackRx));
+            }
+            bool rwRxMatch = bytesReadBackRw.Length > 0 && bytesReadBackRw.AsSpan().SequenceEqual(bytesReadBackRx);
+            BootEventBridge.Report("dispatchProbeRwRxBytesMatch", rwRxMatch.ToString());
+
+            // Coherence test, no execution involved: write pattern A through
+            // RW, read RX; write pattern B through RW, read RX again. This
+            // isolates "do RW/RX really alias the same backing memory with
+            // changes visible across the alias" from anything about
+            // instruction fetch/icache/execution.
             try
             {
-                if (rwAddress != IntPtr.Zero)
-                {
-                    bytesReadBack = new byte[code.Length];
-                    Marshal.Copy(rwAddress, bytesReadBack, 0, code.Length);
-                }
+                byte[] patternA = new byte[code.Length];
+                Array.Fill(patternA, (byte)0xAA);
+                Marshal.Copy(patternA, 0, rwAddress, patternA.Length);
+                byte[] readA = ReadBytesSafe(rxAddress, code.Length, "RX (coherence pattern A)");
+                BootEventBridge.Report("LightningJit.SameMapProbe coherence pattern A", $"wrote={Convert.ToHexString(patternA)},readRx={Convert.ToHexString(readA)},match={patternA.AsSpan().SequenceEqual(readA)}");
+
+                byte[] patternB = new byte[code.Length];
+                Array.Fill(patternB, (byte)0x55);
+                Marshal.Copy(patternB, 0, rwAddress, patternB.Length);
+                byte[] readB = ReadBytesSafe(rxAddress, code.Length, "RX (coherence pattern B)");
+                BootEventBridge.Report("LightningJit.SameMapProbe coherence pattern B", $"wrote={Convert.ToHexString(patternB)},readRx={Convert.ToHexString(readB)},match={patternB.AsSpan().SequenceEqual(readB)}");
+
+                // Restore the real probe code before anything tries to call it.
+                Marshal.Copy(code, 0, rwAddress, code.Length);
             }
             catch (Exception ex)
             {
-                BootEventBridge.ReportFail("LightningJit.SameMapProbe read RW bytes", ex);
+                BootEventBridge.ReportFail("LightningJit.SameMapProbe coherence test", ex);
+                // Still try to restore the real code so the call attempt below is meaningful.
+                try { Marshal.Copy(code, 0, rwAddress, code.Length); } catch { /* best effort */ }
             }
 
-            BootEventBridge.Report("LightningJit.SameMapProbe bytes written", Convert.ToHexString(bytesWritten));
-            if (bytesReadBack.Length > 0)
-            {
-                BootEventBridge.Report("LightningJit.SameMapProbe bytes read back (RW alias)", Convert.ToHexString(bytesReadBack));
-            }
+            // FASE 8B: query the REAL current/max protection of both
+            // aliases right before the call - never assumed from Map()
+            // having returned without throwing.
+            NativeMemoryDiagnostics.QueryProtection(rwAddress, "RW");
+            NativeMemoryDiagnostics.QueryProtection(rxAddress, "RX");
+
+            // FASE 8C: explicit cache synchronization, targeting the RX
+            // alias specifically (not only RW), right before the call.
+            NativeMemoryDiagnostics.SyncCaches(rwAddress, rxAddress, code.Length);
+
+            // FASE 8F: architecture/PAC context, logged once alongside this
+            // probe since it's directly relevant to whether the indirect
+            // call below could be affected.
+            NativeMemoryDiagnostics.ReportArchitecture();
+
+            // FASE 8D: a trivially-verifiable, already-compiled-into-the-
+            // process native function (getpid), called through the EXACT
+            // SAME Marshal.GetDelegateForFunctionPointer mechanism used
+            // below - isolates the managed call/delegate/ABI layer from
+            // anything specific to DualMappedNoWxCache.
+            NativeMemoryDiagnostics.RunNativeControl();
+
+            // FASE 8E: the SAME instruction bytes, mapped through a classic
+            // single mmap-RW/mprotect-RX region (no dual alias at all),
+            // called through the SAME delegate mechanism.
+            NativeMemoryDiagnostics.RunSingleMapControl(code, ExpectedValue);
+
+            // FASE 8G: a SEPARATE stage-marker variant of this same probe,
+            // launched on its own background thread so that if IT also
+            // hangs, it does not block this thread (and therefore does not
+            // block the real DispatchLoop attempt that follows this probe).
+            RunSameMapStageProbe();
 
             uint returnValue = 0;
             bool succeeded = false;
@@ -747,7 +820,138 @@ namespace Ryujinx.Cpu.LightningJit
                 succeeded ? "LightningJit.SameMapProbe PASS" : "LightningJit.SameMapProbe FAIL",
                 $"expected=0x{ExpectedValue:X},actual=0x{returnValue:X}");
 
-            return (succeeded, rwAddress, rxAddress, returnValue, bytesWritten, bytesReadBack);
+            return (succeeded, rwAddress, rxAddress, returnValue, bytesWritten, bytesReadBackRw);
+        }
+
+        private static byte[] ReadBytesSafe(IntPtr address, int length, string label)
+        {
+            try
+            {
+                if (address == IntPtr.Zero)
+                {
+                    return Array.Empty<byte>();
+                }
+
+                byte[] bytes = new byte[length];
+                Marshal.Copy(address, bytes, 0, length);
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail($"LightningJit.SameMapProbe read {label} bytes", ex);
+                return Array.Empty<byte>();
+            }
+        }
+
+        /// <summary>
+        /// Diagnóstico real #8 (FASE 8G): a SEPARATE tiny function (never
+        /// mixed into the main 8-byte probe above) that writes known values
+        /// into _diagMarkers offsets 12/16 at entry and right before RET,
+        /// using the exact same X16/X17-only scratch-register discipline as
+        /// EmitDiagMarker. Run on its own background thread (fire-and-
+        /// forget) precisely so a hang here can be observed (via
+        /// DiagSameMapEntryStage/DiagSameMapBeforeRetStage, polled the same
+        /// way as the FASE 3 markers) without blocking anything else.
+        /// </summary>
+        private void RunSameMapStageProbe()
+        {
+            CodeWriter writer = new();
+
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+            {
+                Assembler asm = new(writer);
+                EmitDiagMarker(ref asm, 12, 1); // sameMapNativeEntryStage = 1: primera instrucción alcanzada
+                EmitDiagMarker(ref asm, 16, 2); // sameMapNativeBeforeRetStage = 2: justo antes de RET
+                asm.Ret();
+            }
+            else
+            {
+                throw new PlatformNotSupportedException();
+            }
+
+            byte[] code = writer.AsByteSpan().ToArray();
+            IntPtr rxAddress;
+
+            try
+            {
+                if (_noWxCache != null)
+                {
+                    rxAddress = _noWxCache.MapPageAligned(code, out _);
+                }
+                else if (_dualMappedCache != null)
+                {
+                    rxAddress = _dualMappedCache.MapPageAligned(code, out _);
+                }
+                else
+                {
+                    rxAddress = JitCache.Map(code);
+                }
+            }
+            catch (Exception ex)
+            {
+                BootEventBridge.ReportFail("LightningJit.SameMapStageProbe map", ex);
+                return;
+            }
+
+            Thread stageProbeThread = new(() =>
+            {
+                try
+                {
+                    BootEventBridge.Report("LightningJit.SameMapStageProbe call begin", $"rx=0x{rxAddress:X}");
+                    ProbeDelegate probe = Marshal.GetDelegateForFunctionPointer<ProbeDelegate>(rxAddress);
+                    probe();
+                    BootEventBridge.Report("LightningJit.SameMapStageProbe call returned");
+                }
+                catch (Exception ex)
+                {
+                    BootEventBridge.ReportFail("LightningJit.SameMapStageProbe call", ex);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "LightningJit.SameMapStageProbe",
+            };
+            stageProbeThread.Start();
+
+            // Dedicated poller for THIS probe's markers, independent of
+            // Translator.PollDiagMarkers - that one only starts right
+            // before the real DispatchLoop call, which this whole method
+            // runs before. If the main 8-byte probe above hangs, execution
+            // never reaches that point, so without this, a hang here would
+            // be invisible.
+            Thread pollThread = new(() =>
+            {
+                int lastEntry = -1, lastBeforeRet = -1;
+                for (int i = 0; i < 50; i++) // ~10s at 200ms, then give up polling (thread stays background either way)
+                {
+                    int entry = DiagSameMapEntryStage;
+                    int beforeRet = DiagSameMapBeforeRetStage;
+
+                    if (entry != lastEntry)
+                    {
+                        BootEventBridge.Report("sameMapNativeEntryStage", entry.ToString());
+                        lastEntry = entry;
+                    }
+
+                    if (beforeRet != lastBeforeRet)
+                    {
+                        BootEventBridge.Report("sameMapNativeBeforeRetStage", beforeRet.ToString());
+                        lastBeforeRet = beforeRet;
+                    }
+
+                    if (beforeRet != 0)
+                    {
+                        break;
+                    }
+
+                    Thread.Sleep(200);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "LightningJit.SameMapStageProbe.Poll",
+            };
+            pollThread.Start();
         }
 
         /// <summary>

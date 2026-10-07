@@ -130,6 +130,18 @@ struct BootWatchdogView: View {
                 row("Probe RW/RX address", "\(diagnostics.dispatchProbeRwAddress ?? "none") / \(diagnostics.dispatchProbeRxAddress ?? "none")")
             }
 
+            Text("PROBE HANG INVESTIGATION (FASES 8A-8G)").font(.caption).bold().foregroundColor(.white.opacity(0.5))
+            VStack(alignment: .leading, spacing: 6) {
+                row("RW/RX bytes match", diagnostics.dispatchProbeRwRxBytesMatch.map { "\($0)" } ?? "unknown")
+                row("RW protection (cur/max)", "\(diagnostics.dispatchProbeRwCurrentProtection ?? "?") / \(diagnostics.dispatchProbeRwMaxProtection ?? "?")")
+                row("RX protection (cur/max)", "\(diagnostics.dispatchProbeRxCurrentProtection ?? "?") / \(diagnostics.dispatchProbeRxMaxProtection ?? "?")")
+                row("Cache sync completed", diagnostics.dispatchProbeCacheSyncCompleted.map { "\($0)" } ?? "unknown")
+                row("Native control (getpid) passed", diagnostics.nativeControlPassed.map { "\($0)" } ?? "unknown")
+                row("Single-map control passed", diagnostics.singleMapPassed.map { "\($0)" } ?? "unknown")
+                row("Same-map stage (entry/beforeRet)", "\(diagnostics.sameMapNativeEntryStage) / \(diagnostics.sameMapNativeBeforeRetStage)")
+                row("Architecture / arm64e", "\(diagnostics.processArchitecture ?? "?") / \(diagnostics.isArm64e ?? "unknown")")
+            }
+
             Text("NativeInterface / FunctionTable").font(.caption).bold().foregroundColor(.white.opacity(0.5))
             VStack(alignment: .leading, spacing: 6) {
                 row("GetFunctionAddress entered", "\(diagnostics.nativeGetFunctionAddressEntered) (calls \(diagnostics.nativeGetFunctionAddressCalls))")
