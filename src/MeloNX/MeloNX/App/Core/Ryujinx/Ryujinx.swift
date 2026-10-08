@@ -142,6 +142,10 @@ class Ryujinx : ObservableObject {
         }
 
 
+        // Reset the previous game's Vulkan/MetalFX data before the next
+        // session starts. Keep the last session inspectable after exit
+        // until this point so the user can copy its report from Settings.
+        RyujinxBridge.resetMetalFxDiagnostics()
         self.config = config
 
         self.isRunning = true

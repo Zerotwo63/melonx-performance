@@ -3,6 +3,7 @@
 //  MeloNX
 //
 
+import Foundation
 import Metal
 import MetalFX
 
@@ -135,7 +136,18 @@ enum MetalFxSpatialScaler {
     }
 }
 
+// Native C# render callbacks may arrive off the Swift main thread.
+// Do not share unprotected counters across sessions or render callbacks.
+private let metalFxDiagnosticsLock = NSLock()
 private var metalFxFramesProcessed: Int64 = 0
+private var metalFxFramesAttempted: Int64 = 0
+private var metalFxFramesFallback: Int64 = 0
+private var metalFxEffectiveFilter: Int32 = 0
+private var metalFxLastFrame: Int32 = -1 // -1 unknown, 0 Bilinear fallback, 1 MetalFX pass
+private var metalFxInputWidth: Int32 = 0
+private var metalFxInputHeight: Int32 = 0
+private var metalFxOutputWidth: Int32 = 0
+private var metalFxOutputHeight: Int32 = 0
 
 @_cdecl("metalfx_is_available")
 public func metalfx_is_available() -> UInt8 {
@@ -166,12 +178,113 @@ public func metalfx_scale(
 /// processed - only incremented by MetalFxSpatialScalingFilter.cs AFTER
 /// metalfx_scale() returned success, never on construction/availability
 /// alone. Read by Settings/diagnostics UI via metalfx_frames_processed().
+// Called only after MTLFXSpatialScaler's command buffer reported completion.
+// This is a successful upscale PASS, not proof of presentation on screen.
 @_cdecl("metalfx_report_frame_processed")
-public func metalfx_report_frame_processed() {
+public func metalfx_report_frame_processed(_ sourceWidth: Int32, _ sourceHeight: Int32, _ outputWidth: Int32, _ outputHeight: Int32) {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
     metalFxFramesProcessed += 1
+    metalFxLastFrame = 1
+    metalFxInputWidth = sourceWidth
+    metalFxInputHeight = sourceHeight
+    metalFxOutputWidth = outputWidth
+    metalFxOutputHeight = outputHeight
+}
+
+@_cdecl("metalfx_report_frame_attempt")
+public func metalfx_report_frame_attempt() {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    metalFxFramesAttempted += 1
+}
+
+@_cdecl("metalfx_report_frame_fallback")
+public func metalfx_report_frame_fallback() {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    metalFxFramesFallback += 1
+    metalFxLastFrame = 0
+}
+
+// Actual Vulkan Window.UpdateEffect implementation, not the chosen setting:
+// 0 unknown; 1 Bilinear; 2 Nearest; 3 FSR; 4 Area;
+// 5 MetalFX constructed (may still fail per frame);
+// 6 Bilinear because MetalFX construction failed.
+@_cdecl("metalfx_set_effective_filter")
+public func metalfx_set_effective_filter(_ code: Int32) {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    metalFxEffectiveFilter = code
+    metalFxLastFrame = -1
+}
+
+@_cdecl("metalfx_reset_diagnostics")
+public func metalfx_reset_diagnostics() {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    metalFxFramesProcessed = 0
+    metalFxFramesAttempted = 0
+    metalFxFramesFallback = 0
+    metalFxEffectiveFilter = 0
+    metalFxLastFrame = -1
+    metalFxInputWidth = 0
+    metalFxInputHeight = 0
+    metalFxOutputWidth = 0
+    metalFxOutputHeight = 0
 }
 
 @_cdecl("metalfx_frames_processed")
 public func metalfx_frames_processed() -> Int64 {
-    metalFxFramesProcessed
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxFramesProcessed
+}
+@_cdecl("metalfx_frames_attempted")
+public func metalfx_frames_attempted() -> Int64 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxFramesAttempted
+}
+@_cdecl("metalfx_frames_fallback")
+public func metalfx_frames_fallback() -> Int64 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxFramesFallback
+}
+@_cdecl("metalfx_effective_filter")
+public func metalfx_effective_filter() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxEffectiveFilter
+}
+@_cdecl("metalfx_last_frame")
+public func metalfx_last_frame() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxLastFrame
+}
+@_cdecl("metalfx_input_width")
+public func metalfx_input_width() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxInputWidth
+}
+@_cdecl("metalfx_input_height")
+public func metalfx_input_height() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxInputHeight
+}
+@_cdecl("metalfx_output_width")
+public func metalfx_output_width() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxOutputWidth
+}
+@_cdecl("metalfx_output_height")
+public func metalfx_output_height() -> Int32 {
+    metalFxDiagnosticsLock.lock()
+    defer { metalFxDiagnosticsLock.unlock() }
+    return metalFxOutputHeight
 }

@@ -1,6 +1,7 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Vulkan.Effects;
+using Ryujinx.Graphics.Vulkan.MetalInterop;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using System;
@@ -660,6 +661,17 @@ namespace Ryujinx.Graphics.Vulkan
                         }
                         break;
                 }
+
+                // Report the actual instantiated backend, never just the
+                // requested CLI/picker value. Code 6 is the constructor's
+                // Bilinear fallback when MetalFX was selected but unavailable.
+                int effectiveCode = _scalingFilter is MetalFxSpatialScalingFilter ? 5
+                    : _scalingFilter is FsrScalingFilter ? 3
+                    : _scalingFilter is AreaScalingFilter ? 4
+                    : _currentScalingFilter == ScalingFilter.MetalFxSpatial ? 6
+                    : _currentScalingFilter == ScalingFilter.Nearest ? 2
+                    : 1;
+                MetalFxNative.ReportEffectiveFilter(effectiveCode);
             }
         }
 

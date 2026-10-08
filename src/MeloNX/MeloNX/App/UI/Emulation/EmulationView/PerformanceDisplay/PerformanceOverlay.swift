@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct PerformanceOverlayView: View  {
     @StateObject private var memorymonitor = MemoryUsageMonitor()
@@ -15,10 +16,32 @@ struct PerformanceOverlayView: View  {
     @ObservedObject private var framePacingMonitor = FramePacingMonitor.shared
     @ObservedObject private var autoPerformance = AutoPerformanceManager.shared
     @State private var batteryLevel: Int = Int(UIDevice.current.batteryLevel * 100)
+    @State private var metalFxSnapshot = RyujinxBridge.metalFxSnapshot
 
     @AppStorage("showBatteryPercentage") var showBatteryPercentage: Bool = false
 
     @AppStorage("horizontalorvertical") var horizontalorvertical: Bool = false
+
+    /// The Vulkan render path reports effective backend and per-pass outcome.
+    /// No attempt is made to interpret renderer loop counts as game FPS.
+    @ViewBuilder
+    private var activeScalerReadout: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text("Filtro real: \(metalFxSnapshot.effectiveLabel)")
+                .font(.caption2)
+                .foregroundStyle(.white)
+            if metalFxSnapshot.effectiveCode == 5 || metalFxSnapshot.effectiveCode == 6 {
+                Text("MetalFX: \(metalFxSnapshot.processed) OK / \(metalFxSnapshot.attempted) intentos / \(metalFxSnapshot.fallbacks) fallback")
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+                if metalFxSnapshot.processed > 0 {
+                    Text(metalFxSnapshot.successfulDimensions)
+                        .font(.caption2)
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+    }
 
     /// Objective start/stop measurement (BenchmarkManager) rather than
     /// just the live, unrecorded FPS text above — see
@@ -40,7 +63,7 @@ struct PerformanceOverlayView: View  {
             Text(String(format: "Avg %.0f / 1%% low %.0f / Min %.0f FPS", result.averageFPS, result.fps1PercentLow, result.minFPS))
                 .foregroundStyle(.white)
                 .font(.caption2)
-            Text("\(result.activeScalingFilter.displayName) @ \(String(format: "%.2f", result.resolutionScale))x · jitter \(String(format: "%.1f", result.worstFrameJitter * 1000))ms")
+            Text("Selected: \(result.activeScalingFilter.displayName) @ \(String(format: "%.2f", result.resolutionScale))x · jitter \(String(format: "%.1f", result.worstFrameJitter * 1000))ms")
                 .foregroundStyle(.white)
                 .font(.caption2)
             // "FIFO thread" (not "GPU") deliberately - see
@@ -57,7 +80,7 @@ struct PerformanceOverlayView: View  {
             // selected" - a selected-but-silently-falling-back filter
             // would show 0 here even while the picker says MetalFX Spatial.
             if result.activeScalingFilter == .metalFxSpatial {
-                Text("MetalFX frames processed: \(RyujinxBridge.metalFxFramesProcessed)")
+                Text("MetalFX passes completed: \(metalFxSnapshot.processed)")
                     .foregroundStyle(.white)
                     .font(.caption2)
             }
@@ -98,6 +121,7 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                activeScalerReadout
                 if autoPerformance.isThrottling {
                     Text(autoPerformance.isUsingAutoFSR ? "Throttled (FSR)" : "Throttled")
                         .foregroundStyle(.orange)
@@ -116,6 +140,7 @@ struct PerformanceOverlayView: View  {
                     .foregroundStyle(.white)
                 Text("RAM: " + memorymonitor.formatMemorySize(memorymonitor.memoryUsage))
                     .foregroundStyle(.white)
+                activeScalerReadout
                 if autoPerformance.isThrottling {
                     Text(autoPerformance.isUsingAutoFSR ? "Throttled (FSR)" : "Throttled")
                         .foregroundStyle(.orange)
@@ -140,7 +165,17 @@ struct PerformanceOverlayView: View  {
                     .background(Color.black.opacity(0.7))
             }
         }
+        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+            // Polled only while this overlay is mounted. Native getters
+            // read from locked counters maintained by the real render path.
+            metalFxSnapshot = RyujinxBridge.metalFxSnapshot
+        }
+        .onDisappear {
+            _ = benchmarkManager.stop()
+            framePacingMonitor.reset()
+        }
         .onAppear() {
+            metalFxSnapshot = RyujinxBridge.metalFxSnapshot
             UIDevice.current.isBatteryMonitoringEnabled = true
             batteryLevel = Int(UIDevice.current.batteryLevel * 100)
             

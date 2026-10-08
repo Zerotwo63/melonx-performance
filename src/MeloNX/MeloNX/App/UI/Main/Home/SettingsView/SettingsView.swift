@@ -29,6 +29,7 @@ struct SettingsViewNew: View {
     
     @State private var selectedCategory: SettingsCategory = .graphics
     @State private var metalFXCapability = MetalFXCapabilityInspector.current()
+    @State private var copiedMetalFxDiagnostics = false
     @State private var showResolutionInfo = false
     @State private var showAnisotropicInfo = false
     @State private var showControllerInfo = false
@@ -517,7 +518,7 @@ struct SettingsViewNew: View {
                         Text("Experimental - falls back to Bilinear automatically if unavailable or if a frame fails to process.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        Text("Frames processed by MetalFX: \(RyujinxBridge.metalFxFramesProcessed)")
+                        Text("Completed MetalFX passes: \(RyujinxBridge.metalFxSnapshot.processed) (actual backend: \(RyujinxBridge.metalFxSnapshot.effectiveLabel))")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -632,6 +633,21 @@ struct SettingsViewNew: View {
                 
                 Divider()
                 SettingsToggle(isOn: nativeSettingsManager.horizontalorvertical.projectedValue, icon: "rotate.right", label: "Horizontal Performance Overlay", infoMessage: "Changes the look of the Performance Overlay to be Horizontal instead of Vertical.")
+
+                Divider()
+                Button {
+                    // Captures a fresh native snapshot even after exiting the
+                    // game; it is reset only when the next session starts.
+                    UIPasteboard.general.string = RyujinxBridge.metalFxSnapshot.diagnosticText
+                    copiedMetalFxDiagnostics = true
+                } label: {
+                    Label(copiedMetalFxDiagnostics ? "MetalFX diagnostics copied" : "Copy MetalFX diagnostics",
+                          systemImage: copiedMetalFxDiagnostics ? "checkmark" : "doc.on.doc")
+                }
+                .accessibilityIdentifier("copyMetalFXDiagnostics")
+                Text("The report distinguishes the configured filter from the actual Vulkan backend and successful MetalFX passes.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
