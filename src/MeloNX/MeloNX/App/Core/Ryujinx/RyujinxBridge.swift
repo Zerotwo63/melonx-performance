@@ -105,6 +105,26 @@ final class RyujinxBridge {
         SN_metalfx_frames_processed()
     }
 
+    static func resetMetalFxDiagnostics() {
+        SN_metalfx_reset_diagnostics()
+    }
+
+    /// Actual backend selection and per-frame pass/fallback diagnostics.
+    /// No values are inferred from the configuration picker.
+    static var metalFxSnapshot: MetalFxSnapshot {
+        MetalFxSnapshot(
+            effectiveCode: SN_metalfx_effective_filter(),
+            attempted: SN_metalfx_frames_attempted(),
+            processed: SN_metalfx_frames_processed(),
+            fallbacks: SN_metalfx_frames_fallback(),
+            lastFrame: SN_metalfx_last_frame(),
+            inputWidth: SN_metalfx_input_width(),
+            inputHeight: SN_metalfx_input_height(),
+            outputWidth: SN_metalfx_output_width(),
+            outputHeight: SN_metalfx_output_height()
+        )
+    }
+
     
     static var currentVolume: Float {
         get {
@@ -179,6 +199,63 @@ final class RyujinxBridge {
     }
 }
 
+
+/// Independent, thread-safe snapshot of the native Vulkan/MetalFX render path.
+/// A completed MetalFX pass does not prove the swapchain was presented.
+struct MetalFxSnapshot {
+    let effectiveCode: Int32
+    let attempted: Int64
+    let processed: Int64
+    let fallbacks: Int64
+    let lastFrame: Int32
+    let inputWidth: Int32
+    let inputHeight: Int32
+    let outputWidth: Int32
+    let outputHeight: Int32
+
+    var effectiveLabel: String {
+        switch effectiveCode {
+        case 1: return "Bilinear"
+        case 2: return "Nearest"
+        case 3: return "FSR"
+        case 4: return "Area"
+        case 5:
+            if lastFrame == 1 { return "MetalFX Spatial (pase completado)" }
+            if lastFrame == 0 { return "Bilinear (fallback del último pase)" }
+            return "MetalFX creado; aún sin pase confirmado"
+        case 6: return "Bilinear (MetalFX no disponible)"
+        default: return "Sin datos del renderizador"
+        }
+    }
+
+    var successfulDimensions: String {
+        guard processed > 0 else { return "No disponible (sin pases exitosos)" }
+        return "\(inputWidth)x\(inputHeight) -> \(outputWidth)x\(outputHeight)"
+    }
+
+    var diagnosticText: String {
+        let selected = Ryujinx.shared.config?.scalingFilter.displayName ?? "N/D"
+        let running = Ryujinx.shared.isRunning
+        let fps = running ? String(RyujinxBridge.currentFPS) : "N/D (juego detenido)"
+        return """
+        [METALFX LIVE DIAGNOSTICS]
+        recordedAt = \(ISO8601DateFormatter().string(from: Date()))
+        gameRunning = \(running)
+        requestedFilter = \(selected)
+        effectiveBackend = \(effectiveLabel)
+        effectiveBackendCode = \(effectiveCode)
+        metalFxPassAttempts = \(attempted)
+        metalFxCompletedPasses = \(processed)
+        metalFxFallbackAttempts = \(fallbacks)
+        lastPass = \(lastFrame == 1 ? "MetalFX completed" : lastFrame == 0 ? "Bilinear fallback attempted" : "No per-frame result")
+        lastSuccessfulInput = \(processed > 0 ? "\(inputWidth)x\(inputHeight)" : "N/D")
+        lastSuccessfulOutput = \(processed > 0 ? "\(outputWidth)x\(outputHeight)" : "N/D")
+        gameFPS = \(fps)
+        note = FPS is the emulator's guest FPS; NOT render loop iterations. Completed scaler passes do not guarantee the result was presented on the display.
+        """
+    }
+}
+
 fileprivate extension Array where Element == String {
     func withCStrings<R>(_ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>, Int32) -> R) -> R {
         var cStrings = map { strdup($0) }
@@ -240,6 +317,33 @@ func SN_get_gpu_fifo_percent() -> Float
 
 @_silgen_name("metalfx_frames_processed")
 func SN_metalfx_frames_processed() -> Int64
+
+@_silgen_name("metalfx_reset_diagnostics")
+func SN_metalfx_reset_diagnostics()
+
+@_silgen_name("metalfx_frames_attempted")
+func SN_metalfx_frames_attempted() -> Int64
+
+@_silgen_name("metalfx_frames_fallback")
+func SN_metalfx_frames_fallback() -> Int64
+
+@_silgen_name("metalfx_effective_filter")
+func SN_metalfx_effective_filter() -> Int32
+
+@_silgen_name("metalfx_last_frame")
+func SN_metalfx_last_frame() -> Int32
+
+@_silgen_name("metalfx_input_width")
+func SN_metalfx_input_width() -> Int32
+
+@_silgen_name("metalfx_input_height")
+func SN_metalfx_input_height() -> Int32
+
+@_silgen_name("metalfx_output_width")
+func SN_metalfx_output_width() -> Int32
+
+@_silgen_name("metalfx_output_height")
+func SN_metalfx_output_height() -> Int32
 
 @_silgen_name("get_game_volume")
 func SN_get_game_volume() -> Float
