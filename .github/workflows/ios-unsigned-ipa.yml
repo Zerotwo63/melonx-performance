@@ -9,6 +9,7 @@ on:
       - main
       - master
       - perf/jit-integration
+      - feat/metalfx-live-hud
     paths:
       - ".github/workflows/ios-unsigned-ipa.yml"
       - "Directory.Packages.props"
