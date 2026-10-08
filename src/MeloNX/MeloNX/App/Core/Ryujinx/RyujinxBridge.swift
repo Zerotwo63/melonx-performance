@@ -78,13 +78,20 @@ final class RyujinxBridge {
         Int(SN_get_current_fps())
     }
 
-    /// Real, already-computed by the core (Ryujinx.HLE.PerformanceStatistics.GetFifoPercent())
-    /// - percentage of time the GPU command processor was actually
-    /// active (not idle waiting) over the last ~750ms window. Lets a
-    /// performance overlay tell "CPU/JIT-bound" apart from "GPU-bound"
-    /// frames, which raw FPS alone cannot distinguish. 0 if unmeasurable
-    /// (no window/device yet).
-    static var gpuFifoPercent: Float {
+    /// CORRECTION (verified by reading Ryujinx.HLE.PerformanceStatistics +
+    /// its real call site in Ryujinx.Headless.SDL2/WindowBase.cs): this
+    /// is NOT a physical-GPU-hardware-utilization reading. It is the
+    /// percentage of a ~750ms window the host's GPU/render thread spent
+    /// inside Device.ProcessFrame() - the call that translates the
+    /// guest's submitted GPFIFO command stream into Vulkan API calls -
+    /// versus idle, waiting for the guest to submit more work
+    /// (Device.WaitFifo()). High = this thread is busy translating GPU
+    /// commands (correlates with GPU-command load, but is CPU-side
+    /// translation time, not a Metal/Instruments GPU hardware counter,
+    /// which this build has no access to). Named `fifoThread...` rather
+    /// than `gpu...` specifically so no caller mistakes this for GPU
+    /// hardware utilization without re-reading this comment.
+    static var fifoThreadBusyPercent: Float {
         SN_get_gpu_fifo_percent()
     }
 

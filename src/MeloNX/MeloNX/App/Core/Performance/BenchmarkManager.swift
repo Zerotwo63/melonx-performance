@@ -34,10 +34,14 @@ import UIKit
 /// deliberately still not exposed here for that reason - a previous
 /// round correctly identified it would just duplicate the FPS figures
 /// already here under a different name, and that reasoning still holds.
-/// gpuFifoPercent (also added this round, via the newly-exposed
-/// get_gpu_fifo_percent) IS a genuinely independent measurement -
-/// percentage of time the GPU command processor was actually active,
-/// not derivable from FPS alone.
+/// fifoThreadBusyPercent (also added this round, via the newly-exposed
+/// get_gpu_fifo_percent) IS a genuinely independent measurement, not
+/// derivable from FPS alone - but per a later audit round's correction,
+/// it is NOT a physical-GPU-hardware-utilization reading either: see
+/// RyujinxBridge.fifoThreadBusyPercent's doc comment for exactly what
+/// it measures (host-side time inside Device.ProcessFrame(), i.e. GPU
+/// command TRANSLATION load on this process's own thread, not a Metal/
+/// Instruments GPU counter).
 @MainActor
 final class BenchmarkManager: NSObject, ObservableObject {
     struct Result {
@@ -60,12 +64,14 @@ final class BenchmarkManager: NSObject, ObservableObject {
         // why it still isn't used here).
         let frameTimeP95Ms: Double
         let frameTimeP99Ms: Double
-        // Real, independent metric (Ryujinx.HLE.PerformanceStatistics.GetFifoPercent(),
-        // newly exposed this round via get_gpu_fifo_percent) - percentage
-        // of time the GPU command processor was actually active over
-        // the run, snapshotted at stop() like resolutionScale/thermalState
-        // below (not a time series, same caveat applies).
-        let gpuFifoPercent: Float
+        // Real, independent metric (Ryujinx.HLE.PerformanceStatistics.GetFifoPercent()) -
+        // NOT GPU hardware utilization (see RyujinxBridge.fifoThreadBusyPercent's
+        // doc comment) - percentage of time the render thread spent
+        // inside Device.ProcessFrame() (translating guest GPFIFO
+        // commands to Vulkan calls) over the run, snapshotted at stop()
+        // like resolutionScale/thermalState below (not a time series,
+        // same caveat applies).
+        let fifoThreadBusyPercent: Float
         let resolutionScale: Double
         let activeScalingFilter: ScalingFilter
         let thermalState: ProcessInfo.ThermalState
@@ -158,7 +164,7 @@ final class BenchmarkManager: NSObject, ObservableObject {
             worstFrameJitter: worstJitter,
             frameTimeP95Ms: percentile(0.95),
             frameTimeP99Ms: percentile(0.99),
-            gpuFifoPercent: RyujinxBridge.gpuFifoPercent,
+            fifoThreadBusyPercent: RyujinxBridge.fifoThreadBusyPercent,
             resolutionScale: Ryujinx.shared.config?.resscale ?? 0,
             activeScalingFilter: Ryujinx.shared.config?.scalingFilter ?? .bilinear,
             thermalState: ThermalGovernor.shared.currentState

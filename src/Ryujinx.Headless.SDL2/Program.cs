@@ -643,17 +643,27 @@ namespace Ryujinx.Headless.SDL2
         }
 
         /// <summary>
-        /// GetFifoPercent()/GetGameFrameTime() are real, already-computed
-        /// metrics on Device.Statistics (see Ryujinx.HLE.PerformanceStatistics)
-        /// - confirmed by reading that class directly, not assumed - but
-        /// were only ever consumed by the desktop UIs' window-title text
-        /// (Ryujinx/AppHost.cs, Ryujinx.Gtk3/RendererWidgetBase.cs,
-        /// Ryujinx.Headless.SDL2/WindowBase.cs's own debug title), never
-        /// exposed to iOS/Swift at all. FIFO% specifically answers "is the
-        /// GPU the bottleneck right now" (percentage of time the GPU
-        /// command processor was actually active, not idle waiting) -
-        /// directly actionable for telling CPU/JIT-bound frames apart
-        /// from GPU-bound ones, which plain FPS alone cannot distinguish.
+        /// CORRECTION (this round, per explicit audit request): the
+        /// previous round's doc comment here called this "percentage of
+        /// time the GPU command processor was actually active" and the
+        /// Swift-side label said "GPU FIFO %", both of which read as a
+        /// physical-GPU-hardware-utilization claim. Verified by reading
+        /// the actual call site (Ryujinx.Headless.SDL2/WindowBase.cs:394-396,
+        /// the same render loop this iOS build runs): RecordFifoStart()/
+        /// RecordFifoEnd() bracket ONLY `Device.ProcessFrame()` - the HOST
+        /// CPU call that translates the guest's submitted GPFIFO command
+        /// stream into Vulkan API calls, running on this process's own
+        /// GPU/render thread. This is CPU time spent on GPU-command
+        /// translation, not a reading from any physical GPU hardware
+        /// performance counter (Metal's MTLCounterSet/GPU frame capture,
+        /// which this does NOT use at all). A high percentage here means
+        /// "this thread spent most of the 750ms window inside
+        /// ProcessFrame()", which correlates with GPU-command load but is
+        /// NOT the same claim as "the physical GPU chip was X% busy".
+        /// These values should be read as "FIFO processing thread load", never
+        /// presented to a user as GPU hardware utilization without
+        /// further evidence (e.g. Metal/Instruments GPU counters, which
+        /// this build does not have access to).
         /// </summary>
         [UnmanagedCallersOnly(EntryPoint = "get_gpu_fifo_percent")]
         public static unsafe float GetGpuFifoPercent()

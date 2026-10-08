@@ -5,6 +5,12 @@ namespace Ryujinx.Graphics.Vulkan
 {
     class PipelineHelperShader : PipelineBase
     {
+        // Own cache file, distinct from PipelineFull's - see
+        // PipelineBase.PipelineCacheId's doc comment for why this is
+        // required (both subclasses used to silently clobber a single
+        // shared file on disposal).
+        protected override string PipelineCacheId => "helper";
+
         public PipelineHelperShader(VulkanRenderer gd, Device device) : base(gd, device)
         {
         }

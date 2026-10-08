@@ -43,7 +43,11 @@ struct PerformanceOverlayView: View  {
             Text("\(result.activeScalingFilter.displayName) @ \(String(format: "%.2f", result.resolutionScale))x · jitter \(String(format: "%.1f", result.worstFrameJitter * 1000))ms")
                 .foregroundStyle(.white)
                 .font(.caption2)
-            Text(String(format: "Frametime P95 %.1f / P99 %.1fms · GPU FIFO %.0f%%", result.frameTimeP95Ms, result.frameTimeP99Ms, result.gpuFifoPercent))
+            // "FIFO thread" (not "GPU") deliberately - see
+            // RyujinxBridge.fifoThreadBusyPercent's doc comment: this is
+            // host-side GPU-command-translation thread load, not a
+            // physical GPU hardware utilization reading.
+            Text(String(format: "Frametime P95 %.1f / P99 %.1fms · FIFO thread %.0f%%", result.frameTimeP95Ms, result.frameTimeP99Ms, result.fifoThreadBusyPercent))
                 .foregroundStyle(.white)
                 .font(.caption2)
         }

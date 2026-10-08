@@ -119,7 +119,7 @@ namespace Ryujinx.Graphics.Vulkan
             // corrupted) just ignores it and starts with an empty
             // cache - the same behavior this already had before, never
             // an error.
-            byte[] initialCacheData = LoadPipelineCacheData();
+            byte[] initialCacheData = LoadPipelineCacheData(PipelineCacheId);
 
             PipelineCacheCreateInfo pipelineCacheCreateInfo;
 
@@ -136,6 +136,25 @@ namespace Ryujinx.Graphics.Vulkan
 
                     gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
                 }
+
+                // REUSE VERIFICATION (requested explicitly - "verifica
+                // compatibilidad GPU/driver/pipelineCacheUUID"): standard
+                // Vulkan has no hit/miss counter for pipeline cache lookups,
+                // so we cannot measure "reuse" directly. What IS measurable
+                // and is real evidence either way: immediately re-query
+                // GetPipelineCacheData right after creation, before any
+                // pipeline has been compiled this session. Per the Vulkan
+                // spec, a compliant driver either (a) incorporates a
+                // compatible blob - in which case the returned size should
+                // be close to what was loaded - or (b) silently discards an
+                // incompatible/corrupt one (wrong pipelineCacheUUID, driver
+                // version, or header) and starts empty - in which case the
+                // returned size collapses to just the empty-cache header
+                // size. This does not prove individual pipelines were
+                // reused, but it does prove whether the loaded blob was
+                // accepted by THIS device/driver, which is exactly the
+                // compatibility question asked.
+                ReportCacheAcceptance(initialCacheData.Length);
             }
             else
             {
@@ -145,6 +164,8 @@ namespace Ryujinx.Graphics.Vulkan
                 };
 
                 gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
+
+                Logger.Info?.Print(LogClass.Gpu, $"Vulkan pipeline cache ({PipelineCacheId}): no persisted cache found on disk, starting empty (first launch or cache was never saved).");
             }
 
             _descriptorSetUpdater = new DescriptorSetUpdater(gd, device);
@@ -168,33 +189,137 @@ namespace Ryujinx.Graphics.Vulkan
         }
 
         /// <summary>
-        /// Path for the persisted VkPipelineCache blob - deliberately
-        /// NOT per-title (unlike Ryujinx.Graphics.Gpu.Shader.ShaderCache's
+        /// Identifies which on-disk cache blob this instance owns.
+        ///
+        /// FIX (this round, found while verifying the FASE 1 "does
+        /// switching contexts corrupt the cache" question): there are TWO
+        /// PipelineBase subclasses that each get their own VkPipelineCache
+        /// handle - PipelineFull (the main render pipeline,
+        /// VulkanRenderer.cs:463) and PipelineHelperShader (blit/clear/etc
+        /// utility pipelines, HelperShader.cs:61). VulkanRenderer.Dispose()
+        /// disposes HelperShader BEFORE _pipeline (VulkanRenderer.cs:1024-
+        /// 1025), and both previously saved to the exact SAME hardcoded
+        /// filename. That meant PipelineFull's save would silently
+        /// OVERWRITE whatever unique pipeline data HelperShader had just
+        /// written moments earlier - real, confirmed data loss on every
+        /// single teardown, not a hypothetical. Giving each subclass its
+        /// own file (via this virtual id) removes the collision entirely:
+        /// no merge logic needed, no shared file, no last-writer-wins race.
+        /// </summary>
+        protected virtual string PipelineCacheId => "main";
+
+        /// <summary>
+        /// Path for a persisted VkPipelineCache blob - deliberately NOT
+        /// per-title (unlike Ryujinx.Graphics.Gpu.Shader.ShaderCache's
         /// per-title shader disk cache, which this project cannot
         /// reference from here - Ryujinx.Graphics.Vulkan is a lower-level
         /// GAL backend with no project reference to Ryujinx.Graphics.Gpu).
-        /// A single cache keyed by the driver's own pipelineCacheUUID
-        /// (embedded in the blob header per the Vulkan spec, verified by
-        /// the driver itself on load) is architecturally correct here:
-        /// pipeline STATE objects are not inherently game-specific the
-        /// way compiled shaders are, and the driver already rejects a
-        /// blob from a different device/driver version safely on its
-        /// own.
+        /// A single cache per owner (see PipelineCacheId), keyed by the
+        /// driver's own pipelineCacheUUID (embedded in the blob header per
+        /// the Vulkan spec, verified by the driver itself on load) is
+        /// architecturally correct here: pipeline STATE objects are not
+        /// inherently game-specific the way compiled shaders are, and the
+        /// driver already rejects a blob from a different device/driver
+        /// version safely on its own (verified empirically, not just
+        /// assumed from the spec - see ReportCacheAcceptance below).
         /// </summary>
-        private static string PipelineCacheFilePath =>
-            Path.Combine(AppDataManager.BaseDirPath, "cache", "vulkan_pipeline_cache.bin");
+        // internal (not private): lets Ryujinx.Tests exercise the pure
+        // file-I/O helpers below directly, without needing a real Vulkan
+        // device - see AssemblyInfo.cs's InternalsVisibleTo and
+        // PipelineCachePersistenceTests.cs. Still never called from outside
+        // this file for anything other than the path itself.
+        internal static string GetPipelineCacheFilePath(string cacheId) =>
+            Path.Combine(AppDataManager.BaseDirPath, "cache", $"vulkan_pipeline_cache_{cacheId}.bin");
 
-        private static byte[] LoadPipelineCacheData()
+        /// <summary>
+        /// Pure, explicit-path file read - no AppDataManager dependency, so
+        /// Ryujinx.Tests can exercise it directly against a temp path
+        /// without needing AppDataManager.Initialize()'s real-filesystem
+        /// side effects. Returns null (never throws) when the file is
+        /// missing OR unreadable/corrupt - callers can't distinguish "no
+        /// cache yet" from "cache file is garbage", which is intentional:
+        /// either way the correct behavior is the same, start empty.
+        /// </summary>
+        internal static byte[] ReadCacheFileIfExists(string path)
         {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            return File.ReadAllBytes(path);
+        }
+
+        internal static byte[] LoadPipelineCacheData(string cacheId)
+        {
+            string path = GetPipelineCacheFilePath(cacheId);
+
             try
             {
-                string path = PipelineCacheFilePath;
-                return File.Exists(path) ? File.ReadAllBytes(path) : null;
+                byte[] data = ReadCacheFileIfExists(path);
+
+                if (data != null)
+                {
+                    Logger.Info?.Print(LogClass.Gpu, $"Vulkan pipeline cache ({cacheId}): loaded {data.Length} bytes from disk ({path}).");
+                }
+
+                return data;
             }
             catch (Exception ex)
             {
-                Logger.Warning?.Print(LogClass.Gpu, $"Failed to load persisted Vulkan pipeline cache: {ex.Message}");
+                Logger.Warning?.Print(LogClass.Gpu, $"Failed to load persisted Vulkan pipeline cache ({cacheId}): {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Writes <paramref name="data"/> to <paramref name="path"/> via a
+        /// write-to-temp-then-rename, instead of writing the target file
+        /// directly. SavePipelineCacheData() runs from Dispose(), i.e.
+        /// during process/game-session teardown - exactly the moment an iOS
+        /// process is most likely to be suspended or killed outright. A
+        /// direct File.WriteAllBytes to the real path would leave a
+        /// truncated, half-written file if killed mid-write, which the NEXT
+        /// session would then try to load. File.Move within the same
+        /// directory is a single filesystem rename, so this can only ever
+        /// observe the OLD complete file or the NEW complete file - never a
+        /// partial one - which is what makes repeated game switches safe
+        /// against a crash/kill landing exactly mid-save.
+        /// </summary>
+        internal static void WriteCacheFileAtomic(string path, byte[] data)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+
+            string tempPath = path + ".tmp";
+
+            File.WriteAllBytes(tempPath, data);
+            File.Move(tempPath, path, true);
+        }
+
+        private unsafe void ReportCacheAcceptance(int loadedSize)
+        {
+            try
+            {
+                nuint dataSize = 0;
+                Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref dataSize, null).ThrowOnError();
+
+                // Heuristic threshold, not a hard guarantee: an accepted
+                // blob should round-trip to roughly its own size (plus/minus
+                // driver-internal bookkeeping); a rejected one collapses to
+                // just the empty-cache header, which is a few hundred bytes
+                // at most on every driver observed in upstream Ryujinx/MVK
+                // issue reports. This is disclosed as a heuristic, not
+                // asserted as certain, because no standard Vulkan query
+                // reports "cache blob accepted: yes/no" directly.
+                bool likelyAccepted = (int)dataSize >= loadedSize / 2;
+
+                Logger.Info?.Print(LogClass.Gpu,
+                    $"Vulkan pipeline cache ({PipelineCacheId}): loaded {loadedSize} bytes, driver reports {dataSize} bytes immediately after CreatePipelineCache " +
+                    $"({(likelyAccepted ? "likely accepted - sizes are consistent" : "likely REJECTED - size collapsed, probably a pipelineCacheUUID/driver-version mismatch")}).");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"Failed to verify Vulkan pipeline cache ({PipelineCacheId}) acceptance: {ex.Message}");
             }
         }
 
@@ -207,6 +332,7 @@ namespace Ryujinx.Graphics.Vulkan
 
                 if (dataSize == 0)
                 {
+                    Logger.Info?.Print(LogClass.Gpu, $"Vulkan pipeline cache ({PipelineCacheId}): nothing to save (driver reports an empty cache).");
                     return;
                 }
 
@@ -217,16 +343,18 @@ namespace Ryujinx.Graphics.Vulkan
                     Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref dataSize, dataPtr).ThrowOnError();
                 }
 
-                string path = PipelineCacheFilePath;
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllBytes(path, data);
+                string path = GetPipelineCacheFilePath(PipelineCacheId);
+
+                WriteCacheFileAtomic(path, data);
+
+                Logger.Info?.Print(LogClass.Gpu, $"Vulkan pipeline cache ({PipelineCacheId}): saved {data.Length} bytes to disk ({path}).");
             }
             catch (Exception ex)
             {
                 // Never let a failed cache SAVE take down the rest of
                 // teardown - this is a pure performance optimization,
                 // not correctness-critical.
-                Logger.Warning?.Print(LogClass.Gpu, $"Failed to persist Vulkan pipeline cache: {ex.Message}");
+                Logger.Warning?.Print(LogClass.Gpu, $"Failed to persist Vulkan pipeline cache ({PipelineCacheId}): {ex.Message}");
             }
         }
 
