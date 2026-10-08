@@ -171,6 +171,7 @@ namespace Ryujinx.Graphics.Vulkan.Effects
             Extent2D destination)
         {
             _framesAttempted++;
+            MetalFxNative.ReportFrameAttempt();
 
             try
             {
@@ -222,6 +223,7 @@ namespace Ryujinx.Graphics.Vulkan.Effects
                 if (!scaled)
                 {
                     _framesFallenBack++;
+                MetalFxNative.ReportFrameFallback();
                     Logger.Warning?.Print(LogClass.Gpu, "MetalFX Spatial failed to process this frame, falling back to a direct blit.");
 
                     TextureCopy.Blit(
@@ -240,7 +242,7 @@ namespace Ryujinx.Graphics.Vulkan.Effects
                 }
 
                 _framesSucceeded++;
-                MetalFxNative.ReportFrameProcessed();
+                MetalFxNative.ReportFrameProcessed(_inputBridge.Width, _inputBridge.Height, _outputBridge.Width, _outputBridge.Height);
 
                 // Metal's write into the output bridge is already
                 // guaranteed complete (MetalFxNative.Scale blocks on
@@ -263,6 +265,7 @@ namespace Ryujinx.Graphics.Vulkan.Effects
             catch (Exception ex)
             {
                 _framesFallenBack++;
+                MetalFxNative.ReportFrameFallback();
                 Logger.Warning?.Print(LogClass.Gpu, $"MetalFX Spatial threw while processing a frame, falling back to a direct blit: {ex.Message}");
 
                 // Whatever cbs currently holds at this point (the original
