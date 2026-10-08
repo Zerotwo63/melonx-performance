@@ -628,19 +628,54 @@ namespace Ryujinx.Headless.SDL2
 
 
         [UnmanagedCallersOnly(EntryPoint = "get_current_fps")]
-        public static unsafe int GetFPS() 
+        public static unsafe int GetFPS()
         {
             if (_window == null || _window.Device == null)
             {
-                return 0; 
+                return 0;
             }
 
             Switch Device = _window.Device;
 
-            int intValue = (int)Device.Statistics.GetGameFrameRate(); 
+            int intValue = (int)Device.Statistics.GetGameFrameRate();
 
             return intValue;
         }
+
+        /// <summary>
+        /// GetFifoPercent()/GetGameFrameTime() are real, already-computed
+        /// metrics on Device.Statistics (see Ryujinx.HLE.PerformanceStatistics)
+        /// - confirmed by reading that class directly, not assumed - but
+        /// were only ever consumed by the desktop UIs' window-title text
+        /// (Ryujinx/AppHost.cs, Ryujinx.Gtk3/RendererWidgetBase.cs,
+        /// Ryujinx.Headless.SDL2/WindowBase.cs's own debug title), never
+        /// exposed to iOS/Swift at all. FIFO% specifically answers "is the
+        /// GPU the bottleneck right now" (percentage of time the GPU
+        /// command processor was actually active, not idle waiting) -
+        /// directly actionable for telling CPU/JIT-bound frames apart
+        /// from GPU-bound ones, which plain FPS alone cannot distinguish.
+        /// </summary>
+        [UnmanagedCallersOnly(EntryPoint = "get_gpu_fifo_percent")]
+        public static unsafe float GetGpuFifoPercent()
+        {
+            if (_window == null || _window.Device == null)
+            {
+                return 0;
+            }
+
+            return (float)_window.Device.Statistics.GetFifoPercent();
+        }
+
+        // Deliberately NOT exposing GetGameFrameTime() here - it is a
+        // pure derivation of the SAME frame rate get_current_fps already
+        // reports (`1000 / frameRate`, see PerformanceStatistics.cs), not
+        // an independent measurement. BenchmarkManager.swift's own doc
+        // comment already explains exactly this (a previous round
+        // correctly declined to add it for this reason) - true P95/P99
+        // frametime needs real per-frame intervals, which
+        // BenchmarkManager already collects via CADisplayLink
+        // (frameIntervals), not a re-derivation of the engine's smoothed
+        // FPS average.
 
         [UnmanagedCallersOnly(EntryPoint = "set_game_volume")]
         public static unsafe void SetGameVolume(float volume) {

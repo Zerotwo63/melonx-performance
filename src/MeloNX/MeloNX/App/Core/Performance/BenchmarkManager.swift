@@ -25,14 +25,19 @@ import UIKit
 /// these don't change mid-run under manual testing, but would need
 /// revisiting if a run spans an AutoPerformanceManager-driven change.
 ///
-/// No CPU/GPU frame time (in milliseconds) field exists here — see
-/// PERFORMANCE_FORK.md's FSR investigation for why: the only
-/// per-frame-time-like figure the native core exposes
-/// (`PerformanceStatistics.GetGameFrameTime()`) is a pure derivation of
-/// the same frame rate RyujinxBridge.currentFPS already reports
-/// (`1000 / frameRate`), not an independent measurement, so adding it
-/// would just duplicate the FPS figures already here under a different
-/// name. Not simulating a number that doesn't actually exist.
+/// frameTimeP95Ms/frameTimeP99Ms (added this round) are real percentiles
+/// of actual per-frame CADisplayLink intervals (already collected below
+/// for worstFrameJitter), NOT a derivation of averageFPS -
+/// `PerformanceStatistics.GetGameFrameTime()` on the native side IS
+/// exactly that kind of redundant derivation (`1000 / frameRate`, the
+/// SAME frame rate RyujinxBridge.currentFPS already reports) and is
+/// deliberately still not exposed here for that reason - a previous
+/// round correctly identified it would just duplicate the FPS figures
+/// already here under a different name, and that reasoning still holds.
+/// gpuFifoPercent (also added this round, via the newly-exposed
+/// get_gpu_fifo_percent) IS a genuinely independent measurement -
+/// percentage of time the GPU command processor was actually active,
+/// not derivable from FPS alone.
 @MainActor
 final class BenchmarkManager: NSObject, ObservableObject {
     struct Result {
@@ -45,6 +50,22 @@ final class BenchmarkManager: NSObject, ObservableObject {
         let averageMemory: UInt64
         let peakMemory: UInt64
         let worstFrameJitter: TimeInterval
+        // Real per-frame intervals from CADisplayLink (frameIntervals,
+        // already collected below for worstFrameJitter) - in
+        // milliseconds, sorted ascending so P95/P99 are a real
+        // percentile of actual frame-to-frame timing, NOT a derivation
+        // of averageFPS (see this file's own top doc comment for why
+        // that distinction matters - GetGameFrameTime() on the native
+        // side is exactly that kind of redundant derivation, which is
+        // why it still isn't used here).
+        let frameTimeP95Ms: Double
+        let frameTimeP99Ms: Double
+        // Real, independent metric (Ryujinx.HLE.PerformanceStatistics.GetFifoPercent(),
+        // newly exposed this round via get_gpu_fifo_percent) - percentage
+        // of time the GPU command processor was actually active over
+        // the run, snapshotted at stop() like resolutionScale/thermalState
+        // below (not a time series, same caveat applies).
+        let gpuFifoPercent: Float
         let resolutionScale: Double
         let activeScalingFilter: ScalingFilter
         let thermalState: ProcessInfo.ThermalState
@@ -110,6 +131,21 @@ final class BenchmarkManager: NSObject, ObservableObject {
         let averageInterval = frameIntervals.isEmpty ? 0 : frameIntervals.reduce(0, +) / Double(frameIntervals.count)
         let worstJitter = frameIntervals.map { abs($0 - averageInterval) }.max() ?? 0
 
+        // Real percentiles of actual frame-to-frame display timing
+        // (CADisplayLink.targetTimestamp deltas, already collected in
+        // tick(_:) below) - converted to milliseconds since that is the
+        // conventional unit for frametime reporting. Sorted ascending;
+        // P95/P99 take the value at the 95th/99th percentile INDEX, the
+        // same "worst tail" convention frame-pacing tools use (higher
+        // index = slower/worse frame here, since interval is time, not
+        // rate).
+        let sortedIntervalsMs = frameIntervals.sorted().map { $0 * 1000 }
+        func percentile(_ p: Double) -> Double {
+            guard !sortedIntervalsMs.isEmpty else { return 0 }
+            let index = min(sortedIntervalsMs.count - 1, Int(Double(sortedIntervalsMs.count) * p))
+            return sortedIntervalsMs[index]
+        }
+
         let result = Result(
             duration: Date().timeIntervalSince(startedAt),
             sampleCount: fpsSamples.count,
@@ -120,6 +156,9 @@ final class BenchmarkManager: NSObject, ObservableObject {
             averageMemory: memorySamples.reduce(0, +) / UInt64(memoryCount),
             peakMemory: memorySamples.max() ?? 0,
             worstFrameJitter: worstJitter,
+            frameTimeP95Ms: percentile(0.95),
+            frameTimeP99Ms: percentile(0.99),
+            gpuFifoPercent: RyujinxBridge.gpuFifoPercent,
             resolutionScale: Ryujinx.shared.config?.resscale ?? 0,
             activeScalingFilter: Ryujinx.shared.config?.scalingFilter ?? .bilinear,
             thermalState: ThermalGovernor.shared.currentState

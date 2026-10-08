@@ -77,6 +77,17 @@ final class RyujinxBridge {
     static var currentFPS: Int {
         Int(SN_get_current_fps())
     }
+
+    /// Real, already-computed by the core (Ryujinx.HLE.PerformanceStatistics.GetFifoPercent())
+    /// - percentage of time the GPU command processor was actually
+    /// active (not idle waiting) over the last ~750ms window. Lets a
+    /// performance overlay tell "CPU/JIT-bound" apart from "GPU-bound"
+    /// frames, which raw FPS alone cannot distinguish. 0 if unmeasurable
+    /// (no window/device yet).
+    static var gpuFifoPercent: Float {
+        SN_get_gpu_fifo_percent()
+    }
+
     
     static var currentVolume: Float {
         get {
@@ -206,6 +217,9 @@ func SN_update_settings_external(_ argc: Int32, _ argv: UnsafeMutablePointer<Uns
 
 @_silgen_name("get_current_fps")
 func SN_get_current_fps() -> Int32
+
+@_silgen_name("get_gpu_fifo_percent")
+func SN_get_gpu_fifo_percent() -> Float
 
 @_silgen_name("get_game_volume")
 func SN_get_game_volume() -> Float

@@ -1,8 +1,11 @@
+using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -102,12 +105,47 @@ namespace Ryujinx.Graphics.Vulkan
             AutoFlush = new AutoFlushCounter(gd);
             EndRenderPassDelegate = EndRenderPass;
 
-            var pipelineCacheCreateInfo = new PipelineCacheCreateInfo
-            {
-                SType = StructureType.PipelineCacheCreateInfo,
-            };
+            // Real, confirmed-by-code-reading gap (previous round's
+            // audit): this used to always create an EMPTY pipeline
+            // cache (no InitialData) and never saved its contents back
+            // to disk before destroying it in Dispose() below - every
+            // single pipeline-state object (on top of already-compiled
+            // shaders, which DO have a real, working disk cache - see
+            // Ryujinx.Graphics.Gpu.Shader.ShaderCache) was rebuilt from
+            // scratch on every game launch. Loading a previously-saved
+            // blob here is purely additive and fails safe: per the
+            // Vulkan spec, a driver that doesn't recognize/trust a
+            // cache blob (wrong header, different driver/device UUID,
+            // corrupted) just ignores it and starts with an empty
+            // cache - the same behavior this already had before, never
+            // an error.
+            byte[] initialCacheData = LoadPipelineCacheData();
 
-            gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
+            PipelineCacheCreateInfo pipelineCacheCreateInfo;
+
+            if (initialCacheData != null && initialCacheData.Length > 0)
+            {
+                fixed (byte* initialDataPtr = initialCacheData)
+                {
+                    pipelineCacheCreateInfo = new PipelineCacheCreateInfo
+                    {
+                        SType = StructureType.PipelineCacheCreateInfo,
+                        InitialDataSize = (nuint)initialCacheData.Length,
+                        PInitialData = initialDataPtr,
+                    };
+
+                    gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
+                }
+            }
+            else
+            {
+                pipelineCacheCreateInfo = new PipelineCacheCreateInfo
+                {
+                    SType = StructureType.PipelineCacheCreateInfo,
+                };
+
+                gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
+            }
 
             _descriptorSetUpdater = new DescriptorSetUpdater(gd, device);
             _vertexBufferUpdater = new VertexBufferUpdater(gd);
@@ -127,6 +165,69 @@ namespace Ryujinx.Graphics.Vulkan
             _storedBlend = new PipelineColorBlendAttachmentState[Constants.MaxRenderTargets];
 
             _newState.Initialize();
+        }
+
+        /// <summary>
+        /// Path for the persisted VkPipelineCache blob - deliberately
+        /// NOT per-title (unlike Ryujinx.Graphics.Gpu.Shader.ShaderCache's
+        /// per-title shader disk cache, which this project cannot
+        /// reference from here - Ryujinx.Graphics.Vulkan is a lower-level
+        /// GAL backend with no project reference to Ryujinx.Graphics.Gpu).
+        /// A single cache keyed by the driver's own pipelineCacheUUID
+        /// (embedded in the blob header per the Vulkan spec, verified by
+        /// the driver itself on load) is architecturally correct here:
+        /// pipeline STATE objects are not inherently game-specific the
+        /// way compiled shaders are, and the driver already rejects a
+        /// blob from a different device/driver version safely on its
+        /// own.
+        /// </summary>
+        private static string PipelineCacheFilePath =>
+            Path.Combine(AppDataManager.BaseDirPath, "cache", "vulkan_pipeline_cache.bin");
+
+        private static byte[] LoadPipelineCacheData()
+        {
+            try
+            {
+                string path = PipelineCacheFilePath;
+                return File.Exists(path) ? File.ReadAllBytes(path) : null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"Failed to load persisted Vulkan pipeline cache: {ex.Message}");
+                return null;
+            }
+        }
+
+        private unsafe void SavePipelineCacheData()
+        {
+            try
+            {
+                nuint dataSize = 0;
+                Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref dataSize, null).ThrowOnError();
+
+                if (dataSize == 0)
+                {
+                    return;
+                }
+
+                byte[] data = new byte[dataSize];
+
+                fixed (byte* dataPtr = data)
+                {
+                    Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref dataSize, dataPtr).ThrowOnError();
+                }
+
+                string path = PipelineCacheFilePath;
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllBytes(path, data);
+            }
+            catch (Exception ex)
+            {
+                // Never let a failed cache SAVE take down the rest of
+                // teardown - this is a pure performance optimization,
+                // not correctness-critical.
+                Logger.Warning?.Print(LogClass.Gpu, $"Failed to persist Vulkan pipeline cache: {ex.Message}");
+            }
         }
 
         public void Initialize()
@@ -1794,6 +1895,8 @@ namespace Ryujinx.Graphics.Vulkan
                 }
 
                 Pipeline?.Dispose();
+
+                SavePipelineCacheData();
 
                 unsafe
                 {
