@@ -59,6 +59,16 @@ final class FramePacingMonitor: NSObject, ObservableObject {
         super.init()
     }
 
+    func reset() {
+        displayLink?.invalidate()
+        displayLink = nil
+        isRunning = false
+        startedAt = nil
+        lastTimestamp = nil
+        intervals = []
+        lastResult = nil
+    }
+
     func start() {
         guard displayLink == nil else { return }
 
