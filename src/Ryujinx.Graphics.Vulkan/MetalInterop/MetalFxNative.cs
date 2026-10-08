@@ -37,7 +37,16 @@ namespace Ryujinx.Graphics.Vulkan.MetalInterop
             int outputHeight);
 
         [DllImport("__Internal", EntryPoint = "metalfx_report_frame_processed")]
-        private static extern void metalfx_report_frame_processed();
+        private static extern void metalfx_report_frame_processed(int sourceWidth, int sourceHeight, int outputWidth, int outputHeight);
+
+        [DllImport("__Internal", EntryPoint = "metalfx_report_frame_attempt")]
+        private static extern void metalfx_report_frame_attempt();
+
+        [DllImport("__Internal", EntryPoint = "metalfx_report_frame_fallback")]
+        private static extern void metalfx_report_frame_fallback();
+
+        [DllImport("__Internal", EntryPoint = "metalfx_set_effective_filter")]
+        private static extern void metalfx_set_effective_filter(int code);
 
         /// <summary>
         /// True only if MTLFXSpatialScalerDescriptor.supported is true for
@@ -82,16 +91,34 @@ namespace Ryujinx.Graphics.Vulkan.MetalInterop
             }
         }
 
-        public static void ReportFrameProcessed()
+        // All telemetry calls are diagnostics-only. Never throw from a
+        // missing Swift symbol or let telemetry break an otherwise valid frame.
+        public static void ReportFrameAttempt()
+        {
+            try { metalfx_report_frame_attempt(); } catch { }
+        }
+
+        public static void ReportFrameFallback()
+        {
+            try { metalfx_report_frame_fallback(); } catch { }
+        }
+
+        // Codes are defined alongside the Swift exporter; 5 means a
+        // MetalFX filter was constructed, NOT that it processed a frame.
+        public static void ReportEffectiveFilter(int code)
+        {
+            try { metalfx_set_effective_filter(code); } catch { }
+        }
+
+        public static void ReportFrameProcessed(int sourceWidth, int sourceHeight, int outputWidth, int outputHeight)
         {
             try
             {
-                metalfx_report_frame_processed();
+                metalfx_report_frame_processed(sourceWidth, sourceHeight, outputWidth, outputHeight);
             }
             catch
             {
-                // Diagnostics-only call - never let a failure here affect
-                // the actual frame that already succeeded.
+                // Metrics never affect the frame that already succeeded.
             }
         }
     }
