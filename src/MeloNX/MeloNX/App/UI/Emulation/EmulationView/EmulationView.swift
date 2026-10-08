@@ -48,9 +48,7 @@ struct EmulationView: View {
                             Air.play(AnyView(MetalView().ignoresSafeArea().edgesIgnoringSafeArea(.all)))
                         }
                     }
-                    .overlay(alignment: .top) {
-                        hudView
-                    }
+
             } else {
                 // The Emulation View
                 if ryujinx.aspectRatio == .stretched || (ryujinx.aspectRatio == .fixed4x3 && isScreenAspectRatio(4, 3)) {
@@ -58,20 +56,12 @@ struct EmulationView: View {
                         .allowsHitTesting(true)
                         .ignoresSafeArea(.all)
                         .edgesIgnoringSafeArea(.all)
-                        .overlay(alignment: .top) {
-                            hudView
-                        }
+
                 } else {
                     MetalViewContainer(isPortrait: $isPortrait) {
-                        hudView
+                        EmptyView()
                     }
                         .allowsHitTesting(true)
-                        .if(!isPortrait) {
-                            $0
-                                .overlay(alignment: .top) {
-                                    self.hudView
-                                }
-                        }
                 }
             }
             
@@ -94,6 +84,11 @@ struct EmulationView: View {
                 }
                 .allowsHitTesting(false)
             }
+        }
+        // The HUD is above the virtual controller, not embedded inside
+        // the Metal surface below it. Only its own controls intercept taps.
+        .overlay(alignment: .top) {
+            hudView
         }
         .overlay(alignment: .topTrailing) {
             if ProcessInfo.processInfo.isLowPowerModeEnabled {
@@ -174,9 +169,8 @@ struct EmulationView: View {
             
             Spacer()
             
-            if performacehud, getenv("MTL_HUD_ENABLED").flatMap({ String(cString: $0) }) != "1" {
+            if performacehud {
                 PerformanceOverlayView()
-                    .opacity(controllerOpacity)
                     .padding(5)
             }
         }
