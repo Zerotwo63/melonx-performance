@@ -139,7 +139,11 @@ namespace Ryujinx.Graphics.Vulkan
             ExportMetalObjectCreateInfoEXT exportInfo = new()
             {
                 SType = StructureType.ExportMetalObjectCreateInfoExt,
-                ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalTextureBitExt,
+                // CI build (commit 02a81dd15) flagged the long-form name as
+                // CS0618 obsolete - Silk.NET renamed it to TextureBitExt in
+                // this pinned version. Confirmed by the actual compiler,
+                // not guessed.
+                ExportObjectType = ExportMetalObjectTypeFlagsEXT.TextureBitExt,
             };
 
             if (exportableToMetal)
