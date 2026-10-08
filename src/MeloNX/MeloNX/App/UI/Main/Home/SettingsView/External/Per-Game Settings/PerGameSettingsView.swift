@@ -353,6 +353,16 @@ struct PerGameSettingsView: View {
                             }
                         }
                     }
+
+                    // FASE 3 POC disclosure - see SettingsView.swift's
+                    // identical block for the full reasoning. Kept in sync
+                    // rather than factored out since both screens already
+                    // duplicate the FSR slider block above this way.
+                    if configBinding(\.scalingFilter).wrappedValue == .metalFxSpatial {
+                        Text("Experimental - falls back to Bilinear automatically if unavailable or if a frame fails to process.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
 

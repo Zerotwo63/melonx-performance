@@ -466,10 +466,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (_scalingFilter != null)
             {
-                _scalingFilter.Run(
+                cbs = _scalingFilter.Run(
                     view,
                     cbs,
                     _swapchainImageViews[nextImage].GetImageViewForAttachment(),
+                    swapchainImage,
                     _format,
                     _width,
                     _height,
@@ -627,6 +628,35 @@ namespace Ryujinx.Graphics.Vulkan
                         {
                             _scalingFilter?.Dispose();
                             _scalingFilter = new AreaScalingFilter(_gd, _device);
+                        }
+                        break;
+                    case ScalingFilter.MetalFxSpatial:
+                        // FASE 3 POC, requirement #6: automatic fallback.
+                        // MetalFxSpatialScalingFilter's constructor throws
+                        // if VK_EXT_metal_objects wasn't enabled (checked
+                        // via _gd.SupportsMetalObjectsExport) or if the
+                        // native Swift/MetalFX bridge reports it's
+                        // unavailable (iOS <16, no MetalFX-capable GPU,
+                        // etc). Catching here means selecting this option
+                        // on an incompatible device/OS silently falls back
+                        // to bilinear (the same "no filter" path as the
+                        // Bilinear case above) instead of crashing or
+                        // leaving a broken state - exactly the fallback
+                        // this phase's requirements asked for.
+                        if (_scalingFilter is not MetalFxSpatialScalingFilter)
+                        {
+                            _scalingFilter?.Dispose();
+
+                            try
+                            {
+                                _scalingFilter = new MetalFxSpatialScalingFilter(_gd, _device);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Warning?.Print(LogClass.Gpu, $"MetalFX Spatial unavailable, falling back to bilinear: {ex.Message}");
+                                _scalingFilter = null;
+                                _isLinear = true;
+                            }
                         }
                         break;
                 }

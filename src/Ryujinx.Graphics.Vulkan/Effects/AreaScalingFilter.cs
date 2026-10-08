@@ -56,10 +56,11 @@ namespace Ryujinx.Graphics.Vulkan.Effects
             }, scalingResourceLayout);
         }
 
-        public void Run(
+        public CommandBufferScoped Run(
             TextureView view,
             CommandBufferScoped cbs,
             Auto<DisposableImageView> destinationTexture,
+            Image destinationImage,
             Format format,
             int width,
             int height,
@@ -96,6 +97,8 @@ namespace Ryujinx.Graphics.Vulkan.Effects
             _pipeline.ComputeBarrier();
 
             _pipeline.Finish();
+
+            return cbs;
         }
     }
 }

@@ -504,6 +504,24 @@ struct SettingsViewNew: View {
                         }
                     }
                 }
+
+                // FASE 3 POC disclosure (requirement #5/#6): this option is
+                // real (VK_EXT_metal_objects export + a genuine
+                // MTLFXSpatialScaler pass, not a relabeled FSR/bilinear
+                // call), but has not been verified on a real device in
+                // this environment - only CI-compiled. If unavailable or a
+                // frame fails, it silently falls back to Bilinear
+                // (MetalFxSpatialScalingFilter.cs) rather than crashing.
+                if config.scalingFilter.wrappedValue == .metalFxSpatial {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Experimental - falls back to Bilinear automatically if unavailable or if a frame fails to process.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("Frames processed by MetalFX: \(RyujinxBridge.metalFxFramesProcessed)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         }
     }

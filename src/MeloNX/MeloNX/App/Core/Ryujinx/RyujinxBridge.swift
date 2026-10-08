@@ -95,6 +95,16 @@ final class RyujinxBridge {
         SN_get_gpu_fifo_percent()
     }
 
+    /// FASE 3 POC diagnostics (requirement #8): real count of frames
+    /// MetalFxSpatialScalingFilter.cs confirmed MetalFX actually processed
+    /// (incremented only after a successful metalfx_scale() call, from
+    /// Metal/MetalFxSpatialScaler.swift) - not just "the filter was
+    /// constructed". Stays 0 whenever MetalFX Spatial isn't the active
+    /// scaling filter.
+    static var metalFxFramesProcessed: Int64 {
+        SN_metalfx_frames_processed()
+    }
+
     
     static var currentVolume: Float {
         get {
@@ -227,6 +237,9 @@ func SN_get_current_fps() -> Int32
 
 @_silgen_name("get_gpu_fifo_percent")
 func SN_get_gpu_fifo_percent() -> Float
+
+@_silgen_name("metalfx_frames_processed")
+func SN_metalfx_frames_processed() -> Int64
 
 @_silgen_name("get_game_volume")
 func SN_get_game_volume() -> Float

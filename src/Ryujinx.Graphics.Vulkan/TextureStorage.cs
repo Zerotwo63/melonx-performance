@@ -71,7 +71,8 @@ namespace Ryujinx.Graphics.Vulkan
             VulkanRenderer gd,
             Device device,
             TextureCreateInfo info,
-            Auto<MemoryAllocation> foreignAllocation = null)
+            Auto<MemoryAllocation> foreignAllocation = null,
+            bool exportableToMetal = false)
         {
             _gd = gd;
             _device = device;
@@ -124,6 +125,27 @@ namespace Ryujinx.Graphics.Vulkan
                 InitialLayout = ImageLayout.Undefined,
                 Flags = flags,
             };
+
+            // FASE 3 MetalFX Spatial POC: VK_EXT_metal_objects requires an
+            // image be created WITH this struct chained in order to later
+            // export its backing MTLTexture via vkExportMetalObjectsEXT -
+            // it cannot be retrofitted onto an already-created image. Only
+            // ever set by Effects/MetalFxSpatialScalingFilter.cs's own
+            // dedicated bridge textures (never by the stable rendering
+            // path, which always uses the default exportableToMetal:
+            // false), and only takes effect when gd.SupportsMetalObjectsExport
+            // is true (checked by the caller before passing true here) -
+            // every existing call site is completely unaffected.
+            ExportMetalObjectCreateInfoEXT exportInfo = new()
+            {
+                SType = StructureType.ExportMetalObjectCreateInfoExt,
+                ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalTextureBitExt,
+            };
+
+            if (exportableToMetal)
+            {
+                imageCreateInfo.PNext = &exportInfo;
+            }
 
             gd.Api.CreateImage(device, in imageCreateInfo, null, out _image).ThrowOnError();
 

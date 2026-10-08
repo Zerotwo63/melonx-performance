@@ -30,6 +30,14 @@ namespace Ryujinx.Graphics.Vulkan
         internal FormatCapabilities FormatCapabilities { get; private set; }
         internal HardwareCapabilities Capabilities;
 
+        // FASE 3 MetalFX Spatial POC: true only when VK_EXT_metal_objects
+        // was both available AND actually enabled at device creation -
+        // TryGetDeviceExtension below only succeeds in that case, so this
+        // is a direct, non-guessed signal (not inferred from
+        // IsDeviceExtensionPresent, which only proves hardware support, not
+        // that the extension was turned on).
+        internal bool SupportsMetalObjectsExport => MetalObjectsApi != null;
+
         internal Vk Api { get; private set; }
         internal KhrSurface SurfaceApi { get; private set; }
         internal KhrSwapchain SwapchainApi { get; private set; }
@@ -39,6 +47,7 @@ namespace Ryujinx.Graphics.Vulkan
         internal ExtTransformFeedback TransformFeedbackApi { get; private set; }
         internal KhrDrawIndirectCount DrawIndirectCountApi { get; private set; }
         internal ExtAttachmentFeedbackLoopDynamicState DynamicFeedbackLoopApi { get; private set; }
+        internal ExtMetalObjects MetalObjectsApi { get; private set; }
 
         internal uint QueueFamilyIndex { get; private set; }
         internal Queue Queue { get; private set; }
@@ -153,6 +162,11 @@ namespace Ryujinx.Graphics.Vulkan
             if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtAttachmentFeedbackLoopDynamicState dynamicFeedbackLoopApi))
             {
                 DynamicFeedbackLoopApi = dynamicFeedbackLoopApi;
+            }
+
+            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtMetalObjects metalObjectsApi))
+            {
+                MetalObjectsApi = metalObjectsApi;
             }
 
             if (maxQueueCount >= 2)

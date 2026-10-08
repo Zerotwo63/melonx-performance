@@ -15,20 +15,20 @@ import MetalFX
 /// guard was dead weight — that assumption was wrong for this specific
 /// pair of symbols, unlike the iOS 17.4 case elsewhere in this fork).
 ///
-/// This is informational only — it does not perform any upscaling.
-/// Genuine MetalFX integration needs to intercept the rendered frame
-/// *before* it's presented, replacing the implicit bilinear scale Core
-/// Animation already does when a CAMetalLayer's drawable size (set by
-/// --resolution-scale) differs from its bounds. That interception point
-/// lives entirely inside the native Vulkan/MoltenVK swapchain code
-/// (C#/.NET, outside this tree) — confirmed by reading MeloMTKView.swift
-/// and MetalViewContainer.swift, neither of which implements
-/// MTKViewDelegate/draw(in:) or touches a frame at all; MeloMTKView is
-/// purely touch-input handling, and RyujinxBridge.setNativeWindow(_:)
-/// hands the native core the CAMetalLayer directly. There is no Swift-side
-/// hook to attach an MTLFXSpatialScaler/MTLFXTemporalScaler pass to.
-/// MetalFX.framework wasn't linked anywhere in the project before this
-/// file either (checked project.pbxproj).
+/// UPDATE (FASE 3 round): the claim below that there is "no Swift-side
+/// hook" is now OUTDATED — a real one exists via VK_EXT_metal_objects
+/// (confirmed genuinely implemented in the bundled MoltenVK binary and
+/// bound by Silk.NET 2.21.0 this round, see
+/// Ryujinx.Graphics.Vulkan/Effects/MetalFxSpatialScalingFilter.cs). This
+/// struct's `current()` is now reused directly by
+/// Metal/MetalFxSpatialScaler.swift's metalfx_is_available() as the
+/// device/OS capability gate for that path. Kept rather than duplicated.
+///
+/// Still accurate: `current()` alone is informational and performs no
+/// upscaling by itself — MeloMTKView/MetalViewContainer remain
+/// touch-input-only, and the actual interop happens entirely on the
+/// native (C#/Vulkan) side exporting a VkImage's backing MTLTexture, not
+/// through a Core Animation/MTKView draw hook.
 enum MetalFXCapabilityInspector {
     struct Capability {
         let supportsSpatialScaling: Bool

@@ -50,6 +50,17 @@ struct PerformanceOverlayView: View  {
             Text(String(format: "Frametime P95 %.1f / P99 %.1fms · FIFO thread %.0f%%", result.frameTimeP95Ms, result.frameTimeP99Ms, result.fifoThreadBusyPercent))
                 .foregroundStyle(.white)
                 .font(.caption2)
+
+            // Requirement #8 (FASE 3 MetalFX POC): shows the REAL count of
+            // frames MetalFX confirmed it processed (incremented natively
+            // only after a successful scale), not just "the filter is
+            // selected" - a selected-but-silently-falling-back filter
+            // would show 0 here even while the picker says MetalFX Spatial.
+            if result.activeScalingFilter == .metalFxSpatial {
+                Text("MetalFX frames processed: \(RyujinxBridge.metalFxFramesProcessed)")
+                    .foregroundStyle(.white)
+                    .font(.caption2)
+            }
         }
     }
 

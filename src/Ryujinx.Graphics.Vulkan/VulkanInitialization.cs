@@ -46,6 +46,15 @@ namespace Ryujinx.Graphics.Vulkan
             "VK_KHR_maintenance2",
             "VK_EXT_attachment_feedback_loop_layout",
             "VK_EXT_attachment_feedback_loop_dynamic_state",
+            // FASE 3 MetalFX Spatial POC - confirmed genuinely implemented
+            // (not just declared) in the real bundled MoltenVK binary by
+            // direct symbol inspection this round (vkExportMetalObjectsEXT,
+            // real VkImage-plane validation code, MTLSharedEvent-backed
+            // semaphore wiring). Self-gating like every other entry in this
+            // list: silently excluded wherever the driver doesn't report it
+            // (older MoltenVK, non-Apple backends), so this is safe to add
+            // unconditionally.
+            "VK_EXT_metal_objects",
         };
 
         private static readonly string[] _requiredExtensions = {
