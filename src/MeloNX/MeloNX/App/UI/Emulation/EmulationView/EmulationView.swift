@@ -213,6 +213,19 @@ struct EmulationView: View {
             }
         }
         
+        Button {
+            performacehud.toggle()
+        } label: {
+            Label(performacehud ? "Hide Performance HUD" : "Show Performance HUD",
+                  systemImage: "speedometer")
+        }
+
+        Button {
+            UIPasteboard.general.string = RyujinxBridge.metalFxSnapshot.diagnosticText
+        } label: {
+            Label("Copy MetalFX Diagnostics", systemImage: "doc.on.doc")
+        }
+
         //  OrientationManager.lockOrientation(.landscape, rotateTo: .landscapeRight)
         
         if UIDevice.current.userInterfaceIdiom == .phone {
